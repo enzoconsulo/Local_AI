@@ -327,6 +327,7 @@ def chamar_motor_imagem(endpoint, nome_motor, imagens_referencia_data_uris, prom
         "prompt": prompt,
         "output_format": "jpeg",
         "num_images": num_imagens,
+        "seed": int(time.time() * 1000) % 1000000000, # Garante que a Fal.ai nunca use cache de requisição antiga
     }
 
     if "nano-banana" in endpoint:
@@ -693,8 +694,8 @@ if st.session_state.motor_ia_pronto:
                                     if not prompt_ok:
                                         st.warning("⚠️ Não foi possível garantir 100% que o prompt está só em inglês — revise antes de aprovar.")
 
-                                    st.write("⚡ 2. Usando a ÚLTIMA versão aprovada como referência (edição multi-turno)...")
-                                    data_uri_ref = construir_data_uri(st.session_state.imagem_referencia_atual)
+                                    st.write("⚡ 2. Usando o canvas original isolado como referência...")
+                                    data_uri_ref = construir_data_uri(st.session_state.img_recortada_bytes)
 
                                     st.write(f"⚡ 3. Executando Re-Edição com o {nome_motor_valor}...")
                                     candidatos, descricao = chamar_motor_imagem(
