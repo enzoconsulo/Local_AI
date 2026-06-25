@@ -1,5 +1,5 @@
 """
-ECC Studio Vision v14.0 — Inglês Garantido + Performance + Multi-Provedor Grátis
+ECC Studio Vision v15.0 — Multi-Upload + Canvas Dinâmico
 =================================================================================
 NOVIDADES (Jun/2026):
 
@@ -72,7 +72,7 @@ ROOT_DIR = CURRENT_DIR.parent # Aponta para a pasta raiz (IA_Hibrida)
 
 load_dotenv(dotenv_path=ROOT_DIR / "CHAVES.env")
 
-st.set_page_config(page_title="ECC Studio Vision v14.0", page_icon="🏭", layout="wide")
+st.set_page_config(page_title="ECC Studio Vision v15.0", page_icon="🏭", layout="wide")
 
 FAL_KEY = os.getenv("FAL_KEY")
 
@@ -186,33 +186,40 @@ def _criar_sessao_http():
 
 SESSAO_HTTP = _criar_sessao_http()
 
-# ================= 3. ENGENHARIA DE CANVAS =================
-def preparar_canvas_perfeito(imagem_bytes, estilo, neutralizar_cor=False):
-    resultado_bytes = remove(imagem_bytes, session=obter_sessao_rembg())
-    img_recortada = Image.open(io.BytesIO(resultado_bytes)).convert("RGBA")
-
-    if neutralizar_cor:
-        _, _, _, a = img_recortada.split()
-        gray = img_recortada.convert('L')
-        img_recortada = Image.merge('RGBA', (gray, gray, gray, a))
-
+# ================= 3. ENGENHARIA DE CANVAS (MULTI-UPLOAD MODIFICADO) =================
+def preparar_canvas_perfeito(lista_bytes_imagens, estilo, neutralizar_cor=False):
     tamanho_canvas = 1536
+    canvas = Image.new("RGBA", (tamanho_canvas, tamanho_canvas), (255, 255, 255, 255))
+    num_imagens = len(lista_bytes_imagens)
+    
+    largura_slot = tamanho_canvas // num_imagens
     fator_escala = 0.78 if estilo == "Catálogo (Fundo Branco Puro)" else 0.42
 
-    w, h = img_recortada.size
-    maior_lado = max(w, h)
-    proporcao = (tamanho_canvas * fator_escala) / maior_lado
-    novo_w, novo_h = int(w * proporcao), int(h * proporcao)
+    for idx, imagem_bytes in enumerate(lista_bytes_imagens):
+        resultado_bytes = remove(imagem_bytes, session=obter_sessao_rembg())
+        img_recortada = Image.open(io.BytesIO(resultado_bytes)).convert("RGBA")
 
-    img_redimensionada = img_recortada.resize((novo_w, novo_h), Image.Resampling.LANCZOS)
+        if neutralizar_cor:
+            _, _, _, a = img_recortada.split()
+            gray = img_recortada.convert('L')
+            img_recortada = Image.merge('RGBA', (gray, gray, gray, a))
 
-    canvas = Image.new("RGBA", (tamanho_canvas, tamanho_canvas), (255, 255, 255, 255))
+        w, h = img_recortada.size
+        maior_lado = max(w, h)
+        
+        limite_dimensao = min(largura_slot, tamanho_canvas)
+        proporcao = (limite_dimensao * fator_escala) / maior_lado
+        novo_w, novo_h = int(w * proporcao), int(h * proporcao)
 
-    pos_x = (tamanho_canvas - novo_w) // 2
-    deslocamento_vertical = int(tamanho_canvas * 0.12) if estilo == "Ambiente (Cenário Realista)" else 0
-    pos_y = (tamanho_canvas - novo_h) // 2 + deslocamento_vertical
+        img_redimensionada = img_recortada.resize((novo_w, novo_h), Image.Resampling.LANCZOS)
 
-    canvas.paste(img_redimensionada, (pos_x, pos_y), img_redimensionada)
+        centro_x_slot = (idx * largura_slot) + (largura_slot // 2)
+        pos_x = centro_x_slot - (novo_w // 2)
+        
+        deslocamento_vertical = int(tamanho_canvas * 0.12) if estilo == "Ambiente (Cenário Realista)" else 0
+        pos_y = (tamanho_canvas - novo_h) // 2 + deslocamento_vertical
+
+        canvas.paste(img_redimensionada, (pos_x, pos_y), img_redimensionada)
 
     buffer = io.BytesIO()
     canvas.convert("RGB").save(buffer, format="JPEG", quality=92)
@@ -259,10 +266,10 @@ DIRETRIZES_SISTEMA = """You are an elite E-commerce Art Director writing EDIT IN
 MISSION: Translate the user's messy Portuguese request into a precise English editing instruction.
 CRITICAL RULES:
 1. LANGUAGE: the entire output must be 100% in English, with zero Portuguese words, accents, or slang surviving — including the product name itself. Don't just transliterate the product name: explain in plain English what the object physically is, what it looks like, and what it is used for (e.g., if a regional term is used, describe its physical characteristics and materials instead of just translating the word).
-2. GEOMETRY LOCK: make clear that the exact shape, proportions, and structural geometry of the 3D-printed object in the reference photo must stay unchanged — only its color, material, finish, and the surrounding scene may be altered.
-3. MATERIAL OVERRIDE: make clear that the object's final color/material must match exactly what was requested, overriding whatever color/material the reference photo currently shows, while its shape and geometry stay identical. Phrase this naturally and vary your wording — never reuse the exact same sentence template every time.
-4. INTERSECTION / SPATIAL RULE: if the product is a holder, mount, or stand that must interact with another object (like a cup, glass, or bottle), make clear how they physically interact (e.g., resting naturally, passing through the hollow center), respecting realistic spatial occlusion. Do not assume the object is a stainless steel thermos unless explicitly requested by the user.
-5. SCENE ISOLATION: never mix backgrounds. For a realistic scene, describe it fully and ask for the product to be relit to match that scene's lighting and shadows. For a catalog shot, make clear the background must become a plain, fully isolated, pure white studio backdrop with nothing else in frame.
+2. MULTI-ITEM SPATIAL LAYOUT: If the user lists multiple products, they have been placed side-by-side in the reference image from left to right. Explicitly describe their positions in your instruction (e.g., 'On the left, there is a [Product A] made of [Material]. On the right, there is a [Product B]'). Make sure the AI knows exactly which material applies to which object based on this layout.
+3. GEOMETRY LOCK: make clear that the exact shape, proportions, and structural geometry of the 3D-printed object(s) in the reference photo must stay unchanged — only color, material, finish, and the surrounding scene may be altered.
+4. INTERSECTION / SPATIAL RULE: if a product is a holder, mount, or stand that must interact with another object (like a cup, glass, or bottle), make clear how they physically interact (e.g., resting naturally, passing through the hollow center), respecting realistic spatial occlusion. Do not assume the object is a stainless steel thermos unless explicitly requested by the user.
+5. SCENE ISOLATION: never mix backgrounds. For a realistic scene, describe it fully and ask for the product(s) to be relit to match that scene's lighting and shadows. For a catalog shot, make clear the background must become a plain, fully isolated, pure white studio backdrop with nothing else in frame.
 6. KEEP IT CONCISE AND NATURAL: write one clear, direct paragraph, in your own words, avoiding repeated stock phrasing across requests. Prioritize the model correctly following the instruction over poetic prose.
 7. OUTPUT ONLY THE ENGLISH EDITING INSTRUCTION — no preamble, no quotation marks wrapping it, no markdown, nothing else."""
 
@@ -322,16 +329,13 @@ def chamar_motor_imagem(endpoint, nome_motor, imagens_referencia_data_uris, prom
         "num_images": num_imagens,
     }
 
-    # Tratamento dinâmico para garantir compatibilidade entre endpoints legados (Gemini) e novos (FLUX)
     if "nano-banana" in endpoint:
         payload["image_urls"] = imagens_referencia_data_uris
         payload["aspect_ratio"] = aspecto
         if resolucao:
             payload["resolution"] = resolucao
     else:
-        # A arquitetura FLUX no fal.ai sempre exige `image_url` (string única), não a lista 'image_urls'
         payload["image_url"] = imagens_referencia_data_uris[0]
-        # FLUX usa image_size ao invés de aspect_ratio na maioria de suas APIs de inpainting/img2img
         if aspecto == "1:1":
             payload["image_size"] = "square_hd"
         elif aspecto == "3:4":
@@ -346,7 +350,6 @@ def chamar_motor_imagem(endpoint, nome_motor, imagens_referencia_data_uris, prom
         on_queue_update=_on_queue_update,
     )
 
-    # Lida com endpoints novos (como flux-subject) que às vezes retornam "image" ao invés de "images"
     imagens_saida = resultado.get("images")
     if not imagens_saida and "image" in resultado:
         imagens_saida = [resultado.get("image")]
@@ -384,8 +387,8 @@ with st.sidebar:
         resetar_memoria("mao")
         st.toast("✅ Memória de Lifestyle resetada!")
 
-st.title("🏭 ECC Studio Vision v14.0")
-st.markdown("Gere via API (Fal.ai, com custo) **ou** gere você mesmo de graça (Gemini, Meta AI ou Copilot) — escolha a aba.")
+st.title("🏭 ECC Studio Vision v15.0")
+st.markdown("Crie composições multi-produto num clique ou gere itens unitários.")
 
 if not st.session_state.motor_ia_pronto:
     with st.status("🚀 Inicializando Cérebro Local", expanded=True) as status:
@@ -441,18 +444,22 @@ if st.session_state.motor_ia_pronto:
                 "Lifestyle (Sendo Segurado por uma Mão)"
             ])
 
-            imagem_upload = st.file_uploader("Upload do STL (Limpo) ou Foto Real (Bagunçada)", type=["png", "jpg", "jpeg"])
+            # Alterado para aceitar múltiplos arquivos
+            imagens_upload = st.file_uploader(
+                "Upload dos STLs (Limpo) ou Foto Real (Bagunçada). Selecione 1 ou vários:", 
+                type=["png", "jpg", "jpeg"], 
+                accept_multiple_files=True
+            )
 
-            if imagem_upload is not None:
-                if st.session_state.arquivo_atual != imagem_upload.name:
-                    st.session_state.arquivo_atual = imagem_upload.name
+            if imagens_upload:
+                nomes_arquivos = ",".join([arq.name for arq in imagens_upload])
+                if st.session_state.arquivo_atual != nomes_arquivos:
+                    st.session_state.arquivo_atual = nomes_arquivos
                     st.session_state.img_recortada_bytes = None
                     st.session_state.imagem_gerada_b64 = None
                     st.session_state.candidatos_atual = []
                     st.session_state.imagem_referencia_atual = None
                     st.session_state.prompt_manual = ""
-
-                bytes_originais = imagem_upload.read()
 
                 neutralizar_cor = st.checkbox(
                     "Neutralizar cor original (escala de cinza)",
@@ -462,17 +469,18 @@ if st.session_state.motor_ia_pronto:
                          "se sua foto de origem tiver um tom muito dominante (ex.: filamento amarelado)."
                 )
 
-                if st.button("✂️ Isolar Produto (remover fundo)", type="secondary"):
+                if st.button("✂️ Isolar Produtos e Montar Canvas", type="secondary"):
                     with st.spinner("Removendo fundo e centralizando no canvas..."):
+                        lista_bytes = [arq.read() for arq in imagens_upload]
                         st.session_state.img_recortada_bytes = preparar_canvas_perfeito(
-                            bytes_originais, estilo, neutralizar_cor
+                            lista_bytes, estilo, neutralizar_cor
                         )
                         st.session_state.imagem_referencia_atual = st.session_state.img_recortada_bytes
                         st.session_state.imagem_gerada_b64 = None
                         st.session_state.candidatos_atual = []
 
                 if st.session_state.img_recortada_bytes:
-                    st.image(st.session_state.img_recortada_bytes, caption="✅ Produto isolado e pronto para a IA.")
+                    st.image(st.session_state.img_recortada_bytes, caption="✅ Produto(s) isolado(s) e pronto(s) para a IA.")
                     imagem_final_pre_api = st.session_state.img_recortada_bytes
                 else:
                     imagem_final_pre_api = None
@@ -480,22 +488,34 @@ if st.session_state.motor_ia_pronto:
                 if imagem_final_pre_api:
                     st.divider()
                     st.subheader("2. Diretrizes de Material")
+                    st.caption("Preencha o que deve ser colocado em cada espaço, da esquerda para a direita.")
                     
-                    # Checkbox de Testes focado na eficiência do desenvolvedor
                     modo_teste = st.checkbox("🧪 Teste (Preencher formulário automaticamente)")
 
-                    # Valores dependem de 'modo_teste'
                     val_produto = "suporte de copo para copo de terere" if modo_teste else ""
                     val_cor = "PETG preto fosco" if modo_teste else ""
                     val_cenario = "Esse suporte deve estar encaixado na parte de baixo de uma garrafa de inox de terere. A garrafa de inox está em pé em cima de uma mesa de madeira em um ambiente de casa bem aconchegante." if modo_teste else ""
 
-                    prod_col1, prod_col2 = st.columns(2)
-                    with prod_col1: produto = st.text_input("Produto:", value=val_produto)
-                    with prod_col2: cor = st.text_input("Cor/Material Exato:", value=val_cor)
+                    # Construção dinâmica dos inputs com base na quantidade de fotos subidas
+                    lista_produtos = []
+                    lista_cores = []
+                    
+                    colunas_slots = st.columns(len(imagens_upload))
+                    for idx, col_slot in enumerate(colunas_slots):
+                        with col_slot:
+                            st.markdown(f"**Slot {idx+1}**")
+                            # Adaptação para o modo teste preencher todos os slots para não travar a UI
+                            p_val = val_produto if idx == 0 else (f"Produto Genérico {idx+1}" if modo_teste else "")
+                            c_val = val_cor if idx == 0 else ("Material Padrão" if modo_teste else "")
+                            
+                            p = st.text_input(f"Produto:", value=p_val, key=f"p_{idx}")
+                            c = st.text_input(f"Cor/Material Exato:", value=c_val, key=f"c_{idx}")
+                            lista_produtos.append(p)
+                            lista_cores.append(c)
 
                     cenario_custom = ""
                     if estilo == "Ambiente (Cenário Realista)":
-                        cenario_custom = st.text_area("Descreva a cena e interações:", value=val_cenario, height=80)
+                        cenario_custom = st.text_area("Descreva a cena global (Ex: Ambos estão sobre uma mesa...):", value=val_cenario, height=80)
 
                     tipo_mem_atual, instrucao_atual = montar_instrucao_estilo(estilo, cenario_custom)
 
@@ -518,7 +538,6 @@ if st.session_state.motor_ia_pronto:
                     }
                     st.caption(mapa_recomendacoes.get(estilo, ""))
                     # ----------------------------------------
-
 
                     st.markdown("**📐 Saída para Shopee**")
                     opcoes_proporcao = {
@@ -548,10 +567,15 @@ if st.session_state.motor_ia_pronto:
                                                    help="Gera N versões no mesmo clique. Cada variação extra é cobrada de novo.")
 
                     proporcao_valor = opcoes_proporcao[label_proporcao]
+                    
+                    # Checa se todos os slots foram preenchidos
+                    todos_preenchidos = all(p.strip() != "" and c.strip() != "" for p, c in zip(lista_produtos, lista_cores))
+                    string_produtos_formatados = "\n".join([f"- Slot {i+1} (from left to right): {lista_produtos[i]}. Material: {lista_cores[i]}" for i in range(len(lista_produtos))])
 
                     st.session_state.dados_atual = {
-                        "produto": produto,
-                        "cor": cor,
+                        "produtos_formatados": string_produtos_formatados,
+                        "produto": lista_produtos[0] if lista_produtos else "", # Fallback apenas
+                        "cor": lista_cores[0] if lista_cores else "", # Fallback apenas
                         "estilo": estilo,
                         "tipo_mem": tipo_mem_atual,
                         "instrucao": instrucao_atual,
@@ -567,28 +591,30 @@ if st.session_state.motor_ia_pronto:
 
                     if st.button(f"🚀 Gerar {num_variacoes}x com {nome_motor_valor} (~${custo_estimado:.3f})",
                                  type="primary", use_container_width=True):
-                        if not produto or not cor:
-                            st.warning("⚠️ Preencha o nome e a cor!")
+                        if not todos_preenchidos:
+                            st.warning("⚠️ Preencha o produto e material de TODOS os slots ativos!")
                         else:
                             st.session_state.tipo_memoria_atual = tipo_mem_atual
                             memoria = carregar_memoria(tipo_mem_atual)
                             sistema_final = f"{DIRETRIZES_SISTEMA}\n\n[USER APPROVED STYLE EXAMPLES]\n{memoria}" if memoria else DIRETRIZES_SISTEMA
 
+                            prompt_usuario_estruturado = f"Products in the layout:\n{string_produtos_formatados}\nGlobal Scene Setting: {instrucao_atual}"
+
                             st.session_state.historico_llm = [
                                 {"role": "system", "content": sistema_final},
-                                {"role": "user", "content": f"Product: {produto}. Material: {cor}. Scene: {instrucao_atual}"}
+                                {"role": "user", "content": prompt_usuario_estruturado}
                             ]
 
                             try:
                                 with st.status("🧠 Fábrica de Renderização", expanded=True) as status_render:
                                     terminal_fal = st.empty()
 
-                                    st.write("📝 1. Consolidando e verificando instrução 100% em inglês...")
+                                    st.write("📝 1. Consolidando e verificando instrução multi-slot...")
                                     st.session_state.prompt_atual, prompt_ok = gerar_prompt_em_ingles(st.session_state.historico_llm)
                                     if not prompt_ok:
                                         st.warning("⚠️ Não foi possível garantir 100% que o prompt está só em inglês — revise antes de aprovar.")
 
-                                    st.write("⚡ 2. Preparando referência (Data URI) para a Fal.ai...")
+                                    st.write("⚡ 2. Preparando Canvas Colado (Data URI)...")
                                     data_uri = construir_data_uri(imagem_final_pre_api)
 
                                     st.write(f"⚡ 3. Editando com o {nome_motor_valor}...")
@@ -721,7 +747,7 @@ if st.session_state.motor_ia_pronto:
         if not dados or not img_ref:
             st.info(
                 "Primeiro vá na aba **'🎨 Gerador Automático'**, faça upload da foto, clique em "
-                "**'✂️ Isolar Produto'** e preencha produto/cor/material — esses dados aparecem "
+                "**'✂️ Isolar Produtos e Montar Canvas'** e preencha os dados — eles aparecem "
                 "aqui automaticamente, sem precisar repetir nada."
             )
         else:
@@ -739,35 +765,38 @@ if st.session_state.motor_ia_pronto:
             col_m1, col_m2 = st.columns([1, 1.3])
 
             with col_m1:
-                st.markdown("**1️⃣ Baixe a foto já tratada**")
-                st.image(img_ref, caption="Mesma foto que iria para a API", use_container_width=True)
+                st.markdown("**1️⃣ Baixe o Canvas Base**")
+                st.image(img_ref, caption="Canvas Base Unificado", use_container_width=True)
                 st.download_button(
                     "⬇️ Baixar Foto Pronta (.jpg)",
                     data=img_ref,
-                    file_name=f"produto_isolado_{dados['tipo_mem']}.jpg",
+                    file_name=f"canvas_multi_{dados['tipo_mem']}.jpg",
                     mime="image/jpeg",
                     use_container_width=True,
                 )
 
             with col_m2:
                 st.markdown("**2️⃣ Gere o prompt perfeito (em inglês, pronto para colar)**")
-                st.caption(f"Produto: {dados['produto']} · Material: {dados['cor']} · Estilo: {dados['estilo']} · Formato: {dados['proporcao_label']}")
+                st.caption(f"Estilo: {dados['estilo']} · Formato: {dados['proporcao_label']}")
 
                 if st.button("📝 Gerar Prompt", type="primary", use_container_width=True):
-                    with st.spinner("Consolidando e verificando instrução 100% em inglês..."):
+                    with st.spinner("Consolidando instrução multi-slot..."):
                         memoria = carregar_memoria(dados["tipo_mem"])
                         sistema_manual = (
                             f"{DIRETRIZES_SISTEMA_MANUAL}\n\n[USER APPROVED STYLE EXAMPLES]\n{memoria}"
                             if memoria else DIRETRIZES_SISTEMA_MANUAL
                         )
+                        
+                        prompt_usuario_estruturado = (
+                            f"Products in the layout:\n{dados['produtos_formatados']}\n"
+                            f"Global Scene Setting: {dados['instrucao']} "
+                            f"Desired output aspect ratio: {dados['proporcao_valor']} — "
+                            f"fold this explicitly into the instruction text."
+                        )
+                        
                         historico_manual = [
                             {"role": "system", "content": sistema_manual},
-                            {"role": "user", "content": (
-                                f"Product: {dados['produto']}. Material: {dados['cor']}. "
-                                f"Scene: {dados['instrucao']} "
-                                f"Desired output aspect ratio: {dados['proporcao_valor']} — "
-                                f"fold this explicitly into the instruction text."
-                            )},
+                            {"role": "user", "content": prompt_usuario_estruturado},
                         ]
                         st.session_state.prompt_manual, prompt_manual_ok = gerar_prompt_em_ingles(historico_manual)
                         if not prompt_manual_ok:
