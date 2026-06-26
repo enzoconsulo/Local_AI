@@ -266,7 +266,7 @@ DIRETRIZES_SISTEMA = """You are an elite E-commerce Art Director writing EDIT IN
 MISSION: Translate the user's messy Portuguese request into a precise English editing instruction.
 CRITICAL RULES:
 1. LANGUAGE: the entire output must be 100% in English, with zero Portuguese words, accents, or slang surviving — including the product name itself. Don't just transliterate the product name: explain in plain English what the object physically is, what it looks like, and what it is used for (e.g., if a regional term is used, describe its physical characteristics and materials instead of just translating the word).
-2. MULTI-ITEM SPATIAL LAYOUT: If the user lists multiple products, they have been placed side-by-side in the reference image from left to right. Explicitly describe their positions in your instruction (e.g., 'On the left, there is a [Product A] made of [Material]. On the right, there is a [Product B]'). Make sure the AI knows exactly which material applies to which object based on this layout.
+2. SPATIAL LAYOUT: Read the provided product list carefully. If only ONE product is listed, treat it as the single, centered subject and DO NOT mention 'left', 'right', or spatial positions. If MULTIPLE products are listed, they are arranged side-by-side from left to right. Describe their positions clearly (e.g., 'Position 1 on the left', 'Position 2') so the AI knows which object gets which material.
 3. GEOMETRY LOCK: make clear that the exact shape, proportions, and structural geometry of the 3D-printed object(s) in the reference photo must stay unchanged — only color, material, finish, and the surrounding scene may be altered.
 4. INTERSECTION / SPATIAL RULE: if a product is a holder, mount, or stand that must interact with another object (like a cup, glass, or bottle), make clear how they physically interact (e.g., resting naturally, passing through the hollow center), respecting realistic spatial occlusion. Do not assume the object is a stainless steel thermos unless explicitly requested by the user.
 5. SCENE ISOLATION: never mix backgrounds. For a realistic scene, describe it fully and ask for the product(s) to be relit to match that scene's lighting and shadows. For a catalog shot, make clear the background must become a plain, fully isolated, pure white studio backdrop with nothing else in frame.
@@ -533,8 +533,8 @@ if st.session_state.motor_ia_pronto:
 
                     # --- CÓDIGO DA RECOMENDAÇÃO DINÂMICA ---
                     mapa_recomendacoes = {
-                        "Ambiente (Cenário Realista)": "💡 **Recomendação:** Use **Gemini**. Ele é o melhor para criar fundos realistas integrando o produto perfeitamente com a luz do cenário.",
-                        "Catálogo (Fundo Branco Puro)": "💡 **Recomendação:** Use **FLUX ** (para travar perfeitamente a geometria) ou **FLUX Schnell** (para testes ultra baratos de recorte).",
+                        "Ambiente (Cenário Realista)": "💡 **Recomendação:** Use **FLUX Subject**. Ele é o melhor para criar fundos realistas integrando o produto perfeitamente com a luz do cenário.",
+                        "Catálogo (Fundo Branco Puro)": "💡 **Recomendação:** Use **FLUX Dev** (para travar perfeitamente a geometria) ou **FLUX Schnell** (para testes ultra baratos de recorte).",
                         "Lifestyle (Sendo Segurado por uma Mão)": "💡 **Recomendação:** Use **Nano Banana Pro**. Interações com partes do corpo humano exigem modelos de maior capacidade."
                     }
                     st.caption(mapa_recomendacoes.get(estilo, ""))
@@ -571,7 +571,12 @@ if st.session_state.motor_ia_pronto:
                     
                     # Checa se todos os slots foram preenchidos
                     todos_preenchidos = all(p.strip() != "" and c.strip() != "" for p, c in zip(lista_produtos, lista_cores))
-                    string_produtos_formatados = "\n".join([f"- Slot {i+1} (from left to right): {lista_produtos[i]}. Material: {lista_cores[i]}" for i in range(len(lista_produtos))])
+                    
+                    # CORREÇÃO DA LÓGICA DE ESPAÇAMENTO ESPACIAL (1 ITEM vs MÚLTIPLOS)
+                    if len(lista_produtos) == 1:
+                        string_produtos_formatados = f"- Main Subject (Centered): {lista_produtos[0]}. Material: {lista_cores[0]}"
+                    else:
+                        string_produtos_formatados = "\n".join([f"- Item {i+1} (Position {i+1} of {len(lista_produtos)}, reading left to right): {lista_produtos[i]}. Material: {lista_cores[i]}" for i in range(len(lista_produtos))])
 
                     st.session_state.dados_atual = {
                         "produtos_formatados": string_produtos_formatados,
@@ -597,7 +602,9 @@ if st.session_state.motor_ia_pronto:
                         else:
                             st.session_state.tipo_memoria_atual = tipo_mem_atual
                             memoria = carregar_memoria(tipo_mem_atual)
-                            sistema_final = f"{DIRETRIZES_SISTEMA}\n\n[USER APPROVED STYLE EXAMPLES]\n{memoria}" if memoria else DIRETRIZES_SISTEMA
+                            
+                            blindagem = "\n\n[USER APPROVED STYLE EXAMPLES]\nIMPORTANT: The examples below are JUST to show you the expected tone, structure, and quality of lighting/background descriptions. NEVER copy the specific products, objects, materials, or spatial interactions mentioned in them. Apply this writing style strictly to the user's NEW request:\n"
+                            sistema_final = f"{DIRETRIZES_SISTEMA}{blindagem}{memoria}" if memoria else DIRETRIZES_SISTEMA
 
                             prompt_usuario_estruturado = f"Products in the layout:\n{string_produtos_formatados}\nGlobal Scene Setting: {instrucao_atual}"
 
@@ -783,10 +790,8 @@ if st.session_state.motor_ia_pronto:
                 if st.button("📝 Gerar Prompt", type="primary", use_container_width=True):
                     with st.spinner("Consolidando instrução multi-slot..."):
                         memoria = carregar_memoria(dados["tipo_mem"])
-                        sistema_manual = (
-                            f"{DIRETRIZES_SISTEMA_MANUAL}\n\n[USER APPROVED STYLE EXAMPLES]\n{memoria}"
-                            if memoria else DIRETRIZES_SISTEMA_MANUAL
-                        )
+                        blindagem = "\n\n[USER APPROVED STYLE EXAMPLES]\nIMPORTANT: The examples below are JUST to show you the expected tone, structure, and quality of lighting/background descriptions. NEVER copy the specific products, objects, materials, or spatial interactions mentioned in them. Apply this writing style strictly to the user's NEW request:\n"
+                        sistema_manual = f"{DIRETRIZES_SISTEMA_MANUAL}{blindagem}{memoria}" if memoria else DIRETRIZES_SISTEMA_MANUAL
                         
                         prompt_usuario_estruturado = (
                             f"Products in the layout:\n{dados['produtos_formatados']}\n"
