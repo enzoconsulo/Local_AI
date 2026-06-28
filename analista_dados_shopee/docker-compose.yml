@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  postgres_cofre:
+    image: postgres:15-alpine
+    container_name: cofre_shopee
+    restart: always
+    env_file:
+      - ./CHAVES_DADOS.env # <--- ATUALIZADO AQUI
+    environment:
+      - TZ=${TZ}
+      - PGTZ=${TZ}
+    ports:
+      - "${DB_PORT}:5432"
+    shm_size: 256mb
+    volumes:
+      - shopee_db_data:/var/lib/postgresql/data
+      - ./init_db:/docker-entrypoint-initdb.d
+    networks:
+      - shopee_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  pgadmin_painel:
+    image: dpage/pgadmin4
+    container_name: painel_shopee
+    restart: always
+    env_file:
+      - ./CHAVES_DADOS.env # <--- ATUALIZADO AQUI
+    environment:
+      - TZ=${TZ}
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - shopee_network
+    depends_on:
+      postgres_cofre:
+        condition: service_healthy
+
+networks:
+  shopee_network:
+    driver: bridge
+
+volumes:
+  shopee_db_data:
+  pgadmin_data:
