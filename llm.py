@@ -48,7 +48,7 @@ def carregar_env():
 
 def validar_chaves():
     """Garante que todas as chaves essenciais para a configuração estão disponíveis."""
-    chaves_obrigatorias = ["GROQ", "RUNPOD_KEY", "ENDPOINT_ID_RUNPOD_vLLM"]
+    chaves_obrigatorias = ["GROQ", "RUNPOD_KEY", "ENDPOINT_ID_RUNPOD_vLLM", "ENDPOINT_ID_RUNPOD_DADOS"]
     chaves_faltando = [k for k in chaves_obrigatorias if not os.getenv(k)]
     
     if chaves_faltando:
@@ -56,7 +56,8 @@ def validar_chaves():
 
 def gerar_config_yaml():
     """Recria o config.yaml usando a sintaxe segura do LiteLLM (os.environ)."""
-    endpoint_id = os.getenv("ENDPOINT_ID_RUNPOD_vLLM")
+    endpoint_img = os.getenv("ENDPOINT_ID_RUNPOD_vLLM")
+    endpoint_dados = os.getenv("ENDPOINT_ID_RUNPOD_DADOS")
     
     # Ao usar "os.environ/NOME_DA_CHAVE", o LiteLLM puxa direto da RAM,
     # evitando erros de sintaxe no YAML causados por aspas ou caracteres especiais da chave.
@@ -73,11 +74,18 @@ def gerar_config_yaml():
       model: groq/llama-3.3-70b-versatile
       api_key: "os.environ/GROQ"
 
-  # 3. O Arquiteto Pesado (RunPod)
+  # 3. O Arquiteto Pesado de Imagens (RunPod)
   - model_name: arquiteto-pesado
     litellm_params:
       model: openai/Qwen/Qwen2.5-Coder-7B-Instruct
-      api_base: "https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
+      api_base: "https://api.runpod.ai/v2/{endpoint_img}/openai/v1"
+      api_key: "os.environ/RUNPOD_KEY"
+
+  # 4. O Cérebro Analítico de Dados (RunPod - Qwen 32B AWQ)
+  - model_name: cerebro-dados
+    litellm_params:
+      model: openai/Qwen/Qwen2.5-32B-Instruct-AWQ
+      api_base: "https://api.runpod.ai/v2/{endpoint_dados}/openai/v1"
       api_key: "os.environ/RUNPOD_KEY"
 
 # leitura do MicroSD:
@@ -107,7 +115,7 @@ def iniciar_litellm():
             raise SystemExit("🚨 ERRO: Comando 'litellm' não encontrado. Execute 'pip install litellm' antes de iniciar.")
 
     cmd = [litellm_exe, "--config", str(CONFIG_FILE), "--port", "8000"]
-    print("\n🚀 Iniciando Motor Multi-Modelo LiteLLM...")
+    print("\n🚀 Iniciando Motor Multi-Modelo LiteLLM (Porta 8000)...")
     print(f"Comando Executado: {' '.join(shlex.quote(p) for p in cmd)}\n")
 
     try:

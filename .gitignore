@@ -5,3 +5,5 @@ estudio_shopee\peças_brutas\*
 *.log
 *.txt
 *.png
+*.venv
+**/__pycache__/
