@@ -10,14 +10,14 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
 
-# ATUALIZADO: Apontando para o ficheiro de chaves correto
 load_dotenv(ROOT_DIR / "CHAVES_DADOS.env")
-
-# ATUALIZADO: Importação direta a partir da raiz
 from utils.shopee_core import chamar_shopee_api
 
+# Sensores Globais: A Shopee permite puxar estes dados para esta conta?
+PERMISSAO_TRAFEGO = True 
+PERMISSAO_ADS = True
+
 def get_db_connection():
-    """Centraliza a conexão para evitar repetição de código."""
     return psycopg2.connect(
         host=os.getenv("DB_HOST"), port=os.getenv("DB_PORT"),
         database=os.getenv("POSTGRES_DB"), user=os.getenv("POSTGRES_USER"),
@@ -34,10 +34,14 @@ def obter_itens_ativos_do_banco():
         conn.close()
         return itens
     except Exception as e:
-        logger.error(f"Erro ao buscar itens ativos no banco: {e}")
+        logger.error(f"Erro ao buscar itens ativos: {e}")
         return []
 
 def obter_trafego_itens(item_ids, data_alvo):
+    global PERMISSAO_TRAFEGO
+    if not PERMISSAO_TRAFEGO:
+        return [] # Ignora silenciosamente se a Shopee bloqueou antes
+        
     start_time = int(data_alvo.replace(hour=0, minute=0, second=0).timestamp())
     end_time = int(data_alvo.replace(hour=23, minute=59, second=59).timestamp())
     path_insight = "/api/v2/insight/get_item_stat" 
@@ -48,6 +52,11 @@ def obter_trafego_itens(item_ids, data_alvo):
         params = {"item_id_list": ",".join(map(str, lote)), "start_time": start_time, "end_time": end_time}
         response = chamar_shopee_api(path_insight, params)
         
+        if response is None:
+            logger.warning("A Shopee não liberou a API de Tráfego para esta conta. Pulando métricas de visitantes...")
+            PERMISSAO_TRAFEGO = False
+            return []
+            
         if response and "item_stat_list" in response:
             for stat in response["item_stat_list"]:
                 dados_trafego.append({
@@ -60,6 +69,10 @@ def obter_trafego_itens(item_ids, data_alvo):
     return dados_trafego
 
 def obter_performance_ads(item_ids, data_alvo):
+    global PERMISSAO_ADS
+    if not PERMISSAO_ADS:
+        return []
+
     start_date = data_alvo.strftime('%Y-%m-%d')
     path_ads = "/api/v2/ads/get_keyword_stat" 
     dados_ads = []
@@ -68,6 +81,12 @@ def obter_performance_ads(item_ids, data_alvo):
         params = {"item_id": item_id, "start_date": start_date, "end_date": start_date}
         response = chamar_shopee_api(path_ads, params)
         
+        # SENSOR DE ADS: Se a Shopee der block, ele ignora silenciosamente daqui pra frente
+        if response is None:
+            logger.warning("A Shopee não liberou a API de Ads para esta conta. Pulando anúncios...")
+            PERMISSAO_ADS = False
+            return []
+            
         if response and "keyword_list" in response:
             for kw in response["keyword_list"]:
                 dados_ads.append({
@@ -88,13 +107,11 @@ def salvar_metricas_no_banco(trafego, ads, data_alvo):
         cur = conn.cursor()
         
         if trafego:
-            # Limpa o dia antes de inserir para evitar dados duplicados caso o script rode duas vezes
             cur.execute("DELETE FROM fato_trafego_diario WHERE data = %s;", (data_str,))
             query_trafego = "INSERT INTO fato_trafego_diario (item_id, data, visitantes_unicos, taxa_rejeicao, adicoes_carrinho) VALUES %s;"
             execute_values(cur, query_trafego, [tuple(t.values()) for t in trafego])
             
         if ads:
-            # Limpa o dia antes de inserir
             cur.execute("DELETE FROM fato_ads_palavras_chave WHERE data = %s;", (data_str,))
             query_ads = "INSERT INTO fato_ads_palavras_chave (item_id, keyword, data, impressoes, cliques, custo_total, gmv_gerado) VALUES %s;"
             execute_values(cur, query_ads, [tuple(a.values()) for a in ads])
@@ -111,7 +128,6 @@ def salvar_metricas_no_banco(trafego, ads, data_alvo):
 # FUNÇÃO EXPORTADA PARA O STREAMLIT
 # ==============================================================================
 def sincronizar_trafego_ads(data_inicio: datetime, data_fim: datetime):
-    """Itera dia a dia dentro do range para extrair métricas diárias com segurança."""
     ids_ativos = obter_itens_ativos_do_banco()
     
     if not ids_ativos:
@@ -122,7 +138,7 @@ def sincronizar_trafego_ads(data_inicio: datetime, data_fim: datetime):
     
     for i in range(delta.days + 1):
         dia_atual = data_inicio + timedelta(days=i)
-        logger.info(f"Processando Tráfego e Ads para: {dia_atual.strftime('%Y-%m-%d')}")
+        logger.info(f"Processando Ads/Tráfego para: {dia_atual.strftime('%Y-%m-%d')}")
         
         try:
             trafego_dia = obter_trafego_itens(ids_ativos, dia_atual)
@@ -133,7 +149,7 @@ def sincronizar_trafego_ads(data_inicio: datetime, data_fim: datetime):
                 if sucesso:
                     total_registros += (len(trafego_dia) + len(ads_dia))
         except Exception as e:
-            logger.warning(f"Falha ao processar dia {dia_atual.strftime('%Y-%m-%d')} (pode ser timeout da API). Saltando para o próximo. Erro: {e}")
-            continue # Salta para o próximo dia sem quebrar todo o processo
+            logger.warning(f"Falha ao processar dia {dia_atual.strftime('%Y-%m-%d')}. Erro: {e}")
+            continue 
                 
     return {"status": "sucesso", "registros": total_registros}

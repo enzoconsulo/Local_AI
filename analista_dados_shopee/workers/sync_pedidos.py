@@ -10,10 +10,7 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
 
-# ATUALIZADO: Apontando para o ficheiro correto
 load_dotenv(ROOT_DIR / "CHAVES_DADOS.env")
-
-# ATUALIZADO: Importação direta e segura
 from utils.shopee_core import chamar_shopee_api
 
 def obter_pedidos_por_periodo(time_from, time_to):
@@ -48,18 +45,12 @@ def obter_detalhes_pedidos(order_sns):
     for lote in lotes:
         params = {
             "order_sn_list": ",".join(lote),
-            # ATUALIZADO: pedindo também o motivo de cancelamento
             "response_optional_fields": "buyer_user_id,item_list,cancel_reason"
         }
         response = chamar_shopee_api(path_order_detail, params)
         
         if response and "order_list" in response:
             for order in response["order_list"]:
-                # ATUALIZADO: motivo de cancelamento, quando existir.
-                # Isso cobre CANCELAMENTOS. Devolução/reembolso pós-entrega na
-                # Shopee é outro fluxo (API de Returns, /api/v2/returns/...),
-                # que este script ainda não consulta — se quiser o motivo de
-                # devolução também, é um sync separado.
                 motivo = order.get("cancel_reason") or None
                 
                 pedidos.append({
@@ -69,9 +60,11 @@ def obter_detalhes_pedidos(order_sns):
                     "status_pedido": order["order_status"],
                     "motivo_cancelamento_devolucao": motivo
                 })
+                
                 for item in order.get("item_list", []):
                     itens_pedido.append({
                         "order_sn": order["order_sn"],
+                        "item_id": item["item_id"], # Adicionado para criar os fantasmas
                         "model_id": item["model_id"] if item["model_id"] != 0 else item["item_id"], 
                         "quantidade": item["model_quantity_purchased"],
                         "preco_praticado": item["model_discounted_price"]
@@ -86,10 +79,6 @@ def obter_dados_repasse(order_sns_concluidos):
         if response and "order_income" in response:
             income = response["order_income"]
             
-            # ATUALIZADO: custo de frete reverso. O nome exato do campo varia por
-            # região/versão da API da Shopee — tentamos as variações mais comuns.
-            # IMPORTANTE: dê um print(income) uma vez com um pedido devolvido real
-            # e confirme qual chave aparece de fato; ajuste a lista abaixo se preciso.
             custo_frete_reverso = (
                 income.get("reverse_shipping_fee")
                 or income.get("return_shipping_fee")
@@ -116,7 +105,23 @@ def salvar_transacoes_no_banco(pedidos, itens, repasses):
         )
         cur = conn.cursor()
         
-        # ATUALIZADO: grava e atualiza motivo_cancelamento_devolucao
+        # 1. CRIAR PRODUTOS/VARIAÇÕES FANTASMAS (Evita o Erro de Foreign Key de itens deletados)
+        for i in itens:
+            # Tenta inserir o Produto raiz fantasma (Se já existir, ignora)
+            cur.execute("""
+                INSERT INTO dim_produtos (item_id, nome_atual, status_shopee, data_criacao)
+                VALUES (%s, 'Produto Excluído (Histórico)', 'DELETADO', CURRENT_TIMESTAMP)
+                ON CONFLICT (item_id) DO NOTHING;
+            """, (i['item_id'],))
+            
+            # Tenta inserir a Variação fantasma (Se já existir, ignora)
+            cur.execute("""
+                INSERT INTO dim_variacoes (model_id, item_id, nome_variacao, preco_venda_atual)
+                VALUES (%s, %s, 'Variação Excluída', 0)
+                ON CONFLICT (model_id) DO NOTHING;
+            """, (i['model_id'], i['item_id']))
+
+        # 2. Grava Pedidos
         query_pedidos = """
             INSERT INTO fato_pedidos_venda (order_sn, data_hora_criacao, uf_destino, status_pedido, motivo_cancelamento_devolucao)
             VALUES %s ON CONFLICT (order_sn) DO UPDATE SET 
@@ -125,14 +130,17 @@ def salvar_transacoes_no_banco(pedidos, itens, repasses):
         """
         execute_values(cur, query_pedidos, [tuple(p.values()) for p in pedidos])
         
+        # 3. Grava Itens do Pedido
         order_sns_lote = list(set([i["order_sn"] for i in itens]))
         if order_sns_lote:
             cur.execute("DELETE FROM fato_itens_pedido WHERE order_sn = ANY(%s)", (order_sns_lote,))
             query_itens = "INSERT INTO fato_itens_pedido (order_sn, model_id, quantidade, preco_praticado) VALUES %s;"
-            execute_values(cur, query_itens, [tuple(i.values()) for i in itens])
+            # Passamos as colunas exatas ignorando o 'item_id' do dicionario que usamos só no fantasma
+            valores_itens = [(i["order_sn"], i["model_id"], i["quantidade"], i["preco_praticado"]) for i in itens]
+            execute_values(cur, query_itens, valores_itens)
 
+        # 4. Grava Repasses (Escrow)
         if repasses:
-            # ATUALIZADO: grava e atualiza custo_frete_reverso
             query_repasses = """
                 INSERT INTO fato_repasse_escrow (order_sn, comissao_shopee, taxa_servico, taxa_transacao, custo_frete_reverso, lucro_liquido_absoluto)
                 VALUES %s ON CONFLICT (order_sn) DO UPDATE SET
@@ -154,7 +162,6 @@ def salvar_transacoes_no_banco(pedidos, itens, repasses):
 # FUNÇÃO EXPORTADA PARA O STREAMLIT
 # ==============================================================================
 def sincronizar_pedidos(data_inicio: datetime, data_fim: datetime):
-    """Sincroniza pedidos baseado em um range de datas dinâmico."""
     time_from = int(data_inicio.timestamp())
     time_to = int(data_fim.timestamp())
     
@@ -164,7 +171,6 @@ def sincronizar_pedidos(data_inicio: datetime, data_fim: datetime):
         
     pedidos_detalhados, itens_detalhados = obter_detalhes_pedidos(lista_pedidos)
     
-    # Repasses (Escrow) apenas para pedidos finalizados/concluídos
     pedidos_concluidos = [p["order_sn"] for p in pedidos_detalhados if p["status_pedido"] == "COMPLETED"]
     repasses_financeiros = obter_dados_repasse(pedidos_concluidos)
     
