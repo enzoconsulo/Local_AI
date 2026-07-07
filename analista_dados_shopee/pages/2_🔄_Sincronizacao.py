@@ -1,5 +1,8 @@
 import streamlit as st
 import psycopg2
+import psycopg2.extras
+import pandas as pd
+import io
 import os
 import sys
 from datetime import datetime, timedelta
@@ -9,19 +12,16 @@ from dotenv import load_dotenv
 # Configuração de caminhos e ambiente
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
-
-# ATUALIZADO: Apontando para o ficheiro correto
 load_dotenv(ROOT_DIR / "CHAVES_DADOS.env")
 
-# ATUALIZADO: Importação direta a partir da raiz garantida pelo sys.path
+# Importação dos módulos da API
 from workers.sync_catalogo import sincronizar_catalogo
 from workers.sync_pedidos import sincronizar_pedidos
-from workers.sync_trafego_ads import sincronizar_trafego_ads
 
-st.set_page_config(page_title="Sincronização", page_icon="🔄", layout="wide")
+st.set_page_config(page_title="Sincronização do DW", page_icon="🔄", layout="wide")
 
 # ==============================================================================
-# FUNÇÕES DE CONTROLE DE BANCO DE DADOS (Blindadas contra Timeout)
+# FUNÇÕES DE BANCO DE DADOS
 # ==============================================================================
 def get_db_connection():
     try:
@@ -31,11 +31,10 @@ def get_db_connection():
             password=os.getenv("POSTGRES_PASSWORD")
         )
     except Exception as e:
-        st.error(f"🚨 Falha de conexão ao banco de dados: {e}")
+        st.error(f"🚨 Falha de conexão ao PostgreSQL: {e}")
         st.stop()
 
 def obter_ultima_sincronizacao(modulo):
-    """Lê a tabela de controle para saber de onde devemos começar a buscar."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -47,7 +46,6 @@ def obter_ultima_sincronizacao(modulo):
     return resultado[0] if resultado else None
 
 def registrar_sincronizacao(modulo, data_inicio, data_fim, status, registros):
-    """Grava no banco que o lote foi concluído com sucesso."""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -56,14 +54,7 @@ def registrar_sincronizacao(modulo, data_inicio, data_fim, status, registros):
             """, (modulo, data_inicio, data_fim, status, registros))
         conn.commit()
 
-# ==============================================================================
-# MOTOR DE FATIAMENTO DE TEMPO (Proteção contra a Shopee API)
-# ==============================================================================
 def fatiar_periodo(start_date, end_date, max_dias=14):
-    """
-    A Shopee só aceita 15 dias por chamada. 
-    Esta função quebra 6 meses em vários blocos de 14 dias para evitar bloqueios.
-    """
     blocos = []
     atual = start_date
     while atual < end_date:
@@ -73,91 +64,244 @@ def fatiar_periodo(start_date, end_date, max_dias=14):
     return blocos
 
 # ==============================================================================
-# INTERFACE E LÓGICA DO BOTÃO
+# PROCESSADOR INTELIGENTE (Bypass de Arquivos da Shopee)
 # ==============================================================================
-st.title("🔄 Sincronização On-Demand")
-st.markdown("Busque as atualizações da Shopee manualmente. O sistema calcula o *Delta* automaticamente e atualiza as métricas da IA (Estrelas, Likes, Ads).")
+def limpar_valor(val):
+    if pd.isna(val) or val == '-': return 0.0
+    if isinstance(val, (int, float)): return float(val)
+    val_str = str(val).replace('R$', '').replace('.', '').replace(',', '.').replace('%', '').strip()
+    try: return float(val_str)
+    except: return 0.0
 
-# Exibe o status atual na tela
-st.subheader("Status do Data Warehouse")
-col1, col2 = st.columns(2)
+def carregar_dataframe_limpo(uploaded_file):
+    """Filtro inteligente para pular o cabeçalho 'sujo' e avisos da Shopee"""
+    if uploaded_file.name.endswith('.csv'):
+        texto = uploaded_file.getvalue().decode('utf-8-sig')
+        linhas = texto.splitlines()
+        idx_cabecalho = 0
+        for i, linha in enumerate(linhas[:20]):
+            linha_low = linha.lower()
+            if 'id do item' in linha_low or 'id do produto' in linha_low or 'nome do anúncio' in linha_low:
+                idx_cabecalho = i
+                break
+        df = pd.read_csv(io.StringIO("\n".join(linhas[idx_cabecalho:])))
+    else:
+        df = pd.read_excel(uploaded_file)
+        idx_cabecalho = 0
+        for i in range(min(15, len(df))):
+            valores = str(df.iloc[i].values).lower()
+            if 'id do item' in valores or 'id do produto' in valores or 'nome do anúncio' in valores:
+                idx_cabecalho = i
+                break
+        if idx_cabecalho > 0:
+            df.columns = df.iloc[idx_cabecalho]
+            df = df[idx_cabecalho+1:].reset_index(drop=True)
+            
+    df.columns = df.columns.astype(str).str.lower().str.strip()
+    return df
+
+def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data_fim):
+    dias_no_periodo = (data_fim - data_inicio).days + 1
+    if dias_no_periodo <= 0: return 0, "A Data Final deve ser maior ou igual à Inicial."
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT item_id, LOWER(nome_atual) FROM dim_produtos")
+            produtos_db = cur.fetchall()
+            
+    linhas_trafego, linhas_ads = [], []
+
+    # 1. PLANILHA DE PERFORMANCE ORGÂNICA
+    if arquivo_trafego:
+        try:
+            df_t = carregar_dataframe_limpo(arquivo_trafego)
+            
+            col_id = next((c for c in df_t.columns if 'id do item' in c or 'id do produto' in c), None)
+            col_visitas = next((c for c in df_t.columns if 'visitante' in c or 'visita' in c), None)
+            col_carrinho = next((c for c in df_t.columns if 'carrinho' in c), None)
+            col_rejeicao = next((c for c in df_t.columns if 'rejeição' in c or 'bounce' in c), None)
+            
+            for _, row in df_t.iterrows():
+                if col_id and pd.notna(row[col_id]) and "dados atuais" not in str(row[col_id]).lower():
+                    try:
+                        item_id = int(limpar_valor(row[col_id]))
+                    except:
+                        continue
+                else:
+                    continue
+                
+                if not any(item_id == pid for pid, _ in produtos_db):
+                    continue 
+                
+                visitas = int(limpar_valor(row[col_visitas])) if col_visitas else 0
+                carrinho = int(limpar_valor(row[col_carrinho])) if col_carrinho else 0
+                rejeicao = limpar_valor(row[col_rejeicao]) if col_rejeicao else 0.0
+                
+                for d in range(dias_no_periodo):
+                    dia_registro = data_inicio + timedelta(days=d)
+                    linhas_trafego.append((item_id, dia_registro.date(), int(visitas/dias_no_periodo), rejeicao, int(carrinho/dias_no_periodo)))
+        except Exception as e:
+            return 0, f"Erro ao ler Tráfego Orgânico: {e}"
+
+    # 2. PLANILHA DE SHOPEE ADS
+    if arquivo_ads:
+        try:
+            df_a = carregar_dataframe_limpo(arquivo_ads)
+            
+            col_id_ads = next((c for c in df_a.columns if 'id do produto' in c), None)
+            col_nome = next((c for c in df_a.columns if 'nome' in c or 'produto' in c or 'anúncio' in c), None)
+            col_kw = next((c for c in df_a.columns if 'palavra' in c or 'keyword' in c), None)
+            col_imp = next((c for c in df_a.columns if 'impress' in c), None)
+            col_cli = next((c for c in df_a.columns if 'clique' in c or 'click' in c), None)
+            col_custo = next((c for c in df_a.columns if 'despesa' in c or 'custo' in c or 'gasto' in c), None)
+            col_gmv = next((c for c in df_a.columns if 'vgm' in c or 'vendas' in c), None)
+            
+            for _, row in df_a.iterrows():
+                item_id = None
+                
+                if col_id_ads and pd.notna(row[col_id_ads]) and str(row[col_id_ads]).strip() != '-':
+                    try: item_id = int(limpar_valor(row[col_id_ads]))
+                    except: pass
+                
+                if not item_id and col_nome:
+                    nome_csv = str(row[col_nome]).lower().strip()
+                    for pid, pnome in produtos_db:
+                        if pnome in nome_csv or nome_csv in pnome:
+                            item_id = pid; break
+                        
+                if not item_id: continue
+                
+                kw = str(row[col_kw]) if col_kw and pd.notna(row[col_kw]) and str(row[col_kw]).strip() != '-' else "Ampla/Shop"
+                imp = int(limpar_valor(row[col_imp])) if col_imp else 0
+                cli = int(limpar_valor(row[col_cli])) if col_cli else 0
+                custo = limpar_valor(row[col_custo]) if col_custo else 0.0
+                gmv = limpar_valor(row[col_gmv]) if col_gmv else 0.0
+                
+                for d in range(dias_no_periodo):
+                    dia_registro = data_inicio + timedelta(days=d)
+                    linhas_ads.append((item_id, kw, dia_registro.date(), int(imp/dias_no_periodo), int(cli/dias_no_periodo), custo/dias_no_periodo, gmv/dias_no_periodo))
+        except Exception as e:
+            return 0, f"Erro ao ler Arquivo de Ads: {e}"
+
+    # INSERÇÃO PROTEGIDA (Idempotente)
+    total_linhas = len(linhas_trafego) + len(linhas_ads)
+    if total_linhas > 0:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                for d in range(dias_no_periodo):
+                    dia_del = (data_inicio + timedelta(days=d)).date()
+                    if arquivo_trafego: cur.execute("DELETE FROM fato_trafego_diario WHERE data = %s", (dia_del,))
+                    if arquivo_ads: cur.execute("DELETE FROM fato_ads_palavras_chave WHERE data = %s", (dia_del,))
+                
+                if linhas_trafego:
+                    psycopg2.extras.execute_values(cur, """
+                        INSERT INTO fato_trafego_diario (item_id, data, visitantes_unicos, taxa_rejeicao, adicoes_carrinho) VALUES %s
+                    """, linhas_trafego)
+                
+                if linhas_ads:
+                    psycopg2.extras.execute_values(cur, """
+                        INSERT INTO fato_ads_palavras_chave (item_id, keyword, data, impressoes, cliques, custo_total, gmv_gerado) VALUES %s
+                    """, linhas_ads)
+            conn.commit()
+            
+    return total_linhas, "Sucesso"
+
+# ==============================================================================
+# INTERFACE COM ABAS (TABS) E LINKS RÁPIDOS
+# ==============================================================================
+st.title("🔄 Sincronização e Data Warehouse")
+
+# Exibe o status atual do banco
+col_a, col_b = st.columns(2)
 ultima_sync_pedidos = obter_ultima_sincronizacao('PEDIDOS')
 ultima_sync_trafego = obter_ultima_sincronizacao('TRAFEGO_ADS')
-
-with col1:
-    st.info(f"📦 Última extração de Pedidos: **{ultima_sync_pedidos.strftime('%d/%m/%Y %H:%M') if ultima_sync_pedidos else 'Nunca'}**")
-with col2:
-    st.info(f"📈 Última extração de Tráfego/Ads: **{ultima_sync_trafego.strftime('%d/%m/%Y') if ultima_sync_trafego else 'Nunca'}**")
+with col_a: st.info(f"📦 Última extração API (Pedidos): **{ultima_sync_pedidos.strftime('%d/%m/%Y %H:%M') if ultima_sync_pedidos else 'Nunca'}**")
+with col_b: st.info(f"📈 Última extração CSV (Marketing): **{ultima_sync_trafego.strftime('%d/%m/%Y') if ultima_sync_trafego else 'Nunca'}**")
 
 st.divider()
 
-if st.button("🚀 INICIAR SINCRONIZAÇÃO COMPLETA", type="primary", use_container_width=True):
-    
-    agora = datetime.now()
-    
-    # ---------------------------------------------------------
-    # 1. ATUALIZA O CATÁLOGO (Rápido, apenas os ativos)
-    # ---------------------------------------------------------
-    with st.status("1. Sincronizando Catálogo de Produtos e Reputação...", expanded=True) as status:
-        st.write("Buscando anúncios, estoque, likes e estrelas...")
-        resultado_cat = sincronizar_catalogo()
-        if resultado_cat["status"] == "sucesso":
-            status.update(label=f"Catálogo atualizado! ({resultado_cat['produtos']} produtos e variações mapeadas)", state="complete")
-        else:
-            status.update(label="Falha ao atualizar catálogo.", state="error")
-            st.stop()
+# Criação das Abas
+aba_principal, aba_global = st.tabs(["⚙️ Motor Principal (API + Produtos)", "📈 Visão Geral da Loja (Dashboard Global)"])
 
-    # ---------------------------------------------------------
-    # 2. CARGA DE PEDIDOS E FINANCEIRO (Fatiada)
-    # ---------------------------------------------------------
-    with st.status("2. Sincronizando Motor Financeiro e Pedidos...", expanded=True) as status:
-        data_inicio = ultima_sync_pedidos or datetime(2026, 1, 26)
-        
-        if data_inicio >= agora - timedelta(minutes=10):
-            st.write("✅ Pedidos já estão atualizados.")
-            status.update(label="Pedidos atualizados.", state="complete")
-        else:
-            blocos_tempo = fatiar_periodo(data_inicio, agora, max_dias=14)
-            barra_progresso = st.progress(0)
-            
-            total_pedidos = 0
-            for i, (inicio_bloco, fim_bloco) in enumerate(blocos_tempo):
-                st.write(f"Extraindo período: {inicio_bloco.strftime('%d/%m/%Y')} a {fim_bloco.strftime('%d/%m/%Y')}")
-                
-                res = sincronizar_pedidos(inicio_bloco, fim_bloco)
-                
-                if res["status"] == "sucesso":
-                    total_pedidos += res["registros"]
-                    registrar_sincronizacao('PEDIDOS', inicio_bloco, fim_bloco, 'SUCESSO', res["registros"])
-                else:
-                    st.error(f"Erro na extração do bloco {inicio_bloco.date()}")
-                    break
-                    
-                barra_progresso.progress((i + 1) / len(blocos_tempo))
-                
-            status.update(label=f"Motor Financeiro atualizado! ({total_pedidos} registros processados)", state="complete")
+with aba_principal:
+    st.markdown("### Atualização de Marketing (Itens Específicos)")
+    st.markdown("O Cérebro IA cruza os custos de Ads e a conversão orgânica para otimizar os seus lucros.")
 
-    # ---------------------------------------------------------
-    # 3. CARGA DE TRÁFEGO E ADS
-    # ---------------------------------------------------------
-    with st.status("3. Sincronizando Tráfego, Ads e Comportamento...", expanded=True) as status:
-        data_inicio_trafego = ultima_sync_trafego or datetime(2026, 1, 26)
+    hoje = datetime.now()
+    data_sugerida_inicio = ultima_sync_trafego if ultima_sync_trafego else (hoje - timedelta(days=30))
+    
+    periodo_selecionado = st.date_input("📅 Qual foi o período selecionado nos painéis da Shopee?", 
+                                        value=(data_sugerida_inicio.date(), hoje.date()), 
+                                        max_value=hoje.date())
+
+    col_trafego, col_ads = st.columns(2)
+    with col_trafego:
+        st.markdown("**1. Orgânico (Produtos com Melhor Desempenho, só exportar a aba que abriu)**")
+        st.link_button("🔗 Ir para Business Insights", "https://seller.shopee.com.br/datacenter/product/performance", use_container_width=True)
+        arquivo_trafego = st.file_uploader("📂 Arraste o CSV de Performance", type=["csv", "xlsx"])
         
-        # O tráfego consolida o D-1, então vamos até "ontem"
-        ontem = datetime.now() - timedelta(days=1)
+    with col_ads:
+        st.markdown("**2. Pago (' Dados em nível de palavra-chave e performance ')**")
+        st.link_button("🔗 Ir para Shopee Ads", "https://seller.shopee.com.br/portal/marketing/pas/index", use_container_width=True)
+        arquivo_ads = st.file_uploader("📂 Arraste o CSV de Ads", type=["csv", "xlsx"])
+
+    if not arquivo_trafego and not arquivo_ads:
+        st.warning("⚠️ Insira pelo menos uma das planilhas para atualizar as métricas dos seus anúncios.")
+
+    datas_validas = isinstance(periodo_selecionado, tuple) and len(periodo_selecionado) == 2
+
+    if st.button("🚀 INICIAR SINCRONIZAÇÃO COMPLETA", type="primary", use_container_width=True, disabled=not (arquivo_trafego or arquivo_ads) or not datas_validas):
         
-        if data_inicio_trafego.date() >= ontem.date():
-            st.write("✅ Tráfego já está atualizado até o fechamento de ontem.")
-            status.update(label="Tráfego atualizado.", state="complete")
-        else:
-            st.write(f"Iniciando busca diária desde {data_inicio_trafego.strftime('%d/%m/%Y')}...")
-            res_trafego = sincronizar_trafego_ads(data_inicio_trafego, ontem)
-            
-            if res_trafego["status"] == "sucesso":
-                registrar_sincronizacao('TRAFEGO_ADS', data_inicio_trafego, ontem, 'SUCESSO', res_trafego["registros"])
-                status.update(label=f"Tráfego atualizado! ({res_trafego['registros']} interações processadas)", state="complete")
+        agora = datetime.now()
+        dt_inicio_csv = datetime.combine(periodo_selecionado[0], datetime.min.time())
+        dt_fim_csv = datetime.combine(periodo_selecionado[1], datetime.max.time())
+        
+        with st.status("1. Conectando API: Catálogo e Estoque...", expanded=True) as status:
+            res_cat = sincronizar_catalogo()
+            if res_cat["status"] == "sucesso":
+                status.update(label=f"Catálogo atualizado! ({res_cat['produtos']} mapeados)", state="complete")
             else:
-                status.update(label="Falha ao extrair métricas de Ads.", state="error")
+                status.update(label="Falha na API de catálogo.", state="error"); st.stop()
+
+        with st.status("2. Conectando API: Pedidos e Lucro (Escrow)...", expanded=True) as status:
+            dt_inicio_pedidos = ultima_sync_pedidos or datetime(2026, 1, 26)
+            
+            if dt_inicio_pedidos >= agora - timedelta(minutes=10):
+                status.update(label="Pedidos já estão atualizados na última hora.", state="complete")
+            else:
+                blocos = fatiar_periodo(dt_inicio_pedidos, agora)
+                barra = st.progress(0)
+                total_pedidos = 0
                 
-    st.balloons()
-    st.success("🎉 Data Warehouse 100% Sincronizado! A IA já tem todos os dados necessários.")
+                for i, (inicio_bloco, fim_bloco) in enumerate(blocos):
+                    res_ped = sincronizar_pedidos(inicio_bloco, fim_bloco)
+                    if res_ped["status"] == "sucesso":
+                        total_pedidos += res_ped["registros"]
+                        registrar_sincronizacao('PEDIDOS', inicio_bloco, fim_bloco, 'SUCESSO', res_ped["registros"])
+                    else:
+                        st.error("Erro no processamento da API de Pedidos.")
+                        break
+                    barra.progress((i + 1) / len(blocos))
+                    
+                status.update(label=f"Motor Financeiro atualizado! ({total_pedidos} novos pedidos)", state="complete")
+
+        with st.status(f"3. Processando Data Warehouse ({dt_inicio_csv.strftime('%d/%m')} a {dt_fim_csv.strftime('%d/%m')})...", expanded=True) as status:
+            linhas, msg = processar_arquivos_marketing(arquivo_trafego, arquivo_ads, dt_inicio_csv, dt_fim_csv)
+            
+            if msg == "Sucesso":
+                registrar_sincronizacao('TRAFEGO_ADS', dt_inicio_csv, dt_fim_csv, 'SUCESSO', linhas)
+                status.update(label=f"Métricas Inteligentes Consolidadas! ({linhas} registros amarrados)", state="complete")
+            else:
+                status.update(label=f"Falha no CSV: {msg}", state="error"); st.stop()
+                
+        st.balloons()
+        st.success("🎉 Processo Finalizado! O Cérebro IA já pode analisar o ROAS e a conversão de cada peça.")
+
+with aba_global:
+    st.markdown("### Saúde Geral da Loja (Visão Macros)")
+    st.markdown("Se você deseja que a IA faça análises globais (ex: 'Nossas vendas caíram 10% no feriado'), faça o upload do arquivo de **Informações Gerenciais > Visão Geral** aqui. *(Módulo em expansão)*")
+    st.link_button("🔗 Ir para Visão Geral", "https://seller.shopee.com.br/datacenter/dashboard", use_container_width=True)
+    
+    arquivo_global = st.file_uploader("📂 Arraste a planilha de Visão Geral (Opcional)", type=["csv", "xlsx"], key="upload_global")
+    if arquivo_global:
+        st.info("💡 Arquivo reconhecido. Os dados de taxa de conversão diária da loja inteira serão disponibilizados para a IA nas próximas auditorias.")
