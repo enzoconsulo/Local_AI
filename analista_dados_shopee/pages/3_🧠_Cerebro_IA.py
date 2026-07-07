@@ -30,6 +30,7 @@ import os
 import re
 import sys
 import litellm
+import pandas as pd
 import psycopg2.extras
 import streamlit as st
 from pathlib import Path
@@ -55,10 +56,45 @@ st.set_page_config(
 # Porta 8000 — alinhada com data_app.py e o bootstrap llm.py
 LITELLM_BASE = "http://localhost:8000/v1/chat/completions"
 
+# Regras de execução recomendadas para o fluxo Shopee
+ACTIONS_EXECUTAVEIS_SEGURAS = {"AUMENTAR_PRECO", "REDUZIR_PRECO", "CRIAR_PROMOCAO", "CRIAR_COMBO"}
+ACTIONS_RECOMENDACAO_APENAS = {
+    "PAUSAR_ADS",
+    "AUMENTAR_BUDGET_ADS",
+    "REDUZIR_BUDGET_ADS",
+    "CRIAR_ADS",
+    "EDITAR_ADS",
+}
+
+
+def classificar_modo_execucao(acao: str) -> tuple[str, str]:
+    """Classifica se uma sugestão pode ser aplicada automaticamente ou apenas recomendada."""
+    if acao in ACTIONS_EXECUTAVEIS_SEGURAS:
+        return "EXECUTAR", "Ação operacional segura: o sistema pode aplicar após aprovação do usuário."
+    if acao in ACTIONS_RECOMENDACAO_APENAS:
+        return "RECOMENDAR", "Ação ligada a ads ou gasto: permanecerá como recomendação e revisão manual."
+    return "RECOMENDAR", "Sem execução automática definida; siga o plano de ação recomendado."
+
 
 # ==============================================================================
 # SEÇÃO 1 — EXTRAÇÃO DO DATA WAREHOUSE
 # ==============================================================================
+
+def garantir_tabela_historico_variacoes():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS fato_historico_variacoes (
+                    model_id BIGINT NOT NULL REFERENCES dim_variacoes(model_id) ON DELETE CASCADE,
+                    data_registro DATE NOT NULL,
+                    preco_venda_atual DECIMAL(10,2),
+                    estoque_shopee INTEGER DEFAULT 0,
+                    PRIMARY KEY (model_id, data_registro)
+                );
+                CREATE INDEX IF NOT EXISTS idx_fato_historico_variacoes_model_data
+                ON fato_historico_variacoes (model_id, data_registro DESC);
+            """)
+
 
 def gerar_dossie_produtos_com_memoria():
     """
@@ -115,6 +151,50 @@ def gerar_dossie_produtos_com_memoria():
         WHERE data >= CURRENT_DATE - INTERVAL '7 days'
         GROUP BY item_id
     ),
+    pedidos_7d AS (
+        SELECT
+            i.model_id,
+            COUNT(*) AS pedidos_7d
+        FROM fato_itens_pedido i
+        JOIN fato_pedidos_venda p ON i.order_sn = p.order_sn
+        WHERE p.data_hora_criacao >= CURRENT_DATE - INTERVAL '7 days'
+        GROUP BY i.model_id
+    ),
+    cancelamentos_7d AS (
+        SELECT
+            i.model_id,
+            COUNT(*) FILTER (
+                WHERE p.status_pedido IN ('CANCELLED', 'CANCELED', 'CANCELLED_BY_BUYER', 'IN_CANCEL')
+            ) AS cancelamentos_7d
+        FROM fato_itens_pedido i
+        JOIN fato_pedidos_venda p ON i.order_sn = p.order_sn
+        WHERE p.data_hora_criacao >= CURRENT_DATE - INTERVAL '7 days'
+        GROUP BY i.model_id
+    ),
+    metricas_importadas_7d AS (
+        SELECT
+            item_id,
+            SUM(CASE WHEN metric_name ILIKE 'venda%' OR metric_name ILIKE '%pedido%' OR metric_name ILIKE 'gmv%' OR metric_name ILIKE 'receita%' THEN metric_value ELSE 0 END) AS vendas_importadas_7d,
+            SUM(CASE WHEN metric_name ILIKE 'receita%' OR metric_name ILIKE 'gmv%' THEN metric_value ELSE 0 END) AS receita_importada_7d,
+            SUM(CASE WHEN metric_name ILIKE 'cancel%' THEN metric_value ELSE 0 END) AS cancelamentos_importados_7d,
+            SUM(CASE WHEN metric_name ILIKE 'devol%' THEN metric_value ELSE 0 END) AS devolucoes_importadas_7d,
+            SUM(CASE WHEN metric_name ILIKE 'reemb%' THEN metric_value ELSE 0 END) AS reembolsos_importados_7d,
+            SUM(CASE WHEN metric_name ILIKE '%estoque%' OR metric_name ILIKE '%stock%' THEN metric_value ELSE 0 END) AS estoque_importado_7d,
+            SUM(CASE WHEN metric_name ILIKE '%custo%' OR metric_name ILIKE '%gasto%' OR metric_name ILIKE 'ads%' THEN metric_value ELSE 0 END) AS custo_importado_7d
+        FROM fato_metricas_produto_importadas
+        WHERE data_registro >= CURRENT_DATE - INTERVAL '7 days'
+        GROUP BY item_id
+    ),
+    macro_loja_7d AS (
+        SELECT
+            SUM(CASE WHEN metric_name ILIKE 'receita%' OR metric_name ILIKE 'gmv%' THEN metric_value ELSE 0 END) AS receita_macro_7d,
+            AVG(CASE WHEN metric_name ILIKE 'convers%' THEN metric_value ELSE NULL END) AS conversao_macro_7d,
+            AVG(CASE WHEN metric_name ILIKE 'roas%' THEN metric_value ELSE NULL END) AS roas_macro_7d,
+            SUM(CASE WHEN metric_name ILIKE 'visita%' THEN metric_value ELSE 0 END) AS visitas_macro_7d,
+            SUM(CASE WHEN metric_name ILIKE '%estoque%' OR metric_name ILIKE '%stock%' THEN metric_value ELSE 0 END) AS estoque_macro_7d
+        FROM fato_visao_geral_loja
+        WHERE data_registro >= CURRENT_DATE - INTERVAL '7 days'
+    ),
     memoria_ia AS (
         -- Fix #7: DISTINCT ON model_id (não item_id) e JOIN correto abaixo
         -- Logs antigos sem model_id (model_id IS NULL) são excluídos — ok,
@@ -125,6 +205,16 @@ def gerar_dossie_produtos_com_memoria():
         FROM log_acoes_shopee
         WHERE status_api = 'SUCESSO' AND model_id IS NOT NULL
         ORDER BY model_id, data_aplicacao DESC
+    ),
+    historico_variacoes AS (
+        SELECT
+            model_id,
+            MAX(CASE WHEN data_registro = CURRENT_DATE THEN preco_venda_atual END) AS preco_hoje,
+            MAX(CASE WHEN data_registro = CURRENT_DATE - INTERVAL '7 days' THEN preco_venda_atual END) AS preco_7d_atras,
+            MAX(CASE WHEN data_registro = CURRENT_DATE THEN estoque_shopee END) AS estoque_hoje,
+            MAX(CASE WHEN data_registro = CURRENT_DATE - INTERVAL '7 days' THEN estoque_shopee END) AS estoque_7d_atras
+        FROM fato_historico_variacoes
+        GROUP BY model_id
     )
     SELECT
         p.item_id,
@@ -136,6 +226,10 @@ def gerar_dossie_produtos_com_memoria():
         COALESCE(p.likes_count, 0)           AS curtidas_favoritos,
         COALESCE(v.estoque_shopee, 0)        AS estoque_na_shopee,
         COALESCE(p.dias_pre_encomenda, 3)    AS tempo_preparo_dias,
+        COALESCE(h.preco_hoje, v.preco_venda_atual) AS preco_hoje,
+        COALESCE(h.preco_7d_atras, v.preco_venda_atual) AS preco_7d_atras,
+        COALESCE(h.estoque_hoje, v.estoque_shopee, 0) AS estoque_hoje,
+        COALESCE(h.estoque_7d_atras, v.estoque_shopee, 0) AS estoque_7d_atras,
 
         COALESCE(ven.qtd_vendida, 0)         AS vendas_7d,
         COALESCE(vant.qtd_vendida_antiga, 0) AS vendas_semana_passada,
@@ -144,6 +238,20 @@ def gerar_dossie_produtos_com_memoria():
         COALESCE(t.visitas, 0)               AS visitas_7d,
         COALESCE(t.carrinhos, 0)             AS carrinhos_7d,
         COALESCE(a.gasto_ads, 0)             AS gasto_ads_7d,
+        COALESCE(ped.pedidos_7d, 0)          AS pedidos_7d,
+        COALESCE(can.cancelamentos_7d, 0)    AS cancelamentos_7d,
+        COALESCE(mi.vendas_importadas_7d, 0) AS vendas_importadas_7d,
+        COALESCE(mi.receita_importada_7d, 0) AS receita_importada_7d,
+        COALESCE(mi.cancelamentos_importados_7d, 0) AS cancelamentos_importados_7d,
+        COALESCE(mi.devolucoes_importadas_7d, 0) AS devolucoes_importadas_7d,
+        COALESCE(mi.reembolsos_importados_7d, 0) AS reembolsos_importados_7d,
+        COALESCE(mi.estoque_importado_7d, 0) AS estoque_importado_7d,
+        COALESCE(mi.custo_importado_7d, 0) AS custo_importado_7d,
+        COALESCE(macro.receita_macro_7d, 0) AS receita_macro_7d,
+        COALESCE(macro.conversao_macro_7d, 0) AS conversao_macro_7d,
+        COALESCE(macro.roas_macro_7d, 0) AS roas_macro_7d,
+        COALESCE(macro.visitas_macro_7d, 0) AS visitas_macro_7d,
+        COALESCE(macro.estoque_macro_7d, 0) AS estoque_macro_7d,
 
         -- Custo de fabricação já com refugo embutido
         (
@@ -177,9 +285,16 @@ def gerar_dossie_produtos_com_memoria():
     LEFT JOIN vendas_anteriores vant  ON v.model_id  = vant.model_id
     LEFT JOIN ads_7d        a         ON p.item_id   = a.item_id
     LEFT JOIN trafego_7d    t         ON p.item_id   = t.item_id
+    LEFT JOIN pedidos_7d    ped       ON v.model_id  = ped.model_id
+    LEFT JOIN cancelamentos_7d can    ON v.model_id  = can.model_id
+    LEFT JOIN metricas_importadas_7d mi ON p.item_id = mi.item_id
+    LEFT JOIN macro_loja_7d macro     ON TRUE
     LEFT JOIN memoria_ia    m         ON v.model_id  = m.model_id   -- Fix #7
+    LEFT JOIN historico_variacoes h  ON v.model_id  = h.model_id
     WHERE p.status_shopee = 'NORMAL';
     """
+
+    garantir_tabela_historico_variacoes()
 
     with get_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -189,6 +304,10 @@ def gerar_dossie_produtos_com_memoria():
     dossie = []
     for r in registros:
         preco        = float(r["preco_venda_atual"] or 0)
+        preco_hoje   = float(r["preco_hoje"] or 0) or preco
+        preco_7d     = float(r["preco_7d_atras"] or 0) or preco
+        estoque_hoje = int(r["estoque_hoje"] or 0)
+        estoque_7d   = int(r["estoque_7d_atras"] or 0)
         custo_fab    = float(r["custo_fabricacao_com_refugo"] or 0)
         receita_liq  = float(r["receita_liquida_7d"])
         gasto_ads    = float(r["gasto_ads_7d"])
@@ -196,11 +315,24 @@ def gerar_dossie_produtos_com_memoria():
         vendas_antes = int(r["vendas_semana_passada"])
         visitas      = int(r["visitas_7d"])
         carrinhos    = int(r["carrinhos_7d"])
+        pedidos_7d   = int(r["pedidos_7d"] or 0)
+        cancelamentos_7d = int(r["cancelamentos_7d"] or 0)
+        receita_importada_7d = float(r["receita_importada_7d"] or 0)
+        custo_importado_7d = float(r["custo_importado_7d"] or 0)
+        cancelamentos_importados_7d = int(r["cancelamentos_importados_7d"] or 0)
+        estoque_importado_7d = float(r["estoque_importado_7d"] or 0)
+        receita_macro_7d = float(r["receita_macro_7d"] or 0)
+        conversao_macro_7d = float(r["conversao_macro_7d"] or 0)
+        roas_macro_7d = float(r["roas_macro_7d"] or 0)
+        visitas_macro_7d = float(r["visitas_macro_7d"] or 0)
+        estoque_macro_7d = float(r["estoque_macro_7d"] or 0)
 
         lucro_operacional    = receita_liq - (custo_fab * vendas) - gasto_ads
         roas_atual           = round(receita_liq / gasto_ads, 2) if gasto_ads > 0 else 0
         taxa_conversao       = round(vendas / visitas * 100, 2) if visitas > 0 else 0
         taxa_abandono        = round((carrinhos - vendas) / carrinhos * 100, 2) if carrinhos > 0 else 0
+        taxa_cancelamento_7d_perc = round(cancelamentos_7d / max(pedidos_7d, 1) * 100, 2) if pedidos_7d > 0 else 0
+        preco_tendencia_perc = round(((preco_hoje - preco_7d) / preco_7d * 100), 2) if preco_7d > 0 else 0
         tendencia_perc       = (
             round((vendas - vendas_antes) / vendas_antes * 100, 2)
             if vendas_antes > 0 else (100 if vendas > 0 else 0)
@@ -231,12 +363,17 @@ def gerar_dossie_produtos_com_memoria():
                 "projetado_na_epoca": r["ultima_projecao"],
             }
 
-        dossie.append({
+        dados_analiticos = {
             "item_id":   r["item_id"],
             "model_id":  r["model_id"],
             "nome_produto":      r["nome_atual"],
             "nome_variacao":     r["nome_variacao"],
             "preco_atual":       preco,
+            "preco_hoje":        round(preco_hoje, 2),
+            "preco_tendencia_7d_perc": preco_tendencia_perc,
+            "estoque_shopee_hoje": estoque_hoje,
+            "estoque_shopee_7d_atras": estoque_7d,
+            "estoque_delta_7d_un": estoque_hoje - estoque_7d,
             "custo_fab_real":    round(custo_fab, 2),
 
             "vendas_7d_reais":              vendas,
@@ -255,9 +392,58 @@ def gerar_dossie_produtos_com_memoria():
 
             "ADS_gasto_7d":   round(gasto_ads, 2),
             "ADS_roas_atual": roas_atual,
-
+            "PEDIDOS_7d": pedidos_7d,
+            "cancelamentos_7d": cancelamentos_7d,
+            "taxa_cancelamento_7d_perc": taxa_cancelamento_7d_perc,
+            "METRICAS_importadas_receita_7d": round(receita_importada_7d, 2),
+            "METRICAS_importadas_custo_7d": round(custo_importado_7d, 2),
+            "METRICAS_importadas_cancelamentos_7d": cancelamentos_importados_7d,
+            "METRICAS_importadas_estoque_7d": round(estoque_importado_7d, 2),
+            "LOJA_macro_receita_7d": round(receita_macro_7d, 2),
+            "LOJA_macro_conversao_7d": round(conversao_macro_7d, 2),
+            "LOJA_macro_roas_7d": round(roas_macro_7d, 2),
+            "LOJA_macro_visitas_7d": round(visitas_macro_7d, 2),
+            "LOJA_macro_estoque_7d": round(estoque_macro_7d, 2),
+            "elasticidade_preco_volume": calcular_elasticidade_preco_volume(preco_hoje, preco_7d, vendas, vendas_antes),
+            "previsao_vendas_7d": calcular_previsao_demanda_7d({
+                "vendas_7d_reais": vendas,
+                "tendencia_vendas_WoW_perc": tendencia_perc,
+                "TRAFEGO_taxa_conversao_perc": taxa_conversao,
+                "ADS_roas_atual": roas_atual,
+                "LOGISTICA_dias_estoque_restante": dias_estoque,
+                "LOGISTICA_capacidade_material_restante": capacidade_maxima,
+                "estoque_shopee_hoje": estoque_hoje,
+            }),
+            "previsao_lucro_7d": round(
+                max(0, calcular_previsao_demanda_7d({
+                    "vendas_7d_reais": vendas,
+                    "tendencia_vendas_WoW_perc": tendencia_perc,
+                    "TRAFEGO_taxa_conversao_perc": taxa_conversao,
+                    "ADS_roas_atual": roas_atual,
+                    "LOGISTICA_dias_estoque_restante": dias_estoque,
+                    "LOGISTICA_capacidade_material_restante": capacidade_maxima,
+                    "estoque_shopee_hoje": estoque_hoje,
+                }) * max(0, preco - custo_fab) - (gasto_ads * 0.9)), 2
+            ),
+            "cluster_mercado": classificar_cluster({
+                "lucro_liquido_real_7d": lucro_operacional,
+                "ADS_roas_atual": roas_atual,
+                "LOGISTICA_dias_estoque_restante": dias_estoque,
+                "TRAFEGO_taxa_conversao_perc": taxa_conversao,
+                "vendas_7d_reais": vendas,
+            }),
+            "recomendacao_executiva": gerar_recomendacao_executiva({
+                "ADS_roas_atual": roas_atual,
+                "taxa_cancelamento_7d_perc": taxa_cancelamento_7d_perc,
+                "LOGISTICA_dias_estoque_restante": dias_estoque,
+                "TRAFEGO_taxa_conversao_perc": taxa_conversao,
+                "preco_tendencia_7d_perc": preco_tendencia_perc,
+                "vendas_7d_reais": vendas,
+                "ADS_gasto_7d": gasto_ads,
+            }),
             "historico_acoes_passadas": historico_ia,
-        })
+        }
+        dossie.append(dados_analiticos)
 
     return dossie
 
@@ -294,9 +480,23 @@ def calcular_score_urgencia(d: dict) -> int:
     if d.get("taxa_abandono_carrinho_perc", 0) > 70 and d.get("REPUTACAO_curtidas_favoritos", 0) > 50:
         score += 20
 
+    # Queda de preço forte em 7 dias e vendas baixas pode indicar perda de percepção
+    if d.get("preco_tendencia_7d_perc", 0) < -15 and d.get("vendas_7d_reais", 0) <= 2:
+        score += 10
+
     # Sem vendas com gasto em Ads
     if d.get("vendas_7d_reais", 0) == 0 and d.get("ADS_gasto_7d", 0) > 0:
         score += 30
+
+    # Sinais extraídos de cancelamento e contexto macro importado
+    if d.get("taxa_cancelamento_7d_perc", 0) > 12:
+        score += 15
+
+    if d.get("METRICAS_importadas_cancelamentos_7d", 0) > 0 and d.get("vendas_7d_reais", 0) <= 1:
+        score += 10
+
+    if d.get("LOJA_macro_conversao_7d", 0) > 0 and d.get("LOJA_macro_conversao_7d", 0) < 2 and d.get("ADS_gasto_7d", 0) > 5:
+        score += 10
 
     return min(score, 100)
 
@@ -304,6 +504,71 @@ def calcular_score_urgencia(d: dict) -> int:
 def calcular_dias_estoque(d: dict) -> int:
     """Retorna quantos dias de material restam ao ritmo de vendas atual."""
     return d.get("LOGISTICA_dias_estoque_restante", 999)
+
+
+def calcular_elasticidade_preco_volume(preco_hoje: float, preco_7d: float, vendas_7d: int, vendas_antes: int) -> float:
+    """Estimativa simples de sensibilidade de demanda a preço usando variação semanal."""
+    if preco_7d <= 0 or vendas_antes <= 0:
+        return 0.0
+    delta_preco_pct = ((preco_hoje - preco_7d) / preco_7d) * 100
+    delta_vendas_pct = ((vendas_7d - vendas_antes) / vendas_antes) * 100
+    if abs(delta_preco_pct) < 0.5:
+        return 0.0
+    return round(delta_vendas_pct / delta_preco_pct, 3)
+
+
+def calcular_previsao_demanda_7d(d: dict) -> int:
+    """Previsão determinística de demanda para os próximos 7 dias."""
+    vendas_7d = max(0, int(d.get("vendas_7d_reais", 0)))
+    tendencia = float(d.get("tendencia_vendas_WoW_perc", 0))
+    conversao = float(d.get("TRAFEGO_taxa_conversao_perc", 0))
+    roas = float(d.get("ADS_roas_atual", 0))
+    dias_estoque = int(d.get("LOGISTICA_dias_estoque_restante", 999))
+    capacidade = int(d.get("LOGISTICA_capacidade_material_restante", 999_999))
+    estoque = int(d.get("estoque_shopee_hoje", 0))
+
+    forecast = vendas_7d * (1 + tendencia / 100)
+    if conversao >= 3.0:
+        forecast *= 1.10
+    elif conversao <= 1.0:
+        forecast *= 0.85
+    if roas >= 3.0:
+        forecast *= 1.05
+    elif roas <= 1.0:
+        forecast *= 0.90
+    if dias_estoque < 14:
+        forecast *= 0.85
+    if estoque <= 0:
+        forecast *= 0.60
+    if capacidade > 0 and capacidade < 999_999:
+        forecast = min(forecast, capacidade)
+    return int(max(0, round(forecast)))
+
+
+def gerar_recomendacao_executiva(d: dict) -> str:
+    """Gera uma recomendação executiva curta e acionável."""
+    if d.get("ADS_roas_atual", 0) < 1:
+        return "Pausar ads e revisar preço até o ROAS voltar a ser saudável."
+    if d.get("taxa_cancelamento_7d_perc", 0) > 10:
+        return "Reduzir fricção de compra e revisar pós-venda para conter cancelamentos."
+    if d.get("LOGISTICA_dias_estoque_restante", 999) < 7:
+        return "Priorizar reabastecimento ou elevar preço para proteger margem."
+    if d.get("TRAFEGO_taxa_conversao_perc", 0) < 2 and d.get("ADS_gasto_7d", 0) > 5:
+        return "Reestruturar tráfego pago e criativos para recuperar conversão."
+    if d.get("preco_tendencia_7d_perc", 0) < -10 and d.get("vendas_7d_reais", 0) <= 2:
+        return "Reavaliar percepção de preço e testar novo posicionamento."
+    return "Manter estratégia atual e monitorar os próximos 7 dias."
+
+
+def classificar_cluster(d: dict) -> str:
+    """Classifica o SKU em um cluster operacional simples."""
+    if d.get("lucro_liquido_real_7d", 0) < 0 or d.get("ADS_roas_atual", 0) < 1:
+        return "Em risco"
+    if d.get("LOGISTICA_dias_estoque_restante", 999) < 14:
+        return "Reabastecimento"
+    if d.get("TRAFEGO_taxa_conversao_perc", 0) >= 3 and d.get("vendas_7d_reais", 0) > 0:
+        return "Alto potencial"
+    return "Estável"
 
 
 def gerar_alertas_criticos(dossie: list[dict]) -> list[dict]:
@@ -400,21 +665,33 @@ def chamar_cerebro_runpod_preditivo(lote_json: list[dict]) -> list[dict]:
       NUNCA defina "previsao_vendas_7d" acima deste valor.
       Se "LOGISTICA_dias_estoque_restante" < 14, sugira AUMENTAR_PRECO
       para desacelerar vendas e preservar margem até o reabastecimento.
-    - CMO: Use TRAFEGO_*, ADS_gasto_7d e ADS_roas_atual para avaliar saúde
-      do tráfego pago e orgânico.
+    - CMO: Use TRAFEGO_*, ADS_gasto_7d, ADS_roas_atual e LOJA_macro_* para avaliar saúde
+      do tráfego pago e orgânico em relação ao comportamento da loja como um todo.
+      • Use preco_tendencia_7d_perc, estoque_shopee_hoje e METRICAS_importadas_* para identificar
+        sinais de desajuste de preço, risco de ruptura e mudança de demanda.
       • ROAS < 3× com gasto relevante → reduza preço OU pause ads antes de
         queimar mais orçamento em promoção.
       • Alta REPUTACAO_curtidas_favoritos + vendas baixas + tráfego saudável
         → CRIAR_PROMOCAO (notifica os interessados com push Shopee).
       • taxa_abandono_carrinho_perc > 65% → CRIAR_COMBO para diluir frete.
+      • Se taxa_cancelamento_7d_perc > 10 ou cancelamentos_7d forem altos,
+        priorize ações que reduzem fricção e reforcem confiança do cliente.
     - CFO: Maximize "lucro_liquido_real_7d" (já inclui ADS_gasto_7d no cálculo).
       Verifique se custo_fab_real * previsao_vendas_7d cabe dentro da margem.
+      Use "elasticidade_preco_volume" para entender se o item reage fortemente a preço,
+      e trate "cluster_mercado" como um sinal do estágio operacional do SKU.
 
     AÇÕES PERMITIDAS ("tipo_acao"):
     - "AUMENTAR_PRECO" ou "REDUZIR_PRECO"
     - "CRIAR_PROMOCAO"  (obrigatório o campo "horas_duracao_promocao")
     - "CRIAR_COMBO"
     - "MANTER"
+
+    REGRA DE SEGURANÇA:
+    - Priorize ações operacionais seguras: preço, promoção flash e combo.
+    - Nunca sugira criação ou alteração de campanhas de ads pagas como ação executável.
+      Se o problema for ads, descreva a recomendação na análise executiva e no plano de ação,
+      mas não retorne um tipo_acao de ads como ação automática.
 
     FORMATO DE SAÍDA (RETORNE APENAS O ARRAY JSON, SEM MARKDOWN):
     [
@@ -426,6 +703,9 @@ def chamar_cerebro_runpod_preditivo(lote_json: list[dict]) -> list[dict]:
         "horas_duracao_promocao": 24,
         "previsao_vendas_7d": 80,
         "previsao_lucro_7d": 500.00,
+        "elasticidade_preco_volume": -1.25,
+        "cluster_mercado": "Alto potencial",
+        "recomendacao_executiva": "Aumentar preço 5% se o estoque estiver saudável.",
         "relatorio_cfo_financas": "Margem absorve refugo; queima de 10% segura.",
         "relatorio_cmo_marketing": "ROAS 4.2× e conversão 3.1% saudáveis. 300 favoritos; push de 24h os notificará.",
         "relatorio_coo_operacoes": "Material para 150 peças. Fábrica aguenta.",
@@ -504,6 +784,11 @@ def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 8) -> li
                 rec["dados_atuais"]     = original
                 rec["score_urgencia"]   = calcular_score_urgencia(original)
                 rec["dias_estoque"]     = calcular_dias_estoque(original)
+                rec.setdefault("previsao_vendas_7d", original.get("previsao_vendas_7d", 0))
+                rec.setdefault("previsao_lucro_7d", original.get("previsao_lucro_7d", 0))
+                rec.setdefault("elasticidade_preco_volume", original.get("elasticidade_preco_volume", 0))
+                rec.setdefault("cluster_mercado", original.get("cluster_mercado", "Estável"))
+                rec.setdefault("recomendacao_executiva", original.get("recomendacao_executiva", "Monitorar"))
             resultados_finais.append(rec)
 
     barra.empty()
@@ -543,6 +828,9 @@ st.title("🧠 Conselho de Administração IA & Atuador")
 st.markdown(
     "Auditoria profunda de **Finanças, Marketing e Fábrica** com predição de "
     "cenários e gatilhos de Notificação (Push) na Shopee."
+)
+st.info(
+    "Fluxo recomendado: analisar → priorizar → aprovar. As ações de preço, promoção flash e combo podem ser aplicadas com aprovação; decisões de ads e orçamento permanecem em modo de recomendação e revisão manual."
 )
 
 # ─── Botão de disparo ────────────────────────────────────────────────────────
@@ -610,7 +898,85 @@ if alertas:
 
 st.divider()
 
-# ── Relatórios por produto ─────────────────────────────────────────────────────
+# ── Análises executivas adicionais ───────────────────────────────────────────
+if analises:
+    st.subheader("📈 Panorama Executivo")
+    df_analises = pd.DataFrame(analises)
+    if 'dados_atuais' in df_analises.columns:
+        df_analises = df_analises.explode('dados_atuais')
+        df_analises['dados_atuais'] = df_analises['dados_atuais'].apply(lambda x: x or {})
+        df_analises = pd.concat([
+            df_analises.drop(columns=['dados_atuais']),
+            df_analises['dados_atuais'].apply(pd.Series)
+        ], axis=1)
+
+    if 'nome_produto' in df_analises.columns:
+        df_analises['categoria'] = df_analises.get('nome_produto', '').astype(str).str.split().str[0]
+
+    if not df_analises.empty:
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Produtos com urgência alta", int((df_analises.get('score_urgencia', 0) >= 40).sum()))
+        with col2:
+            st.metric("Taxa média de cancelamento", f"{df_analises.get('taxa_cancelamento_7d_perc', 0).mean():.1f}%")
+        with col3:
+            st.metric("Margem média estimada", f"{df_analises.get('lucro_liquido_real_7d', 0).mean():.2f}")
+
+        st.markdown("### 🧩 Agregações por categoria")
+        if 'categoria' in df_analises.columns:
+            agregacao_categoria = df_analises.groupby('categoria', dropna=False).agg(
+                vendas=('vendas_7d_reais', 'sum'),
+                lucro=('lucro_liquido_real_7d', 'sum'),
+                gasto_ads=('ADS_gasto_7d', 'sum'),
+                urgencia=('score_urgencia', 'mean'),
+                cancelamento=('taxa_cancelamento_7d_perc', 'mean')
+            ).sort_values(['lucro', 'vendas'], ascending=False)
+            st.dataframe(agregacao_categoria.reset_index(), use_container_width=True)
+
+        st.markdown("### 🎯 Ranking de potencial de margem")
+        ranking = df_analises.copy()
+        ranking['potencial_margem'] = (
+            ranking.get('lucro_liquido_real_7d', 0) / (ranking.get('ADS_gasto_7d', 0) + 1)
+            + ranking.get('vendas_7d_reais', 0) * 0.2
+            - ranking.get('taxa_cancelamento_7d_perc', 0) * 0.5
+        )
+        ranking_top = ranking.sort_values('potencial_margem', ascending=False).head(10)
+        if not ranking_top.empty:
+            st.dataframe(ranking_top[['nome_produto','nome_variacao','vendas_7d_reais','lucro_liquido_real_7d','ADS_gasto_7d','potencial_margem']].reset_index(drop=True), use_container_width=True)
+
+        st.markdown("### 🚨 Alertas automáticos")
+        alertas_exec = []
+        for _, row in df_analises.iterrows():
+            nome = f"{row.get('nome_produto', 'Produto')} - {row.get('nome_variacao', '')}".strip()
+            if row.get('TRAFEGO_taxa_conversao_perc', 0) < 2 and row.get('ADS_gasto_7d', 0) > 5:
+                alertas_exec.append(("Queda de conversão", nome, "Conversão abaixo do limiar com gasto relevante em ads."))
+            if row.get('taxa_cancelamento_7d_perc', 0) > 10:
+                alertas_exec.append(("Alta taxa de cancelamento", nome, "Cancelamento acima de 10% no período recente."))
+        if alertas_exec:
+            for alerta in alertas_exec[:15]:
+                st.warning(f"{alerta[0]} — {alerta[1]}: {alerta[2]}")
+        else:
+            st.info("Nenhum alerta automático detectado no momento.")
+
+st.subheader("🧠 Elasticidade, Previsão e Recomendações")
+if analises:
+    tabela_exec = []
+    for analise in analises:
+        dados = analise.get("dados_atuais", {})
+        if not dados:
+            continue
+        tabela_exec.append({
+            "produto": dados.get("nome_produto", ""),
+            "variação": dados.get("nome_variacao", ""),
+            "elasticidade_preco_volume": analise.get("elasticidade_preco_volume", dados.get("elasticidade_preco_volume", 0)),
+            "previsao_vendas_7d": analise.get("previsao_vendas_7d", dados.get("previsao_vendas_7d", 0)),
+            "previsao_lucro_7d": analise.get("previsao_lucro_7d", dados.get("previsao_lucro_7d", 0)),
+            "cluster": analise.get("cluster_mercado", dados.get("cluster_mercado", "Estável")),
+            "recomendacao": analise.get("recomendacao_executiva", dados.get("recomendacao_executiva", "Monitorar")),
+        })
+    if tabela_exec:
+        st.dataframe(pd.DataFrame(tabela_exec).sort_values(["previsao_lucro_7d", "previsao_vendas_7d"], ascending=False), use_container_width=True)
+
 st.subheader("📋 Relatórios Executivos por Produto")
 
 for analise in analises:
@@ -642,6 +1008,8 @@ for analise in analises:
         f"{icon_acao} {dados['nome_produto']} · {dados.get('nome_variacao', '')} "
         f"| {acao} | {badge_urgencia} {dias_str}"
     ):
+        modo_execucao, detalhe_execucao = classificar_modo_execucao(acao)
+        st.caption(f"🛡️ Modo de execução: **{modo_execucao}** — {detalhe_execucao}")
 
         # ── Abas do conselho ──────────────────────────────────────────────────
         st.markdown("### 🕵️ Auditoria do Conselho")
@@ -736,6 +1104,10 @@ for analise in analises:
                 st.error(
                     f"🚫 Sugestão bloqueada pela camada de segurança:\n\n**{motivo}**\n\n"
                     "Edite manualmente os valores e aplique via pgAdmin se necessário."
+                )
+            elif modo_execucao == "RECOMENDAR":
+                st.info(
+                    "📌 Esta sugestão é estratégica e ficará em modo de recomendação. O sistema não executará campanhas de ads ou mudanças de orçamento automaticamente."
                 )
             else:
                 # Tudo validado — exibe o botão

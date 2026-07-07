@@ -1,227 +1,57 @@
 # 📊 Estúdio Shopee DW & Cérebro IA
 
-**Data Warehouse + Conselho de IA Autônomo** para Fazendas de Impressão 3D que vendem na Shopee.
+Este projeto é um ecossistema de análise, sincronização e automação para lojas que vendem na Shopee. Ele reúne:
 
-O sistema extrai os seus dados da Shopee, calcula o custo real de fabricação (filamento, energia, refugo), audita a sua loja com um "Conselho de Administração" de IA (CFO, CMO, COO), sugere e aplica promoções de forma autônoma, e deixa você conversar com os seus próprios dados em linguagem natural.
+- coleta automática de dados da Shopee
+- armazenamento em PostgreSQL
+- análise operacional, financeira e de marketing
+- decisões automáticas assistidas por IA
+- importação de arquivos CSV/XLSX para enriquecer o contexto
 
----
-
-## ✅ Pré-requisitos
-
-Antes de começar, confirme que você tem instalado:
-
-- **Docker Desktop** (aberto e rodando)
-- **Python 3.10+**
-- Uma chave grátis da **[Groq](https://console.groq.com/keys)** (para o chat rápido)
-- *(Opcional)* Uma conta na **RunPod** e credenciais da **Shopee Open API v2**, se quiser usar o Cérebro IA pesado e a sincronização real
+O objetivo é transformar dados dispersos em decisões acionáveis com base em margem, tráfego, estoque, ads e comportamento real de vendas.
 
 ---
 
-## 🚀 Guia Rápido: Como Rodar o Sistema (Primeira Instalação)
+## ✅ Como o sistema funciona na prática
 
-Abra o terminal **na pasta raiz do projeto** (a pasta onde está o `docker-compose.yml`) e siga os passos na ordem exata.
+O fluxo principal é este:
 
-### Passo 0 — Configurar as chaves
-Crie um arquivo chamado **`CHAVES_DADOS.env`** na raiz do projeto. O modelo completo, com todas as variáveis explicadas, está na seção [⚙️ Variáveis de Ambiente](#️-variáveis-de-ambiente-chaves_dadosenv) mais abaixo.
-
-### Passo 1 — Subir o banco de dados (Docker)
-```bash
-docker compose --env-file CHAVES_DADOS.env up -d
-docker compose --env-file CHAVES_DADOS.env ps
-
-```
-
-Espere o `cofre_shopee` aparecer com status **healthy**.
-
-> ⚠️ **Use sempre a flag `--env-file CHAVES_DADOS.env**` nos comandos do Docker Compose deste projeto — sem ela, variáveis como `DB_PORT` e `TZ` não chegam ao `docker-compose.yml` corretamente. Veja o motivo no item 1 de [Pontos de Atenção](https://www.google.com/search?q=%23%EF%B8%8F-pontos-de-aten%C3%A7%C3%A3o--erros-conhecidos).
-
-### Passo 2 — Preparar o Python (ambiente virtual)
-
-```bash
-python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# Mac/Linux
-source .venv/bin/activate
-
-pip install -r requirements.txt
-
-```
-
-### Passo 3 — Validar o coração do sistema
-
-```bash
-python test_db.py
-
-```
-
-Se aparecerem **15 itens** listados (14 tabelas + a view `vw_saude_produto`), o seu banco nasceu perfeitamente com as 3 migrations aplicadas.
-
-### Passo 4 — *(Opcional)* Painel visual do banco — pgAdmin
-
-1. Acesse `http://localhost:5050`
-2. Login: o e-mail/senha que você definiu em `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD` (no modelo abaixo: `admin@estudio.com` / `admin`)
-3. **Add New Server** → aba *General* → Name: `Shopee DW`
-4. Aba *Connection*:
-* Host name/address: `postgres_cofre`
-* Port: `5432`
-* Username / Password: os mesmos valores do `CHAVES_DADOS.env`
-* Marque **Save password**
-
-
-
-### Passo 5 — Ligar a aplicação
-
-```bash
-streamlit run data_app.py
-
-```
-
-O sistema abre no navegador, liga o motor de IA (`llm.py`) em segundo plano automaticamente, e o painel fica pronto para uso.
-
-> ⚠️ Se aparecer **"Falha no Boot da IA (Timeout)"**, veja o item 2 e 3 de [Pontos de Atenção](https://www.google.com/search?q=%23%EF%B8%8F-pontos-de-aten%C3%A7%C3%A3o--erros-conhecidos) — há dois detalhes para revisar antes do `llm.py` subir corretamente.
+1. O usuário entra na página de sincronização.
+2. O sistema busca dados da Shopee via API para catálogo, pedidos e estoque.
+3. O usuário pode importar arquivos CSV/XLSX de:
+   - tráfego/orgânico
+   - ads/palavras-chave
+   - visão geral da loja
+4. Esses dados são normalizados e inseridos no Data Warehouse.
+5. O Cérebro IA lê esse contexto e gera recomendações com base em:
+   - ROAS
+   - conversão
+   - lucro real
+   - estoque restante
+   - tendência de preço
+   - comportamento de carrinho
+6. Se a sugestão for aprovada, o sistema pode atuar na Shopee e registrar o resultado em log.
+7. O Cérebro IA também calcula elasticidade preço/volume, previsão de vendas e lucro para 7 dias, além de clusterizar cada SKU em risco, reabastecimento ou alto potencial.
 
 ---
 
-## 🔄 Como Reiniciar o Sistema (Uso Diário)
+## 🔧 Requisitos
 
-Se você já fez a instalação inicial acima e apenas desligou o computador, o processo para ligar o sistema no dia a dia é muito mais rápido. Abra o terminal na raiz do projeto e rode:
-
-**1. Ligar o Banco de Dados (Apenas se o Docker não iniciar sozinho)**
-
-```bash
-docker compose --env-file CHAVES_DADOS.env start
-
-```
-
-*(Nota: O comando `start` apenas "acorda" o banco de dados que você já havia criado. Se preferir, basta abrir o aplicativo do Docker Desktop e dar "Play" no container lá dentro).*
-
-**2. Ativar o Python e iniciar a aplicação**
-
-```bash
-# No Windows:
-.venv\Scripts\activate
-
-# Inicie o painel visual
-streamlit run data_app.py
-
-```
+- Docker Desktop rodando
+- Python 3.10+
+- PostgreSQL via Docker Compose
+- Chaves da Shopee Open API v2
+- Chave da Groq para o chat rápido
+- Chave da RunPod para o Cérebro IA pesado
 
 ---
 
-## 🏗️ Arquitetura do Projeto
+## 🚀 Instalação rápida
 
-```
-estudio-shopee-dw/                  ← pasta raiz (abra o terminal aqui)
-├── CHAVES_DADOS.env                ← suas chaves e senhas (Passo 0)
-├── docker-compose.yml
-├── requirements.txt
-├── test_db.py
-├── llm.py                          ← roteador de IA (ver item 3 dos Pontos de Atenção)
-├── data_app.py                     ← ponto de entrada do Streamlit
-├── init_db/
-│   ├── 01_schema.sql
-│   ├── 02_atualizacao_ia_avancada.sql
-│   └── 03_migration_performance.sql
-├── utils/
-│   ├── db_pool.py                  ← pool de conexões compartilhado
-│   └── shopee_core.py              ← cliente assinado da Shopee API v2
-├── workers/
-│   ├── sync_catalogo.py
-│   ├── sync_pedidos.py
-│   └── sync_trafego_ads.py
-└── pages/
-    ├── 1_🏭_Engenharia_de_Fabrica.py
-    ├── 2_🔄_Sincronizacao.py
-    ├── 3_🧠_Cerebro_IA.py
-    └── 4_💬_Chat_Assistente.py
-
-```
-
-> 💡 Os nomes em `pages/` seguem a convenção do Streamlit: o número define a ordem no menu lateral, e o texto após o emoji é o rótulo exibido.
-
-### 🧠 O Roteador de IA — `llm.py`
-
-Atua como o coração inteligente da máquina, rodando localmente na porta `8000` via **LiteLLM**. A aplicação nunca fala diretamente com os provedores de nuvem — ela fala com a porta 8000, que roteia para dois "cérebros":
-
-* **`chat-rapido`** — Groq (Llama 3.3 70B). Respostas em milissegundos; é o agente Text-to-SQL da aba de Chat.
-* **`cerebro-dados`** — Qwen 2.5 32B (AWQ), hospedado numa GPU RunPod de 24GB VRAM. Ativado só para as auditorias preditivas pesadas do Cérebro IA.
-
-### 🗄️ O Banco de Dados (PostgreSQL + Migrations)
-
-A pasta `init_db/` define a base como um Data Warehouse relacional de E-commerce + Indústria:
-
-| Arquivo | O que faz |
-| --- | --- |
-| `01_schema.sql` | Cria as 13 tabelas base: materiais, máquinas, catálogo, pedidos, escrow, tráfego, ads, controle de sync e log de ações. |
-| `02_atualizacao_ia_avancada.sql` | Adiciona estrelas, likes, prazo de envio, estoque de variação, taxa de refugo, estoque físico de material, motivo de cancelamento, custo de frete reverso, e cria a tabela `fato_promocoes_ativas` (14ª tabela). |
-| `03_migration_performance.sql` | Rastreamento de ações por variação (`model_id`), índices de performance para o dossiê da IA, e a view `vw_saude_produto` (KPIs em tempo real por variação). |
-
-**Numa instalação nova**, o Docker executa os 3 arquivos automaticamente, em ordem, na primeira vez que o container sobe (volume vazio). **Se você já tinha um banco rodando** e está só atualizando o projeto, as migrations `02` e `03` precisam ser aplicadas manualmente — instruções de como fazer isso estão no topo do próprio `03_migration_performance.sql` (é seguro rodá-lo mais de uma vez).
-
-### 🤖 Os Workers (`workers/`)
-
-Scripts isolados que batem na Shopee Open API v2 para extrair dados sem travar a interface:
-
-* `sync_catalogo.py` — anúncios, variações, reputação (likes/estrelas) e estoque virtual.
-* `sync_pedidos.py` — histórico de vendas e lucro líquido real do módulo de Repasse (Escrow).
-* `sync_trafego_ads.py` — jornada do cliente, abandono de carrinho, impressões e cliques patrocinados.
-
-### 🔌 Código Compartilhado (`utils/`)
-
-* `db_pool.py` — pool de conexões PostgreSQL thread-safe (evita abrir/fechar uma conexão a cada interação do Streamlit), com helpers prontos (`query_df`, `query_one`, `execute`, `bulk_insert`).
-* `shopee_core.py` — assinatura HMAC das chamadas à Shopee API v2, e as funções atuadoras (`atualizar_preco_shopee`, `criar_promocao_shopee`, `criar_combo_shopee`) usadas pelo Cérebro IA.
-
-> 📝 Nota: as páginas mais novas (Cérebro IA) já usam o pool compartilhado de `utils/db_pool.py`. A página de Engenharia de Fábrica ainda abre/fecha uma conexão direta por requisição — funciona, mas é menos eficiente; migrar para o pool é uma melhoria futura simples.
-
----
-
-## 🕹️ Manual do Usuário
-
-A interface é dividida em 4 setores, acessíveis pelo menu lateral:
-
-### 1️⃣ Engenharia de Fábrica (`1_🏭_Engenharia_de_Fabrica.py`)
-
-Onde o mundo físico se conecta ao digital.
-
-* **Filamentos & Embalagens:** cadastre o material, custo por KG/unidade e o estoque físico atual — a IA usa isso para prever rupturas.
-* **Máquinas 3D:** custo da tarifa de energia por hora.
-* **Mapeamento de Peças:** associe cada anúncio/variação da Shopee à máquina e ao material, com peso (g), tempo de impressão (min) e a **Taxa de Refugo (%)**. O sistema calcula o custo de fabricação real, já absorvendo as falhas de impressão.
-
-### 2️⃣ Sincronização (`2_🔄_Sincronizacao.py`)
-
-Um único botão faz uma varredura **Delta** automática: o sistema sabe exatamente onde parou da última vez e busca apenas o que falta, fatiando a pesquisa em blocos de 14 dias para não estourar os limites da API da Shopee.
-
-### 3️⃣ Cérebro IA & Atuador (`3_🧠_Cerebro_IA.py`)
-
-O motor preditivo e de atuação — onde as decisões financeiras são tomadas.
-
-* **Pré-análise sem LLM:** antes de gastar uma chamada de IA, o sistema calcula um **score de urgência (0–100)** por variação (ROAS<1×, material acabando em <7 dias, lucro negativo, queda de vendas >30%...) e dispara **alertas críticos automáticos** para os casos óbvios.
-* **Processamento em lotes:** os produtos mais urgentes são enviados primeiro ao Qwen 32B (RunPod), em lotes de até 8 — se a RunPod der timeout, os críticos já foram analisados.
-* **Conselho de Administração:** cada produto recebe um relatório em 3 abas — **CFO** (margem e lucro real), **CMO** (tráfego, conversão, ROAS, abandono de carrinho) e **COO** (capacidade de fábrica e autonomia de estoque em dias).
-* **Camada de segurança:** antes de mostrar o botão de aprovação, o sistema bloqueia sugestões absurdas em código Python (ex: variação de preço acima de 80%, ou previsão de vendas maior do que a fábrica consegue produzir) — sem depender só do LLM "obedecer" o prompt.
-* **Feedback Loop:** compara a projeção feita na última decisão aprovada com o resultado real 7 dias depois, por variação (não mais por produto inteiro — ações de uma cor não "vazam" para a cor irmã).
-* **Atuador:** ao aprovar, o Python chama a Shopee API de verdade (`atualizar_preco_shopee`, `criar_promocao_shopee` ou `criar_combo_shopee`) e grava a decisão no Diário de Bordo (`log_acoes_shopee`).
-
-### 4️⃣ Assistente de Chat (`4_💬_Chat_Assistente.py`)
-
-Sua ferramenta de consulta diária (Text-to-SQL) usando o modelo `chat-rapido` (Groq/Llama 3.3 70B).
-
-* Botões de Análise Rápida: lucratividade dos últimos 7 dias, palavras-chave de Ads que mais consomem orçamento, ranking de reputação, e resumo das últimas ações aprovadas.
-* Pergunte livremente, ex: *"Quais variações tiveram mais de 100 visitas e nenhuma venda?"* — o LLM escreve o SQL, o sistema executa (limitado a 50 linhas por segurança) e devolve a resposta já mastigada.
-
----
-
-## ⚙️ Variáveis de Ambiente (`CHAVES_DADOS.env`)
-
-Crie este arquivo na raiz do projeto com a seguinte estrutura:
+### 1) Criar arquivo de variáveis
+Crie um arquivo chamado CHAVES_DADOS.env na raiz do projeto com as chaves abaixo:
 
 ```env
-# ==========================================
-# POSTGRESQL (BANCO DE DADOS)
-# ==========================================
 POSTGRES_USER=admin_shopee
 POSTGRES_PASSWORD=sua_senha_blindada
 POSTGRES_DB=estudio_shopee
@@ -229,35 +59,257 @@ DB_HOST=localhost
 DB_PORT=5433
 TZ=America/Sao_Paulo
 
-# ==========================================
-# PGADMIN (PAINEL VISUAL — OPCIONAL)
-# ==========================================
 PGADMIN_DEFAULT_EMAIL=admin@estudio.com
 PGADMIN_DEFAULT_PASSWORD=admin
 
-# ==========================================
-# SHOPEE OPEN API V2
-# ==========================================
 SHOPEE_PARTNER_ID=seu_partner_id
 SHOPEE_PARTNER_KEY=sua_partner_key
 SHOPEE_SHOP_ID=seu_shop_id
 SHOPEE_REFRESH_TOKEN=seu_token_de_acesso
 
-# ==========================================
-# INTELIGÊNCIAS ARTIFICIAIS
-# ==========================================
-GROQ_API_KEY=gsk_sua_chave_groq
+GROQ_API_KEY=sua_chave_groq
 RUNPOD_API_KEY=sua_chave_runpod
-ENDPOINT_ID_RUNPOD_DADOS=id_da_sua_maquina_qwen_32b_no_runpod
-ENDPOINT_ID_RUNPOD_vLLM=id_de_outra_maquina_se_existir
-
+ENDPOINT_ID_RUNPOD_DADOS=id_do_endpoint
+ENDPOINT_ID_RUNPOD_vLLM=id_do_endpoint_opcional
 ```
 
-| Variável | Obrigatória? | Para quê serve |
-| --- | --- | --- |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | ✅ | Credenciais do banco — usadas pelo Docker e por todos os scripts Python. |
-| `DB_HOST` | ✅ | `localhost`, já que o Postgres roda no Docker com a porta exposta. |
-| `DB_PORT` | ✅ | Porta exposta no host. Use `5433` (ou outra livre) se você já tiver um PostgreSQL local na porta `5432` padrão. |
+### 2) Subir o banco
+```bash
+docker compose --env-file CHAVES_DADOS.env up -d
+```
+
+### 3) Instalar dependências
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 4) Validar banco
+```bash
+python test_db.py
+```
+
+### 5) Rodar a aplicação
+```bash
+streamlit run data_app.py
+```
+
+---
+
+## 📥 Arquivos que podem ser importados
+
+A página de sincronização aceita CSV/XLSX para enriquecer a análise. Os arquivos são opcionais, mas melhoram muito o contexto da IA.
+
+### 1. Tráfego e performance orgânica
+Use arquivos de performance de produto ou relatório de tráfego.
+
+Campos esperados (ou similares):
+- item_id
+- id do item
+- id do produto
+- nome do produto
+- visitas
+- visitantes
+- carrinho
+- rejeição
+- bounce
+
+### 2. Ads e palavras-chave
+Use relatórios de Shopee Ads ou campanhas.
+
+Campos esperados (ou similares):
+- item_id
+- id do produto
+- nome do produto
+- palavra-chave / keyword
+- impressões
+- cliques
+- custo / gasto / despesa
+- gmv / vendas
+
+### 3. Visão geral da loja
+Use um relatório macro da loja, como dashboard geral ou visão administrativa.
+
+Campos esperados (ou similares):
+- data / dia / date
+- vendas / receita / gmv
+- custo / ads / gasto
+- conversão
+- visitas
+- estoque
+- lucro / margem
+- roas
+
+> O sistema tenta reconhecer nomes de colunas automaticamente. Se o arquivo estiver com cabeçalho diferente, ainda pode funcionar se os termos forem próximos aos listados acima.
+
+---
+
+## 🧠 O que a IA analisa
+
+A análise do Cérebro IA considera:
+
+- faturamento líquido e lucro real
+- ROAS e gasto com ads
+- tráfego orgânico e carrinho abandonado
+- estoque disponível e autonomia em dias
+- variação de preço nos últimos 7 dias
+- reputação, likes e estrelas
+- histórico de ações anteriores para evitar decisões repetidas
+- elasticidade preço/volume
+- previsão de vendas e lucro para os próximos 7 dias
+- cluster operacional do SKU (risco, reabastecimento ou alto potencial)
+
+Isso permite decisões mais sólidas do que uma análise baseada apenas em preço e vendas.
+
+---
+
+## 🏗️ Estrutura do projeto
+
+```text
+analista_dados_shopee/
+├── data_app.py
+├── pages/
+│   ├── 1_🏭_Engenharia_de_Fabrica.py
+│   ├── 2_🔄_Sincronizacao.py
+│   ├── 3_🧠_Cerebro_IA.py
+│   └── 4_💬_Chat_Assistente.py
+├── workers/
+│   ├── sync_catalogo.py
+│   ├── sync_pedidos.py
+│   └── sync_trafego_ads.py
+├── utils/
+│   ├── db_pool.py
+│   └── shopee_core.py
+├── init_db/
+│   ├── 01_schema.sql
+│   ├── 02_atualizacao_ia_avancada.sql
+│   ├── 03_migration_performance.sql
+│   └── 04_migration_global_metrics.sql
+└── requirements.txt
+```
+
+---
+
+## 🔍 Melhorias já implementadas
+
+- histórico de preço e estoque por variação
+- enriquecimento da análise da IA com sinais de tendência de preço
+- previsões determinísticas de demanda e lucro para os próximos 7 dias
+- elasticidade preço/volume para identificar sensibilidade de mercado
+- importação opcional de visão geral da loja
+- processamento mais consistente de CSV/XLSX
+- logs e memória por variação para reduzir decisões duplicadas
+- fluxo de execução seguro: ações de preço, promoção flash e combo podem ser aprovadas; ações de ads permanecem como recomendação com revisão manual
+
+---
+
+## ⚠️ Boas práticas
+
+- mantenha o Docker rodando enquanto usa o sistema
+- importe arquivos com o período correto para não diluir a análise
+- use sempre o mesmo padrão de nome de colunas quando possível
+- verifique se as chaves da Shopee e da IA estão válidas antes de rodar
+
+---
+
+## 🔄 Fluxo recomendado de uso
+
+1. Suba o PostgreSQL com Docker.
+2. Importe ou sincronize catálogo, pedidos e estoque via Shopee.
+3. Enriquecer com CSV/XLSX de tráfego, ads e visão geral da loja.
+4. Abra o Cérebro IA para analisar margem, urgência, risco de estoque, elasticidade de preço e previsão de demanda.
+5. Use o chat assistente para explorar os dados com contexto já estruturado.
+6. Se quiser, importe arquivos CSV/XLSX com métricas extras por item ou loja para enriquecer ainda mais os sinais.
+
+## ✅ Checklist de configuração
+
+- Docker rodando e porta do Postgres livre.
+- Arquivo CHAVES_DADOS.env preenchido com as chaves da Shopee, Groq e RunPod.
+- Dependências instaladas com pip install -r requirements.txt.
+- Banco validado com python test_db.py.
+- Arquivos importados com colunas claras e período consistente.
+
+## 🖥️ Passo a passo para rodar localmente na sua máquina
+
+### 1) Preparar o arquivo de variáveis
+Copie o exemplo:
+
+```bash
+copy CHAVES_DADOS.env.example CHAVES_DADOS.env
+```
+
+Edite o arquivo CHAVES_DADOS.env com suas credenciais reais.
+
+### 2) Subir o banco localmente
+No diretório do projeto:
+
+```bash
+docker compose --env-file CHAVES_DADOS.env up -d
+```
+
+Isso sobe:
+- PostgreSQL em localhost:5433
+- pgAdmin em localhost:5050
+
+### 3) Criar ambiente virtual Python
+
+```bash
+py -3 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+### 4) Validar o banco
+
+```bash
+python test_db.py
+```
+
+### 5) Rodar a aplicação
+
+```bash
+streamlit run data_app.py
+```
+
+### 6) Rodar tudo automaticamente (opcional)
+No PowerShell:
+
+```powershell
+./run_local.ps1
+```
+
+Esse script cria o CHAVES_DADOS.env a partir do exemplo, sobe o Docker, instala as dependências e abre o Streamlit.
+
+## 🔐 Variáveis obrigatórias
+
+- POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
+- DB_HOST / DB_PORT
+- SHOPEE_PARTNER_ID / SHOPEE_PARTNER_KEY / SHOPEE_SHOP_ID / SHOPEE_REFRESH_TOKEN
+- GROQ_API_KEY
+- RUNPOD_API_KEY
+- ENDPOINT_ID_RUNPOD_DADOS
+
+## 📥 Como importar arquivos CSV/XLSX
+
+Os arquivos abaixo são opcionais, mas aumentam bastante a qualidade da análise:
+
+- Tráfego orgânico: arquivos com visitas, visitantes, carrinho, rejeição e bounce.
+- Ads/keywords: arquivos com impressões, cliques, custo, GMV e palavras-chave.
+- Visão geral da loja: arquivos com vendas, receita, custo, conversão, estoque e ROAS.
+
+Se o cabeçalho estiver diferente, o sistema tenta normalizar automaticamente. O melhor resultado vem quando você usa nomes próximos aos esperados, como item_id, nome do produto, custo, vendas, conversão e roas.
+
+## ⚠️ Pontos de atenção
+
+- Se a importação vier com cabeçalhos diferentes, o sistema tenta normalizar automaticamente, mas o resultado fica melhor com nomes próximos aos esperados.
+- Para análise mais confiável, prefira importar dados de um período curto e homogêneo.
+- Se a IA estiver lenta ou não responder, valide as chaves e a disponibilidade do endpoint.
+
+---
+
+Desenvolvido para transformar dados de e-commerce em decisões inteligentes e automatizadas. 🏭📈
 | `TZ` | ✅ | Fuso horário do container Postgres. |
 | `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD` | ⬜ só se for usar o pgAdmin | Login do painel visual em `localhost:5050`. |
 | `SHOPEE_PARTNER_ID/KEY`, `SHOPEE_SHOP_ID`, `SHOPEE_REFRESH_TOKEN` | ✅ para sincronizar | Credenciais da Shopee Open API v2, usadas em `utils/shopee_core.py`. |

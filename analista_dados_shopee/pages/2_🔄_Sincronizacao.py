@@ -4,6 +4,7 @@ import psycopg2.extras
 import pandas as pd
 import io
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -100,6 +101,69 @@ def carregar_dataframe_limpo(uploaded_file):
     df.columns = df.columns.astype(str).str.lower().str.strip()
     return df
 
+
+def normalizar_nome_metric(coluna):
+    nome = re.sub(r'[^a-z0-9]+', '_', coluna.lower()).strip('_')
+    return nome or 'metrica_importada'
+def processar_arquivo_global(arquivo_global):
+    if not arquivo_global:
+        return 0, "Nenhum arquivo de visão geral recebido."
+
+    try:
+        df = carregar_dataframe_limpo(arquivo_global)
+        if df.empty:
+            return 0, "Arquivo vazio ou sem conteúdo reconhecido."
+
+        col_data = next((c for c in df.columns if any(k in c.lower() for k in ['data', 'date', 'dia', 'periodo', 'period'])) , None)
+        if not col_data:
+            return 0, "Não foi possível identificar uma coluna de data no arquivo."
+
+        metricas = []
+        for col in df.columns:
+            if col == col_data:
+                continue
+            nome_col = col.lower()
+            if not any(k in nome_col for k in ['venda', 'receita', 'gmv', 'lucro', 'margem', 'custo', 'ads', 'visita', 'conversao', 'rejei', 'cancel', 'pedido', 'estoque', 'preco', 'price', 'roas', 'taxa']):
+                continue
+
+            for _, row in df.iterrows():
+                try:
+                    data_val = pd.to_datetime(row[col_data], errors='coerce')
+                    if pd.isna(data_val):
+                        continue
+                except Exception:
+                    continue
+
+                valor = limpar_valor(row[col]) if pd.notna(row[col]) and str(row[col]).strip() not in {'-', ''} else 0.0
+                metricas.append((data_val.date(), col, float(valor), arquivo_global.name))
+
+        if not metricas:
+            return 0, "Não foram encontradas métricas reconhecíveis para armazenar."
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS fato_visao_geral_loja (
+                        data_registro DATE NOT NULL,
+                        metric_name VARCHAR(150) NOT NULL,
+                        metric_value DECIMAL(12,2) NOT NULL,
+                        fonte VARCHAR(255) NOT NULL,
+                        PRIMARY KEY (data_registro, metric_name, fonte)
+                    );
+                """)
+                psycopg2.extras.execute_values(cur, """
+                    INSERT INTO fato_visao_geral_loja (data_registro, metric_name, metric_value, fonte)
+                    VALUES %s
+                    ON CONFLICT (data_registro, metric_name, fonte) DO UPDATE SET
+                        metric_value = EXCLUDED.metric_value;
+                """, [(m[0], m[1], m[2], m[3]) for m in metricas])
+            conn.commit()
+
+        return len(metricas), "Sucesso"
+    except Exception as e:
+        return 0, f"Erro ao processar arquivo global: {e}"
+
+
 def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data_fim):
     dias_no_periodo = (data_fim - data_inicio).days + 1
     if dias_no_periodo <= 0: return 0, "A Data Final deve ser maior ou igual à Inicial."
@@ -110,6 +174,7 @@ def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data
             produtos_db = cur.fetchall()
             
     linhas_trafego, linhas_ads = [], []
+    metricas_importadas = []
 
     # 1. PLANILHA DE PERFORMANCE ORGÂNICA
     if arquivo_trafego:
@@ -139,7 +204,25 @@ def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data
                 
                 for d in range(dias_no_periodo):
                     dia_registro = data_inicio + timedelta(days=d)
-                    linhas_trafego.append((item_id, dia_registro.date(), int(visitas/dias_no_periodo), rejeicao, int(carrinho/dias_no_periodo)))
+                    valor_visitas = int(visitas/dias_no_periodo)
+                    valor_carrinho = int(carrinho/dias_no_periodo)
+                    valor_rejeicao = rejeicao / dias_no_periodo if dias_no_periodo > 0 else rejeicao
+                    linhas_trafego.append((item_id, dia_registro.date(), valor_visitas, valor_rejeicao, valor_carrinho))
+
+                    metricas_importadas.append((item_id, dia_registro.date(), 'visitas_importadas', float(valor_visitas), arquivo_trafego.name))
+                    metricas_importadas.append((item_id, dia_registro.date(), 'carrinhos_importados', float(valor_carrinho), arquivo_trafego.name))
+                    metricas_importadas.append((item_id, dia_registro.date(), 'rejeicao_importada', float(valor_rejeicao), arquivo_trafego.name))
+
+                for col in df_t.columns:
+                    if col in {col_id, col_visitas, col_carrinho, col_rejeicao}:
+                        continue
+                    if any(k in col.lower() for k in ['venda','receita','gmv','pedido','ticket','avg','reemb','cancel','devol','margem','custo','gasto','ads','despesa','cpc','ctr','conversao','preco','price','stock','estoque','roas','taxa']):
+                        valor = limpar_valor(row[col]) if pd.notna(row[col]) and str(row[col]).strip() not in {'-', ''} else 0.0
+                        if valor == 0:
+                            continue
+                        for d in range(dias_no_periodo):
+                            dia_registro = data_inicio + timedelta(days=d)
+                            metricas_importadas.append((item_id, dia_registro.date(), normalizar_nome_metric(col), float(valor / dias_no_periodo), arquivo_trafego.name))
         except Exception as e:
             return 0, f"Erro ao ler Tráfego Orgânico: {e}"
 
@@ -180,6 +263,17 @@ def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data
                 for d in range(dias_no_periodo):
                     dia_registro = data_inicio + timedelta(days=d)
                     linhas_ads.append((item_id, kw, dia_registro.date(), int(imp/dias_no_periodo), int(cli/dias_no_periodo), custo/dias_no_periodo, gmv/dias_no_periodo))
+
+                for col in df_a.columns:
+                    if col in {col_id_ads, col_nome, col_kw}:
+                        continue
+                    if any(k in col.lower() for k in ['venda','receita','gmv','pedido','ticket','avg','reemb','cancel','devol','margem','custo','gasto','ads','despesa','cpc','ctr','conversao','preco','price','stock','estoque','roas','taxa','impress','clique']):
+                        valor = limpar_valor(row[col]) if pd.notna(row[col]) and str(row[col]).strip() not in {'-', ''} else 0.0
+                        if valor == 0:
+                            continue
+                        for d in range(dias_no_periodo):
+                            dia_registro = data_inicio + timedelta(days=d)
+                            metricas_importadas.append((item_id, dia_registro.date(), normalizar_nome_metric(col), float(valor / dias_no_periodo), arquivo_ads.name))
         except Exception as e:
             return 0, f"Erro ao ler Arquivo de Ads: {e}"
 
@@ -202,6 +296,15 @@ def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data
                     psycopg2.extras.execute_values(cur, """
                         INSERT INTO fato_ads_palavras_chave (item_id, keyword, data, impressoes, cliques, custo_total, gmv_gerado) VALUES %s
                     """, linhas_ads)
+
+                if metricas_importadas:
+                    cur.execute("DELETE FROM fato_metricas_produto_importadas WHERE data_registro BETWEEN %s AND %s", (data_inicio.date(), data_fim.date()))
+                    psycopg2.extras.execute_values(cur, """
+                        INSERT INTO fato_metricas_produto_importadas (item_id, data_registro, metric_name, metric_value, fonte)
+                        VALUES %s
+                        ON CONFLICT (item_id, data_registro, metric_name, fonte) DO UPDATE SET
+                            metric_value = EXCLUDED.metric_value;
+                    """, metricas_importadas)
             conn.commit()
             
     return total_linhas, "Sucesso"
@@ -210,6 +313,10 @@ def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data
 # INTERFACE COM ABAS (TABS) E LINKS RÁPIDOS
 # ==============================================================================
 st.title("🔄 Sincronização e Data Warehouse")
+st.markdown("""
+Carregue dados de marketing, tráfego e desempenho da Shopee para enriquecer o Data Warehouse.  
+O fluxo é compatível com CSVs e XLSX, e os arquivos são processados de forma consistente para alimentar o Cérebro IA.
+""")
 
 # Exibe o status atual do banco
 col_a, col_b = st.columns(2)
@@ -221,11 +328,16 @@ with col_b: st.info(f"📈 Última extração CSV (Marketing): **{ultima_sync_tr
 st.divider()
 
 # Criação das Abas
+arquivo_global = None
 aba_principal, aba_global = st.tabs(["⚙️ Motor Principal (API + Produtos)", "📈 Visão Geral da Loja (Dashboard Global)"])
 
 with aba_principal:
     st.markdown("### Atualização de Marketing (Itens Específicos)")
-    st.markdown("O Cérebro IA cruza os custos de Ads e a conversão orgânica para otimizar os seus lucros.")
+    st.markdown("""
+    O Cérebro IA cruza os custos de Ads, tráfego orgânico, vendas e estoque para otimizar a lucratividade.  
+    Você pode importar arquivos CSV/XLSX de tráfego orgânico, Ads e performance, desde que contenham o identificador do item/produto.
+    """)
+    st.info("📌 Arquivos esperados: CSV/XLSX com coluna de item_id ou nome do produto e métricas de tráfego/ads. O sistema tenta reconhecer automaticamente os nomes das colunas mais comuns.")
 
     hoje = datetime.now()
     data_sugerida_inicio = ultima_sync_trafego if ultima_sync_trafego else (hoje - timedelta(days=30))
@@ -236,17 +348,19 @@ with aba_principal:
 
     col_trafego, col_ads = st.columns(2)
     with col_trafego:
-        st.markdown("**1. Orgânico (Produtos com Melhor Desempenho, só exportar a aba que abriu)**")
+        st.markdown("**1. Orgânico (Performance de produtos / tráfego)")
         st.link_button("🔗 Ir para Business Insights", "https://seller.shopee.com.br/datacenter/product/performance", use_container_width=True)
-        arquivo_trafego = st.file_uploader("📂 Arraste o CSV de Performance", type=["csv", "xlsx"])
+        st.caption("Use a aba de performance do produto e exporte os dados de visitas, carrinho e rejeição.")
+        arquivo_trafego = st.file_uploader("📂 Arraste o CSV/XLSX de Performance Orgânica", type=["csv", "xlsx"], key="upload_trafego")
         
     with col_ads:
-        st.markdown("**2. Pago (' Dados em nível de palavra-chave e performance ')**")
+        st.markdown("**2. Pago (Ads e palavras-chave)**")
         st.link_button("🔗 Ir para Shopee Ads", "https://seller.shopee.com.br/portal/marketing/pas/index", use_container_width=True)
-        arquivo_ads = st.file_uploader("📂 Arraste o CSV de Ads", type=["csv", "xlsx"])
+        st.caption("Use os dados de campanha, palavra-chave, impressões, cliques, custo e GMV.")
+        arquivo_ads = st.file_uploader("📂 Arraste o CSV/XLSX de Ads", type=["csv", "xlsx"], key="upload_ads")
 
     if not arquivo_trafego and not arquivo_ads:
-        st.warning("⚠️ Insira pelo menos uma das planilhas para atualizar as métricas dos seus anúncios.")
+        st.warning("⚠️ Insira pelo menos uma das planilhas para atualizar as métricas do seu negócio. O processamento é opcional para o fluxo de API, mas melhora bastante a análise da IA.")
 
     datas_validas = isinstance(periodo_selecionado, tuple) and len(periodo_selecionado) == 2
 
@@ -293,15 +407,26 @@ with aba_principal:
                 status.update(label=f"Métricas Inteligentes Consolidadas! ({linhas} registros amarrados)", state="complete")
             else:
                 status.update(label=f"Falha no CSV: {msg}", state="error"); st.stop()
+
+        if arquivo_global is not None:
+            with st.status("4. Importando visão geral da loja...", expanded=True) as status_global:
+                linhas_global, msg_global = processar_arquivo_global(arquivo_global)
+                if msg_global == "Sucesso":
+                    status_global.update(label=f"Visão geral importada! ({linhas_global} métricas registradas)", state="complete")
+                else:
+                    status_global.update(label=f"Falha na visão geral: {msg_global}", state="warning")
                 
         st.balloons()
-        st.success("🎉 Processo Finalizado! O Cérebro IA já pode analisar o ROAS e a conversão de cada peça.")
+        st.success("🎉 Processo Finalizado! O Cérebro IA já pode analisar ROAS, conversão, estoque, preço e performance de cada variação com mais contexto.")
 
 with aba_global:
     st.markdown("### Saúde Geral da Loja (Visão Macros)")
-    st.markdown("Se você deseja que a IA faça análises globais (ex: 'Nossas vendas caíram 10% no feriado'), faça o upload do arquivo de **Informações Gerenciais > Visão Geral** aqui. *(Módulo em expansão)*")
+    st.markdown("""
+    Se você quiser que a IA faça análises globais de loja, como quedas de receita, variações de conversão, custos totais e comportamento de campanhas, você pode importar um arquivo de visão geral da loja.
+    O sistema tenta reconhecer automaticamente colunas de datas e métricas e armazena os valores em uma tabela própria para uso futuro.
+    """)
     st.link_button("🔗 Ir para Visão Geral", "https://seller.shopee.com.br/datacenter/dashboard", use_container_width=True)
     
     arquivo_global = st.file_uploader("📂 Arraste a planilha de Visão Geral (Opcional)", type=["csv", "xlsx"], key="upload_global")
     if arquivo_global:
-        st.info("💡 Arquivo reconhecido. Os dados de taxa de conversão diária da loja inteira serão disponibilizados para a IA nas próximas auditorias.")
+        st.info("💡 Arquivo reconhecido. O sistema tentará identificar automaticamente colunas como data, vendas, receita, conversão, custo, ads, visitas e estoque.")

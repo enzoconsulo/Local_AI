@@ -2,6 +2,7 @@ import sys
 import time
 import psycopg2
 import os
+from datetime import date
 from psycopg2.extras import execute_values
 from loguru import logger
 from pathlib import Path
@@ -101,6 +102,21 @@ def obter_detalhes_e_variacoes(item_ids):
             
     return produtos, variacoes
 
+def garantir_tabela_historico_variacoes(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS fato_historico_variacoes (
+                model_id BIGINT NOT NULL REFERENCES dim_variacoes(model_id) ON DELETE CASCADE,
+                data_registro DATE NOT NULL,
+                preco_venda_atual DECIMAL(10,2),
+                estoque_shopee INTEGER DEFAULT 0,
+                PRIMARY KEY (model_id, data_registro)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fato_historico_variacoes_model_data
+            ON fato_historico_variacoes (model_id, data_registro DESC);
+        """)
+
+
 def salvar_no_banco(produtos, variacoes):
     logger.info("Iniciando sincronização com o PostgreSQL (Catálogo)...")
     try:
@@ -110,6 +126,7 @@ def salvar_no_banco(produtos, variacoes):
             password=os.getenv("POSTGRES_PASSWORD")
         )
         cur = conn.cursor()
+        garantir_tabela_historico_variacoes(conn)
         
         # ATUALIZADO MIGRATION 02: Inserindo as métricas extras do Produto
         query_produtos = """
@@ -131,6 +148,17 @@ def salvar_no_banco(produtos, variacoes):
         """
         valores_variacoes = [(v['model_id'], v['item_id'], v['nome_variacao'], v['sku_variacao'], v['preco_venda_atual'], v['estoque_shopee']) for v in variacoes]
         execute_values(cur, query_variacoes, valores_variacoes)
+
+        query_historico = """
+            INSERT INTO fato_historico_variacoes (model_id, data_registro, preco_venda_atual, estoque_shopee)
+            VALUES %s
+            ON CONFLICT (model_id, data_registro) DO UPDATE SET
+                preco_venda_atual = EXCLUDED.preco_venda_atual,
+                estoque_shopee = EXCLUDED.estoque_shopee;
+        """
+        valores_historico = [(v['model_id'], date.today(), v['preco_venda_atual'], v['estoque_shopee']) for v in variacoes]
+        if valores_historico:
+            execute_values(cur, query_historico, valores_historico)
         
         conn.commit()
         cur.close()
