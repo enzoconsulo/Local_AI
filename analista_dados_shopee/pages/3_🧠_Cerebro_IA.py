@@ -35,6 +35,7 @@ import psycopg2.extras
 import streamlit as st
 from pathlib import Path
 from dotenv import load_dotenv
+import requests
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
@@ -651,6 +652,23 @@ def validar_sugestao_ia(dados: dict, analise: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def acordar_modelo_ia():
+    """Envia um ping simples para forçar o Cold Start do RunPod e aguarda até estar pronto."""
+    payload = {
+        "model": "cerebro-dados",
+        "messages": [{"role": "user", "content": "Acorde. Responda apenas com a palavra 'OK'."}],
+        "max_tokens": 5,
+        "temperature": 0.1
+    }
+    try:
+        # Timeout alto (900s = 15 minutos) SOMENTE para esperar o RunPod alocar a GPU e baixar o modelo
+        response = requests.post(LITELLM_BASE, json=payload, timeout=900)
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        st.error(f"Falha ao acordar o modelo. Verifique os logs do RunPod. Erro: {e}")
+        return False
+
 def chamar_cerebro_runpod_preditivo(lote_json: list[dict]) -> list[dict]:
     """
     Envia o lote ao modelo Qwen 32B no RunPod via LiteLLM Proxy (porta 8000).
@@ -715,20 +733,24 @@ def chamar_cerebro_runpod_preditivo(lote_json: list[dict]) -> list[dict]:
     ]
     """
     try:
-        response = litellm.completion(
-            model="cerebro-dados",
-            api_base=LITELLM_BASE,
-            messages=[
+        payload = {
+            "model": "cerebro-dados",
+            "messages": [
                 {"role": "system", "content": prompt_sistema},
                 {"role": "user",   "content": f"Auditoria:\n{json.dumps(lote_json, indent=2, ensure_ascii=False)}"},
             ],
-            max_tokens=6_000,
-            temperature=0.2,
-        )
-        texto = response.choices[0].message.content.strip()
+            "max_tokens": 6000,
+            "temperature": 0.2
+        }
 
-        # Limpeza robusta de markdown que alguns modelos insistem em adicionar
-        texto = re.sub(r"^```(?:json)?", "", texto).rstrip("`").strip()
+        # Timeout ajustado para 180 segundos
+        response = requests.post(LITELLM_BASE, json=payload, timeout=180)
+        response.raise_for_status()
+
+        texto = response.json()['choices'][0]['message']['content'].strip()
+
+        # Limpeza robusta e segura (sem bugs de visualização)
+        texto = texto.replace("```json", "").replace("```", "").strip()
 
         match = re.search(r"\[.*\]", texto, re.DOTALL)
         if match:
@@ -743,7 +765,7 @@ def chamar_cerebro_runpod_preditivo(lote_json: list[dict]) -> list[dict]:
         return []
 
 
-def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 8) -> list[dict]:
+def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 4) -> list[dict]:
     """
     Ordena o dossiê por urgência (maior score primeiro) e envia à IA em lotes.
     Produtos mais críticos são processados primeiro — caso haja timeout no
@@ -835,8 +857,14 @@ st.info(
 
 # ─── Botão de disparo ────────────────────────────────────────────────────────
 if st.button("⚡ Executar Auditoria Profunda (RunPod)", type="primary"):
-    with st.status("Acordando o Conselho de IA...", expanded=True) as status_boot:
-        st.write("📊 Lendo Data Warehouse e calculando métricas...")
+    with st.status("Preparando o Conselho de IA...", expanded=True) as status_boot:
+        
+        st.write("📡 Enviando sinal de Wake-Up para o RunPod (pode levar 10min na 1ª vez)...")
+        if not acordar_modelo_ia():
+            status_boot.update(label="Falha ao iniciar o RunPod", state="error", expanded=True)
+            st.stop() # Interrompe a execução se a IA não acordar
+
+        st.write("📊 GPU online! Lendo Data Warehouse e calculando métricas...")
         dossie = gerar_dossie_produtos_com_memoria()
 
         if not dossie:
@@ -845,9 +873,9 @@ if st.button("⚡ Executar Auditoria Profunda (RunPod)", type="primary"):
             )
             st.stop()
 
-        st.write(f"✅ {len(dossie)} variações carregadas. Enviando ao RunPod...")
+        st.write(f"✅ {len(dossie)} variações carregadas. Iniciando auditoria...")
         st.session_state.analises_preditivas = processar_em_lotes(dossie)
-        status_boot.update(label="Auditoria concluída!", state="complete", expanded=False)
+        status_boot.update(label="Auditoria concluída com Sucesso!", state="complete", expanded=False)
     st.rerun()
 
 st.divider()

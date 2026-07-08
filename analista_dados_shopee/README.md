@@ -49,6 +49,7 @@ O fluxo principal é este:
 ## 🚀 Instalação rápida
 
 ### 1) Criar arquivo de variáveis
+
 Crie um arquivo chamado CHAVES_DADOS.env na raiz do projeto com as chaves abaixo:
 
 ```env
@@ -74,11 +75,13 @@ ENDPOINT_ID_RUNPOD_vLLM=id_do_endpoint_opcional
 ```
 
 ### 2) Subir o banco
+
 ```bash
 docker compose --env-file CHAVES_DADOS.env up -d
 ```
 
 ### 3) Instalar dependências
+
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
@@ -86,11 +89,13 @@ pip install -r requirements.txt
 ```
 
 ### 4) Validar banco
+
 ```bash
 python test_db.py
 ```
 
 ### 5) Rodar a aplicação
+
 ```bash
 streamlit run data_app.py
 ```
@@ -102,9 +107,11 @@ streamlit run data_app.py
 A página de sincronização aceita CSV/XLSX para enriquecer a análise. Os arquivos são opcionais, mas melhoram muito o contexto da IA.
 
 ### 1. Tráfego e performance orgânica
+
 Use arquivos de performance de produto ou relatório de tráfego.
 
 Campos esperados (ou similares):
+
 - item_id
 - id do item
 - id do produto
@@ -116,9 +123,11 @@ Campos esperados (ou similares):
 - bounce
 
 ### 2. Ads e palavras-chave
+
 Use relatórios de Shopee Ads ou campanhas.
 
 Campos esperados (ou similares):
+
 - item_id
 - id do produto
 - nome do produto
@@ -129,9 +138,11 @@ Campos esperados (ou similares):
 - gmv / vendas
 
 ### 3. Visão geral da loja
+
 Use um relatório macro da loja, como dashboard geral ou visão administrativa.
 
 Campos esperados (ou similares):
+
 - data / dia / date
 - vendas / receita / gmv
 - custo / ads / gasto
@@ -232,7 +243,10 @@ analista_dados_shopee/
 
 ## 🖥️ Passo a passo para rodar localmente na sua máquina
 
+### OPÇÃO 1)
+
 ### 1) Preparar o arquivo de variáveis
+
 Copie o exemplo:
 
 ```bash
@@ -242,6 +256,7 @@ copy CHAVES_DADOS.env.example CHAVES_DADOS.env
 Edite o arquivo CHAVES_DADOS.env com suas credenciais reais.
 
 ### 2) Subir o banco localmente
+
 No diretório do projeto:
 
 ```bash
@@ -249,6 +264,7 @@ docker compose --env-file CHAVES_DADOS.env up -d
 ```
 
 Isso sobe:
+
 - PostgreSQL em localhost:5433
 - pgAdmin em localhost:5050
 
@@ -270,15 +286,26 @@ python test_db.py
 ### 5) Rodar a aplicação
 
 ```bash
-streamlit run data_app.py
+streamlit run .\analista_dados_shopee\data_app.py
 ```
 
-### 6) Rodar tudo automaticamente (opcional)
+### OPÇÃO 2) 
+
+#### Rodar tudo automaticamente (opcional)
+
 No PowerShell:
 
 ```powershell
 ./run_local.ps1
 ```
+
+Depois:
+
+```PowerShell
+streamlit run .\analista_dados_shopee\data_app.py
+```
+
+
 
 Esse script cria o CHAVES_DADOS.env a partir do exemplo, sobe o Docker, instala as dependências e abre o Streamlit.
 
@@ -325,51 +352,49 @@ Desenvolvido para transformar dados de e-commerce em decisões inteligentes e au
 Revisando os arquivos do projeto, encontrei os pontos abaixo que vale corrigir ou ter em mente antes de rodar tudo:
 
 1. **Docker Compose não lê variáveis de `CHAVES_DADOS.env` para o próprio `docker-compose.yml`.**
-O `env_file:` dentro de cada serviço só injeta variáveis **dentro do container** — mas o `${DB_PORT}`, `${TZ}`, `${POSTGRES_USER}` e `${POSTGRES_DB}` usados em `ports:`, `environment:` e `healthcheck:` são substituídos pelo *próprio Compose*, que por padrão só lê um arquivo chamado exatamente `.env`. Como o projeto usa `CHAVES_DADOS.env`, essas substituições ficam vazias.
-**Solução:** sempre rodar `docker compose --env-file CHAVES_DADOS.env <comando>` (já aplicado no Guia Rápido acima).
+   O `env_file:` dentro de cada serviço só injeta variáveis **dentro do container** — mas o `${DB_PORT}`, `${TZ}`, `${POSTGRES_USER}` e `${POSTGRES_DB}` usados em `ports:`, `environment:` e `healthcheck:` são substituídos pelo *próprio Compose*, que por padrão só lê um arquivo chamado exatamente `.env`. Como o projeto usa `CHAVES_DADOS.env`, essas substituições ficam vazias.
+   **Solução:** sempre rodar `docker compose --env-file CHAVES_DADOS.env <comando>` (já aplicado no Guia Rápido acima).
 2. **`data_app.py` procura o `llm.py` uma pasta acima do que deveria.**
-`data_app.py` calcula `ROOT_DIR = CURRENT_DIR.parent`, assumindo que ele mesmo vive uma pasta abaixo da raiz. Mas `test_db.py`, as páginas em `pages/` e os scripts em `utils/`/`workers/` todos assumem uma estrutura **plana**, com `data_app.py`, `llm.py` e `CHAVES_DADOS.env` na mesma pasta raiz.
-**Solução:** mantenha `data_app.py` e `llm.py` na mesma pasta (estrutura sugerida na árvore acima) e troque, em `data_app.py`:
+   `data_app.py` calcula `ROOT_DIR = CURRENT_DIR.parent`, assumindo que ele mesmo vive uma pasta abaixo da raiz. Mas `test_db.py`, as páginas em `pages/` e os scripts em `utils/`/`workers/` todos assumem uma estrutura **plana**, com `data_app.py`, `llm.py` e `CHAVES_DADOS.env` na mesma pasta raiz.
+   **Solução:** mantenha `data_app.py` e `llm.py` na mesma pasta (estrutura sugerida na árvore acima) e troque, em `data_app.py`:
+
 ```python
 ROOT_DIR = CURRENT_DIR.parent
-
 ```
-
 
 por:
+
 ```python
 ROOT_DIR = CURRENT_DIR
-
 ```
 
-
 3. **O arquivo `llm.py` ainda não existe — só um rascunho pendente de mesclagem.**
-O arquivo `mesclar_esse_arquivo_com_o_llmpy.txt` (o próprio nome já diz: "mesclar esse arquivo com o llm.py") é a base para o roteador de IA, mas antes de salvá-lo como `llm.py` na raiz, ajuste duas coisas para alinhar com o restante do projeto:
+   O arquivo `mesclar_esse_arquivo_com_o_llmpy.txt` (o próprio nome já diz: "mesclar esse arquivo com o llm.py") é a base para o roteador de IA, mas antes de salvá-lo como `llm.py` na raiz, ajuste duas coisas para alinhar com o restante do projeto:
+
 * Ele lê um arquivo chamado **`CHAVES.env`** — troque para **`CHAVES_DADOS.env`**.
 * Ele exige as variáveis **`GROQ`** e **`RUNPOD_KEY`** — troque para **`GROQ_API_KEY`** e **`RUNPOD_API_KEY`**, que são os nomes usados em `CHAVES_DADOS.env` e em todo o resto do código.
 * O arquivo `to_add_MAIN_CHAVES.txt` é só um lembrete avulso (`ENDPOINT_ID_RUNPOD_DADOS=...`) — essa variável já está no modelo de `CHAVES_DADOS.env` acima, então esse `.txt` pode ser apagado.
 
-
 4. **Falta a dependência `tabulate` no `requirements.txt`.**
-A página de Chat (`4_💬_Chat_Assistente.py`) usa `df_resultado.to_markdown()`, que exige o pacote `tabulate` — ele não está listado em `requirements.txt` e a página vai quebrar na primeira pergunta que retornar uma tabela.
-**Solução:** adicione `tabulate` ao `requirements.txt` (ou instale manualmente, como já indicado no Passo 2).
+   A página de Chat (`4_💬_Chat_Assistente.py`) usa `df_resultado.to_markdown()`, que exige o pacote `tabulate` — ele não está listado em `requirements.txt` e a página vai quebrar na primeira pergunta que retornar uma tabela.
+   **Solução:** adicione `tabulate` ao `requirements.txt` (ou instale manualmente, como já indicado no Passo 2).
 5. **Contagem de tabelas do `test_db.py` estava desatualizada.**
-O README anterior dizia "13 tabelas". Depois das migrations `02` (que cria `fato_promocoes_ativas`) e `03` (que cria a view `vw_saude_produto`), o total correto é **14 tabelas + 1 view = 15 itens**, já corrigido no Guia Rápido acima.
+   O README anterior dizia "13 tabelas". Depois das ==migra==tions `02` (que cria `fato_promocoes_ativas`) e `03` (que cria a view `vw_saude_produto`), o total correto é **14 tabelas + 1 view = 15 itens**, já corrigido no Guia Rápido acima.
 6. **Nome do modelo Groq no README anterior estava errado.**
-O README antigo chamava o modelo leve de `chat-leve` — o nome real configurado e usado pelo código (em `4_💬_Chat_Assistente.py` e no roteador) é **`chat-rapido`**, já corrigido acima.
+   O README antigo chamava o modelo leve de `chat-leve` — o nome real configurado e usado pelo código (em `4_💬_Chat_Assistente.py` e no roteador) é **`chat-rapido`**, já corrigido acima.
 7. **`uf_destino` pode não estar recebendo a sigla do estado.**
-Em `sync_pedidos.py`, `uf_destino` é preenchido com `order.get("region", "BR")`. O campo `region` da Shopee normalmente devolve o **código do país** (`BR`), não a sigla do estado (`SP`, `RJ`...). Se quiser granularidade por estado, verifique no payload de `get_order_detail` se existe um campo como `recipient_address.state` e ajuste a extração.
+   Em `sync_pedidos.py`, `uf_destino` é preenchido com `order.get("region", "BR")`. O campo `region` da Shopee normalmente devolve o **código do país** (`BR`), não a sigla do estado (`SP`, `RJ`...). Se quiser granularidade por estado, verifique no payload de `get_order_detail` se existe um campo como `recipient_address.state` e ajuste a extração.
 8. **`DATABASE_URL`, `LOG_LEVEL` e `STREAMLIT_SERVER_PORT` no `CHAVES_DADOS.env` não são lidos por nenhum script atualmente.** Não fazem mal nenhum mantidos ali, só não têm efeito — `STREAMLIT_SERVER_PORT`, em especial, só funcionaria se fosse exportada no terminal antes do `streamlit run`, e não apenas guardada no `.env`.
 
 ---
 
 ## 🧯 Problemas Comuns
 
-| Sintoma | Causa provável |
-| --- | --- |
-| `docker compose ps` nunca fica `healthy` | Porta `DB_PORT` já em uso por outro Postgres local — troque para `5433` ou outra porta livre. |
-| `Falha no Boot da IA (Timeout)` no Streamlit | `llm.py` não existe ainda na raiz, ou as chaves do Groq/RunPod estão erradas/vazias — veja os itens 2 e 3 acima. |
-| Erro `ModuleNotFoundError: tabulate` no Chat | Falta instalar o pacote — veja o item 4 acima. |
+| Sintoma                                                       | Causa provável                                                                                                                                                            |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docker compose ps` nunca fica `healthy`                  | Porta`DB_PORT` já em uso por outro Postgres local — troque para `5433` ou outra porta livre.                                                                         |
+| `Falha no Boot da IA (Timeout)` no Streamlit                | `llm.py` não existe ainda na raiz, ou as chaves do Groq/RunPod estão erradas/vazias — veja os itens 2 e 3 acima.                                                      |
+| Erro`ModuleNotFoundError: tabulate` no Chat                 | Falta instalar o pacote — veja o item 4 acima.                                                                                                                            |
 | `Falha ao conectar no PostgreSQL` nas páginas do Streamlit | Confirme que o Docker está rodando (`docker compose ps`) e que `DB_PORT`/`DB_HOST` no `CHAVES_DADOS.env` batem com o que está exposto no `docker-compose.yml`. |
 
 ---
