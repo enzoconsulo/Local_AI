@@ -81,10 +81,10 @@ def gerar_config_yaml():
       api_base: "https://api.runpod.ai/v2/{endpoint_img}/openai/v1"
       api_key: "os.environ/RUNPOD_KEY"
 
-  # 4. O Cérebro Analítico de Dados (RunPod - Qwen 32B AWQ)
+  # 4. O Cérebro Analítico de Dados (RunPod - Qwen 72B AWQ)
   - model_name: cerebro-dados
     litellm_params:
-      model: openai/Qwen/Qwen2.5-32B-Instruct-AWQ
+      model: openai/Qwen/Qwen2.5-72B-Instruct-AWQ
       api_base: "https://api.runpod.ai/v2/{endpoint_dados}/openai/v1"
       api_key: "os.environ/RUNPOD_KEY"
 

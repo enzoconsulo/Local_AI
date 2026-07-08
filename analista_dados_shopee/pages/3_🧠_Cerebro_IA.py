@@ -36,10 +36,13 @@ import streamlit as st
 from pathlib import Path
 from dotenv import load_dotenv
 import requests
+from loguru import logger
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
-load_dotenv(ROOT_DIR / "CHAVES_DADOS.env")
+
+# override=True força o Python a usar a porta 5433 e ignora variáveis falsas do Windows
+load_dotenv(ROOT_DIR / "CHAVES_DADOS.env", override=True)
 
 from utils.shopee_core import (
     atualizar_preco_shopee,
@@ -56,6 +59,9 @@ st.set_page_config(
 
 # Porta 8000 — alinhada com data_app.py e o bootstrap llm.py
 LITELLM_BASE = "http://localhost:8000/v1/chat/completions"
+
+# Caminho para salvar a última auditoria no disco
+CACHE_AUDITORIA = ROOT_DIR / "ultima_auditoria.json"
 
 # Regras de execução recomendadas para o fluxo Shopee
 ACTIONS_EXECUTAVEIS_SEGURAS = {"AUMENTAR_PRECO", "REDUZIR_PRECO", "CRIAR_PROMOCAO", "CRIAR_COMBO"}
@@ -661,19 +667,26 @@ def acordar_modelo_ia():
         "temperature": 0.1
     }
     try:
+        logger.info("📡 [RUNPOD] Enviando ping de Wake-Up. Aguardando inicialização da GPU (pode levar 10 min)...")
         # Timeout alto (900s = 15 minutos) SOMENTE para esperar o RunPod alocar a GPU e baixar o modelo
         response = requests.post(LITELLM_BASE, json=payload, timeout=900)
         response.raise_for_status()
+        logger.success("🟢 [RUNPOD] Servidor acordou e respondeu com sucesso! GPU Online.")
         return True
     except Exception as e:
+        logger.error(f"🔴 [RUNPOD] Falha no Wake-Up: {e}")
         st.error(f"Falha ao acordar o modelo. Verifique os logs do RunPod. Erro: {e}")
         return False
 
-def chamar_cerebro_runpod_preditivo(lote_json: list[dict]) -> list[dict]:
+
+def chamar_cerebro_runpod_preditivo(lote_json: list[dict], max_tentativas: int = 3) -> list[dict]:
     """
-    Envia o lote ao modelo Qwen 32B no RunPod via LiteLLM Proxy (porta 8000).
-    Retorna a lista de análises parseada como JSON.
+    Envia o lote ao modelo no RunPod via LiteLLM Proxy (porta 8000).
+    Possui loop de tentativas (Retry) para garantir que a análise seja 100% feita pela IA.
+    Timeout aumentado para 300s para suportar modelos gigantes (70B/72B).
     """
+    import time  # Importação local para garantir que o sleep funcione
+
     prompt_sistema = """
     Você é o Conselho de Administração (CFO, CMO, COO) de uma Fazenda de Impressão 3D na Shopee.
     Realize uma Auditoria Profunda do Lote fornecido baseando-se em microeconomia.
@@ -732,44 +745,61 @@ def chamar_cerebro_runpod_preditivo(lote_json: list[dict]) -> list[dict]:
       }
     ]
     """
-    try:
-        payload = {
-            "model": "cerebro-dados",
-            "messages": [
-                {"role": "system", "content": prompt_sistema},
-                {"role": "user",   "content": f"Auditoria:\n{json.dumps(lote_json, indent=2, ensure_ascii=False)}"},
-            ],
-            "max_tokens": 6000,
-            "temperature": 0.2
-        }
+    
+    payload = {
+        "model": "cerebro-dados",
+        "messages": [
+            {"role": "system", "content": prompt_sistema},
+            {"role": "user",   "content": f"Auditoria:\n{json.dumps(lote_json, indent=2, ensure_ascii=False)}"},
+        ],
+        "max_tokens": 8000,
+        "temperature": 0.2
+    }
 
-        # Timeout ajustado para 180 segundos
-        response = requests.post(LITELLM_BASE, json=payload, timeout=180)
-        response.raise_for_status()
+    # Loop de Resiliência: Tenta até 3 vezes antes de desistir
+    for tentativa in range(1, max_tentativas + 1):
+        try:
+            logger.info(f"🧠 [RUNPOD] Processando lote de {len(lote_json)} produtos (Tentativa {tentativa}/{max_tentativas})...")
+            
+            # Timeout ajustado para 300 segundos (5 minutos)
+            response = requests.post(LITELLM_BASE, json=payload, timeout=300)
+            response.raise_for_status()
 
-        texto = response.json()['choices'][0]['message']['content'].strip()
+            texto = response.json()['choices'][0]['message']['content'].strip()
+            
+            # Limpeza robusta e segura
+            texto = texto.replace("```json", "").replace("```", "").strip()
 
-        # Limpeza robusta e segura (sem bugs de visualização)
-        texto = texto.replace("```json", "").replace("```", "").strip()
+            match = re.search(r"\[.*\]", texto, re.DOTALL)
+            if match:
+                logger.success(f"✅ [RUNPOD] Lote processado com sucesso na tentativa {tentativa}!")
+                return json.loads(match.group(0))
+            
+            logger.warning("⚠️ [RUNPOD] IA retornou um formato inesperado. Re-tentando...")
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"🔴 [RUNPOD] Falha de conexão/Timeout na tentativa {tentativa}: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"🔴 [RUNPOD] Falha ao decodificar JSON na tentativa {tentativa}: {e}")
+        except Exception as e:
+            logger.error(f"🔴 [RUNPOD] Erro inesperado na tentativa {tentativa}: {e}")
+        
+        # Se chegou aqui, falhou. Espera 5 segundos e tenta de novo.
+        if tentativa < max_tentativas:
+            logger.info("⏳ Aguardando 5 segundos antes de tentar novamente...")
+            time.sleep(5)
+            
+    # Se sair do loop, todas as tentativas falharam. Trava o sistema.
+    mensagem_critica = "🚨 FALHA CRÍTICA: A IA não conseguiu processar este lote após 3 tentativas. A operação foi abortada para garantir que nenhuma análise seja feita sem IA."
+    logger.critical(mensagem_critica)
+    st.error(mensagem_critica)
+    st.stop()
 
-        match = re.search(r"\[.*\]", texto, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        return []
 
-    except json.JSONDecodeError as e:
-        st.error(f"IA retornou JSON inválido: {e}")
-        return []
-    except Exception as e:
-        st.error(f"Erro na comunicação com o Cérebro RunPod: {e}")
-        return []
-
-
-def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 4) -> list[dict]:
+def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 8) -> list[dict]:
     """
-    Ordena o dossiê por urgência (maior score primeiro) e envia à IA em lotes.
-    Produtos mais críticos são processados primeiro — caso haja timeout no
-    RunPod, os menos urgentes ficam de fora, não os críticos.
+    Ordena o dossiê por urgência (maior score primeiro) e envia à IA em lotes maiores.
+    Tamanho do lote ajustado para 8 (ideal para placa de 96GB PRO e modelo 72B).
     """
     # Ordena por score de urgência (decrescente) antes de fatiar
     dossie_ordenado = sorted(
@@ -874,14 +904,34 @@ if st.button("⚡ Executar Auditoria Profunda (RunPod)", type="primary"):
             st.stop()
 
         st.write(f"✅ {len(dossie)} variações carregadas. Iniciando auditoria...")
-        st.session_state.analises_preditivas = processar_em_lotes(dossie)
-        status_boot.update(label="Auditoria concluída com Sucesso!", state="complete", expanded=False)
+        resultados_ia = processar_em_lotes(dossie)
+        st.session_state.analises_preditivas = resultados_ia
+        
+        # 💾 SALVA O BACKUP NO DISCO
+        with open(CACHE_AUDITORIA, "w", encoding="utf-8") as f:
+            json.dump(resultados_ia, f, ensure_ascii=False, indent=4)
+
+        status_boot.update(label="Auditoria concluída e Salva com Sucesso!", state="complete", expanded=False)
+    st.rerun()
     st.rerun()
 
 st.divider()
 
 # ─── Exibe resultados ─────────────────────────────────────────────────────────
 if "analises_preditivas" not in st.session_state or not st.session_state.analises_preditivas:
+    # 🔄 TENTA PUXAR O BACKUP DO DISCO
+    if CACHE_AUDITORIA.exists():
+        try:
+            with open(CACHE_AUDITORIA, "r", encoding="utf-8") as f:
+                st.session_state.analises_preditivas = json.load(f)
+            st.success("📂 Última auditoria recuperada do backup local!")
+        except Exception as e:
+            st.session_state.analises_preditivas = []
+    else:
+        st.session_state.analises_preditivas = []
+
+# Se mesmo com o backup ainda estiver vazio, aí sim pede para rodar
+if not st.session_state.analises_preditivas:
     st.info("Clique no botão acima para iniciar a auditoria do Conselho de IA.")
     st.stop()
 
@@ -931,24 +981,31 @@ if analises:
     st.subheader("📈 Panorama Executivo")
     df_analises = pd.DataFrame(analises)
     if 'dados_atuais' in df_analises.columns:
-        df_analises = df_analises.explode('dados_atuais')
-        df_analises['dados_atuais'] = df_analises['dados_atuais'].apply(lambda x: x or {})
-        df_analises = pd.concat([
-            df_analises.drop(columns=['dados_atuais']),
-            df_analises['dados_atuais'].apply(pd.Series)
-        ], axis=1)
+        dados_expandidos = df_analises['dados_atuais'].apply(
+            lambda x: pd.Series(x if isinstance(x, dict) else {})
+        )
+        df_analises = pd.concat(
+            [df_analises.drop(columns=['dados_atuais']), dados_expandidos],
+            axis=1,
+        )
 
     if 'nome_produto' in df_analises.columns:
         df_analises['categoria'] = df_analises.get('nome_produto', '').astype(str).str.split().str[0]
 
     if not df_analises.empty:
         col1, col2, col3 = st.columns(3)
+        
+        # Recuperando colunas de forma segura (Se não existir, cria uma série com zero)
+        score_urgencia = df_analises.get('score_urgencia', pd.Series([0]))
+        taxa_cancel = df_analises.get('taxa_cancelamento_7d_perc', pd.Series([0]))
+        lucro_liq = df_analises.get('lucro_liquido_real_7d', pd.Series([0]))
+
         with col1:
-            st.metric("Produtos com urgência alta", int((df_analises.get('score_urgencia', 0) >= 40).sum()))
+            st.metric("Produtos com urgência alta", int((score_urgencia >= 40).sum()))
         with col2:
-            st.metric("Taxa média de cancelamento", f"{df_analises.get('taxa_cancelamento_7d_perc', 0).mean():.1f}%")
+            st.metric("Taxa média de cancelamento", f"{taxa_cancel.mean():.1f}%")
         with col3:
-            st.metric("Margem média estimada", f"{df_analises.get('lucro_liquido_real_7d', 0).mean():.2f}")
+            st.metric("Margem média estimada", f"{lucro_liq.mean():.2f}")
 
         st.markdown("### 🧩 Agregações por categoria")
         if 'categoria' in df_analises.columns:
