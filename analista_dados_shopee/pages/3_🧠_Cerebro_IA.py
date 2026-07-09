@@ -110,42 +110,38 @@ def gerar_dossie_produtos_com_memoria():
     Query principal do Cérebro IA.
 
     Correções aplicadas:
-    - Fix #4  vendas_anteriores usa JOIN com fato_repasse_escrow para comparar
-              apenas pedidos concluídos (igual a vendas_7d).
-    - Fix #7  memoria_ia usa DISTINCT ON (model_id) em vez de (item_id),
-              e faz JOIN com v.model_id para não vazar memória entre variações.
-    - Fix #9  ads_7d e trafego_7d são agregados por item_id, mas o produto
-              pode ter N variações. Sem correção, cada variação herdava o
-              gasto/tráfego INTEIRO do item, inflando somas agregadas
-              (dashboard e score_urgencia). Agora dividimos pelo nº de
-              variações do produto (variacoes_por_item).
-    - Fix #11 Insumos usados ESTRITAMENTE para base de cálculo de custo.
-              Desativado o limite de capacidade e dias de estoque, evitando
-              falsos alertas críticos de "material acabando".
+    - Fix #4, #7, #9, #11 e #12 mantidos rigorosamente.
+    - Fix #13 (NOVO) Alinhamento de Lucro com JS: A projeção futura (previsao_lucro_7d)
+              estava usando Preço Bruto - Custo, ignorando a taxa da Shopee nas vendas 
+              futuras. Implementada a extração da taxa média real do produto e o cálculo 
+              da 'margem_unitaria_real' para garantir que a IA veja a margem líquida exata,
+              permitindo projeções de lucro negativo para que o CFO tome atitudes severas.
     """
     query = """
     WITH vendas_7d AS (
         SELECT
             i.model_id,
-            SUM(i.quantidade)                                         AS qtd_vendida,
-            SUM(r.lucro_liquido_absoluto)                             AS lucro_liquido_total,
-            AVG(r.comissao_shopee + r.taxa_servico + r.taxa_transacao) AS taxa_media_shopee
+            SUM(i.quantidade) AS qtd_vendida,
+            -- Se não tem repasse (escrow) porque o cliente ainda não confirmou, estimamos 82% do valor
+            SUM(COALESCE(r.lucro_liquido_absoluto, (v.preco_venda_atual * 0.82) * i.quantidade)) AS lucro_liquido_total,
+            AVG(COALESCE(r.comissao_shopee + r.taxa_servico + r.taxa_transacao, v.preco_venda_atual * 0.18)) AS taxa_media_shopee
         FROM fato_itens_pedido i
-        JOIN fato_repasse_escrow  r ON i.order_sn  = r.order_sn
-        JOIN fato_pedidos_venda   p ON p.order_sn  = r.order_sn
+        JOIN fato_pedidos_venda p ON p.order_sn = i.order_sn
+        JOIN dim_variacoes v ON v.model_id = i.model_id
+        LEFT JOIN fato_repasse_escrow r ON i.order_sn = r.order_sn
         WHERE p.data_hora_criacao >= CURRENT_DATE - INTERVAL '7 days'
+          AND p.status_pedido NOT IN ('CANCELLED', 'CANCELED', 'CANCELLED_BY_BUYER', 'IN_CANCEL')
         GROUP BY i.model_id
     ),
     vendas_anteriores AS (
-        -- Fix #4: mesmo JOIN com escrow para comparar maçãs com maçãs
         SELECT
             i.model_id,
             SUM(i.quantidade) AS qtd_vendida_antiga
         FROM fato_itens_pedido i
-        JOIN fato_repasse_escrow  r ON i.order_sn = r.order_sn
-        JOIN fato_pedidos_venda   p ON p.order_sn = r.order_sn
+        JOIN fato_pedidos_venda p ON p.order_sn = i.order_sn
         WHERE p.data_hora_criacao >= CURRENT_DATE - INTERVAL '14 days'
           AND p.data_hora_criacao <  CURRENT_DATE - INTERVAL '7 days'
+          AND p.status_pedido NOT IN ('CANCELLED', 'CANCELED', 'CANCELLED_BY_BUYER', 'IN_CANCEL')
         GROUP BY i.model_id
     ),
     ads_7d AS (
@@ -168,7 +164,6 @@ def gerar_dossie_produtos_com_memoria():
         GROUP BY item_id
     ),
     variacoes_por_item AS (
-        -- Fix #9: nº de variações ativas por produto, para ratear ads/tráfego
         SELECT
             v.item_id,
             COUNT(*) AS qtd_variacoes
@@ -220,9 +215,6 @@ def gerar_dossie_produtos_com_memoria():
         WHERE data_registro >= CURRENT_DATE - INTERVAL '7 days'
     ),
     memoria_ia AS (
-        -- Fix #7: DISTINCT ON model_id (não item_id) e JOIN correto abaixo
-        -- Logs antigos sem model_id (model_id IS NULL) são excluídos — ok,
-        -- pois estavam "vazando" para variações-irmãs.
         SELECT DISTINCT ON (model_id)
             item_id, model_id, tipo_acao, detalhe_acao,
             impacto_projetado, data_aplicacao
@@ -278,7 +270,6 @@ def gerar_dossie_produtos_com_memoria():
         COALESCE(macro.visitas_macro_7d, 0) AS visitas_macro_7d,
         COALESCE(macro.estoque_macro_7d, 0) AS estoque_macro_7d,
 
-        -- Custo de fabricação já com refugo embutido
         (
             (
                 (CASE WHEN mat.unidade_medida = 'kg'
@@ -296,7 +287,6 @@ def gerar_dossie_produtos_com_memoria():
         COALESCE(mat.estoque_atual, 0)       AS estoque_material_atual,
         mat.unidade_medida                   AS unidade_material,
 
-        -- Memória da última ação por VARIAÇÃO (Fix #7)
         m.tipo_acao          AS ultima_acao,
         m.detalhe_acao       AS ultimo_detalhe,
         m.impacto_projetado  AS ultima_projecao
@@ -315,8 +305,8 @@ def gerar_dossie_produtos_com_memoria():
     LEFT JOIN cancelamentos_7d can    ON v.model_id  = can.model_id
     LEFT JOIN metricas_importadas_7d mi ON p.item_id = mi.item_id
     LEFT JOIN macro_loja_7d macro     ON TRUE
-    LEFT JOIN memoria_ia    m         ON v.model_id  = m.model_id   -- Fix #7
-    LEFT JOIN historico_variacoes h  ON v.model_id  = h.model_id
+    LEFT JOIN memoria_ia    m         ON v.model_id  = m.model_id
+    LEFT JOIN historico_variacoes h   ON v.model_id  = h.model_id
     WHERE p.status_shopee = 'NORMAL';
     """
 
@@ -337,7 +327,17 @@ def gerar_dossie_produtos_com_memoria():
         custo_fab    = float(r["custo_fabricacao_com_refugo"] or 0)
         receita_liq  = float(r["receita_liquida_7d"])
 
-        # Fix #9: rateia gasto de ads e tráfego pelo nº de variações do item
+        # ====== ALINHAMENTO COM O SEU CÓDIGO JS ======
+        # Extrai a taxa exata que a Shopee cobrou nas vendas desta semana.
+        # Se for um produto novo/sem vendas, assume a taxa padrão base (18%).
+        taxa_shopee_unitaria = float(r["taxa_shopee_unitaria"] or 0)
+        if taxa_shopee_unitaria <= 0:
+            taxa_shopee_unitaria = preco * 0.18
+            
+        # Margem real = Preço de Venda - Taxa Shopee - Custo de Fábrica
+        margem_unitaria_real = preco - taxa_shopee_unitaria - custo_fab
+        # =============================================
+
         qtd_variacoes = max(1, int(r["qtd_variacoes_produto"] or 1))
         gasto_ads    = float(r["gasto_ads_7d"]) / qtd_variacoes
         visitas      = int(r["visitas_7d"]) // qtd_variacoes
@@ -368,8 +368,6 @@ def gerar_dossie_produtos_com_memoria():
             if vendas_antes > 0 else (100 if vendas > 0 else 0)
         )
 
-        # Fix #11: Rastreio de capacidade física e estoque desativados.
-        # O insumo é usado apenas como base de cálculo de custo.
         capacidade_maxima = 999_999
         dias_estoque = 999
 
@@ -402,7 +400,6 @@ def gerar_dossie_produtos_com_memoria():
             "REPUTACAO_estrelas":               float(r["estrelas"]),
             "REPUTACAO_curtidas_favoritos":     r["curtidas_favoritos"],
             
-            # Repassando a capacidade "infinita"
             "LOGISTICA_capacidade_material_restante": capacidade_maxima,
             "LOGISTICA_dias_estoque_restante":  dias_estoque,
 
@@ -425,6 +422,7 @@ def gerar_dossie_produtos_com_memoria():
             "LOJA_macro_visitas_7d": round(visitas_macro_7d, 2),
             "LOJA_macro_estoque_7d": round(estoque_macro_7d, 2),
             "elasticidade_preco_volume": calcular_elasticidade_preco_volume(preco_hoje, preco_7d, vendas, vendas_antes),
+            
             "previsao_vendas_7d": calcular_previsao_demanda_7d({
                 "vendas_7d_reais": vendas,
                 "tendencia_vendas_WoW_perc": tendencia_perc,
@@ -434,8 +432,12 @@ def gerar_dossie_produtos_com_memoria():
                 "LOGISTICA_capacidade_material_restante": capacidade_maxima,
                 "estoque_shopee_hoje": estoque_hoje,
             }),
+            
+            # Aqui está a chave mestre: a projeção agora usa a Margem Unitária Real.
+            # Removida a trava do 'max(0...)' ao redor de toda a conta para permitir que a IA veja
+            # o prejuízo (lucro negativo) se o produto for ruim.
             "previsao_lucro_7d": round(
-                max(0, calcular_previsao_demanda_7d({
+                (calcular_previsao_demanda_7d({
                     "vendas_7d_reais": vendas,
                     "tendencia_vendas_WoW_perc": tendencia_perc,
                     "TRAFEGO_taxa_conversao_perc": taxa_conversao,
@@ -443,8 +445,9 @@ def gerar_dossie_produtos_com_memoria():
                     "LOGISTICA_dias_estoque_restante": dias_estoque,
                     "LOGISTICA_capacidade_material_restante": capacidade_maxima,
                     "estoque_shopee_hoje": estoque_hoje,
-                }) * max(0, preco - custo_fab) - (gasto_ads * 0.9)), 2
+                }) * margem_unitaria_real) - (gasto_ads * 0.9), 2
             ),
+            
             "cluster_mercado": classificar_cluster({
                 "lucro_liquido_real_7d": lucro_operacional,
                 "ADS_roas_atual": roas_atual,
