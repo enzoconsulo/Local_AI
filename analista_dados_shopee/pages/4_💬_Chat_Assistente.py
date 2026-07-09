@@ -29,6 +29,9 @@ def get_db_connection():
 
 def run_query(query):
     """Executa consultas de leitura no banco de dados e retorna um DataFrame Pandas"""
+    query_normalizada = query.strip().lstrip("(").strip().upper()
+    if not query_normalizada.startswith("SELECT") and not query_normalizada.startswith("WITH"):
+        raise ValueError("Por segurança, apenas comandos SELECT são permitidos neste chat.")
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -36,7 +39,6 @@ def run_query(query):
                 if cur.description:
                     col_names = [desc[0] for desc in cur.description]
                     df = pd.DataFrame(cur.fetchall(), columns=col_names)
-                    # TRAVA ANTI-CRASH: Força o limite de 50 linhas mesmo se a IA esquecer o LIMIT no SQL
                     return df.head(50)
                 else:
                     return pd.DataFrame()

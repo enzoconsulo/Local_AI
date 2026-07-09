@@ -102,6 +102,7 @@ def garantir_tabela_historico_variacoes():
                 CREATE INDEX IF NOT EXISTS idx_fato_historico_variacoes_model_data
                 ON fato_historico_variacoes (model_id, data_registro DESC);
             """)
+        conn.commit()
 
 
 def gerar_dossie_produtos_com_memoria():
@@ -113,7 +114,14 @@ def gerar_dossie_produtos_com_memoria():
               apenas pedidos concluídos (igual a vendas_7d).
     - Fix #7  memoria_ia usa DISTINCT ON (model_id) em vez de (item_id),
               e faz JOIN com v.model_id para não vazar memória entre variações.
-    - Extra   Adiciona dias_estoque_restante calculado diretamente no SQL.
+    - Fix #9  ads_7d e trafego_7d são agregados por item_id, mas o produto
+              pode ter N variações. Sem correção, cada variação herdava o
+              gasto/tráfego INTEIRO do item, inflando somas agregadas
+              (dashboard e score_urgencia). Agora dividimos pelo nº de
+              variações do produto (variacoes_por_item).
+    - Fix #11 Insumos usados ESTRITAMENTE para base de cálculo de custo.
+              Desativado o limite de capacidade e dias de estoque, evitando
+              falsos alertas críticos de "material acabando".
     """
     query = """
     WITH vendas_7d AS (
@@ -158,6 +166,14 @@ def gerar_dossie_produtos_com_memoria():
         FROM fato_trafego_diario
         WHERE data >= CURRENT_DATE - INTERVAL '7 days'
         GROUP BY item_id
+    ),
+    variacoes_por_item AS (
+        -- Fix #9: nº de variações ativas por produto, para ratear ads/tráfego
+        SELECT
+            v.item_id,
+            COUNT(*) AS qtd_variacoes
+        FROM dim_variacoes v
+        GROUP BY v.item_id
     ),
     pedidos_7d AS (
         SELECT
@@ -246,6 +262,7 @@ def gerar_dossie_produtos_com_memoria():
         COALESCE(t.visitas, 0)               AS visitas_7d,
         COALESCE(t.carrinhos, 0)             AS carrinhos_7d,
         COALESCE(a.gasto_ads, 0)             AS gasto_ads_7d,
+        COALESCE(vi.qtd_variacoes, 1)        AS qtd_variacoes_produto,
         COALESCE(ped.pedidos_7d, 0)          AS pedidos_7d,
         COALESCE(can.cancelamentos_7d, 0)    AS cancelamentos_7d,
         COALESCE(mi.vendas_importadas_7d, 0) AS vendas_importadas_7d,
@@ -293,6 +310,7 @@ def gerar_dossie_produtos_com_memoria():
     LEFT JOIN vendas_anteriores vant  ON v.model_id  = vant.model_id
     LEFT JOIN ads_7d        a         ON p.item_id   = a.item_id
     LEFT JOIN trafego_7d    t         ON p.item_id   = t.item_id
+    LEFT JOIN variacoes_por_item vi   ON p.item_id   = vi.item_id
     LEFT JOIN pedidos_7d    ped       ON v.model_id  = ped.model_id
     LEFT JOIN cancelamentos_7d can    ON v.model_id  = can.model_id
     LEFT JOIN metricas_importadas_7d mi ON p.item_id = mi.item_id
@@ -318,11 +336,15 @@ def gerar_dossie_produtos_com_memoria():
         estoque_7d   = int(r["estoque_7d_atras"] or 0)
         custo_fab    = float(r["custo_fabricacao_com_refugo"] or 0)
         receita_liq  = float(r["receita_liquida_7d"])
-        gasto_ads    = float(r["gasto_ads_7d"])
+
+        # Fix #9: rateia gasto de ads e tráfego pelo nº de variações do item
+        qtd_variacoes = max(1, int(r["qtd_variacoes_produto"] or 1))
+        gasto_ads    = float(r["gasto_ads_7d"]) / qtd_variacoes
+        visitas      = int(r["visitas_7d"]) // qtd_variacoes
+        carrinhos    = int(r["carrinhos_7d"]) // qtd_variacoes
+
         vendas       = int(r["vendas_7d"])
         vendas_antes = int(r["vendas_semana_passada"])
-        visitas      = int(r["visitas_7d"])
-        carrinhos    = int(r["carrinhos_7d"])
         pedidos_7d   = int(r["pedidos_7d"] or 0)
         cancelamentos_7d = int(r["cancelamentos_7d"] or 0)
         receita_importada_7d = float(r["receita_importada_7d"] or 0)
@@ -346,22 +368,10 @@ def gerar_dossie_produtos_com_memoria():
             if vendas_antes > 0 else (100 if vendas > 0 else 0)
         )
 
-        # Capacidade de produção restante (limitada pelo estoque de material)
+        # Fix #11: Rastreio de capacidade física e estoque desativados.
+        # O insumo é usado apenas como base de cálculo de custo.
         capacidade_maxima = 999_999
-        if r["peso_gramas"] and float(r["peso_gramas"]) > 0:
-            estoque_g = (
-                float(r["estoque_material_atual"]) * 1000
-                if r["unidade_material"] == "kg"
-                else float(r["estoque_material_atual"])
-            )
-            capacidade_maxima = int(estoque_g / float(r["peso_gramas"]))
-
-        # Dias de autonomia ao ritmo de vendas atual
-        if vendas > 0:
-            taxa_diaria   = vendas / 7
-            dias_estoque  = round(capacidade_maxima / taxa_diaria)
-        else:
-            dias_estoque  = 999  # sem vendas = estoque "infinito"
+        dias_estoque = 999
 
         historico_ia = None
         if r["ultima_acao"]:
@@ -391,6 +401,8 @@ def gerar_dossie_produtos_com_memoria():
 
             "REPUTACAO_estrelas":               float(r["estrelas"]),
             "REPUTACAO_curtidas_favoritos":     r["curtidas_favoritos"],
+            
+            # Repassando a capacidade "infinita"
             "LOGISTICA_capacidade_material_restante": capacidade_maxima,
             "LOGISTICA_dias_estoque_restante":  dias_estoque,
 
@@ -827,16 +839,30 @@ def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 8) -> li
             lote_original = futuros[futuro]
             try:
                 resultado_lote = futuro.result()
-                
+
                 # Faz o merge dos dados enriquecidos
                 for rec in resultado_lote:
+                    # Fix #10: blinda contra o LLM devolver item_id/model_id como
+                    # string em vez de int — sem isso, o match falha e o produto
+                    # some silenciosamente do relatório.
+                    try:
+                        rec_item_id = int(rec.get("item_id"))
+                        rec_model_id = int(rec.get("model_id"))
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            f"⚠️ [RUNPOD] Registro com item_id/model_id inválido, ignorado: {rec}"
+                        )
+                        continue
+
                     original = next(
                         (d for d in lote_original
-                         if d["item_id"] == rec.get("item_id")
-                         and d["model_id"] == rec.get("model_id")),
+                         if int(d["item_id"]) == rec_item_id
+                         and int(d["model_id"]) == rec_model_id),
                         None,
                     )
                     if original:
+                        rec["item_id"] = rec_item_id
+                        rec["model_id"] = rec_model_id
                         rec["dados_atuais"]     = original
                         rec["score_urgencia"]   = calcular_score_urgencia(original)
                         rec["dias_estoque"]     = calcular_dias_estoque(original)
@@ -845,10 +871,16 @@ def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 8) -> li
                         rec.setdefault("elasticidade_preco_volume", original.get("elasticidade_preco_volume", 0))
                         rec.setdefault("cluster_mercado", original.get("cluster_mercado", "Estável"))
                         rec.setdefault("recomendacao_executiva", original.get("recomendacao_executiva", "Monitorar"))
+                    else:
+                        logger.warning(
+                            f"⚠️ [RUNPOD] Nenhum produto original encontrado para "
+                            f"item_id={rec_item_id}, model_id={rec_model_id} — descartado."
+                        )
+                        continue
                     resultados_finais.append(rec)
             except Exception as e:
                 logger.error(f"Erro ao processar um dos lotes em paralelo: {e}")
-            
+
             # Atualiza a barra de progresso à medida que os lotes regressam da nuvem
             lotes_concluidos += 1
             barra.progress(
@@ -883,6 +915,7 @@ def salvar_log_acao(
                 """,
                 (item_id, model_id, tipo_acao, detalhe, json.dumps(impacto_json), status),
             )
+        conn.commit()
 
 
 # ==============================================================================
@@ -925,7 +958,6 @@ if st.button("⚡ Executar Auditoria Profunda (RunPod)", type="primary"):
             json.dump(resultados_ia, f, ensure_ascii=False, indent=4)
 
         status_boot.update(label="Auditoria concluída e Salva com Sucesso!", state="complete", expanded=False)
-    st.rerun()
     st.rerun()
 
 st.divider()
