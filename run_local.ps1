@@ -59,5 +59,12 @@ docker compose --env-file analista_dados_shopee/CHAVES_DADOS.env -f analista_dad
 Write-Host "Validando conexão com o banco..." -ForegroundColor Cyan
 python analista_dados_shopee/test_db.py
 
+# --- Se banco nao iniciar, crasha o pipeline e impede a execução da aplicação ---
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Falha na conexão com o banco de dados. Pipeline abortado para proteger a integridade da aplicação."
+    exit 1
+}
+# ---------------------------------
+
 Write-Host "Inicializando o motor de IA..." -ForegroundColor Cyan
 python llm.py

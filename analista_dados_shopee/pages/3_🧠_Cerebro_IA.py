@@ -37,6 +37,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import requests
 from loguru import logger
+import concurrent.futures
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
@@ -668,8 +669,8 @@ def acordar_modelo_ia():
     }
     try:
         logger.info("📡 [RUNPOD] Enviando ping de Wake-Up. Aguardando inicialização da GPU (pode levar 10 min)...")
-        # Timeout alto (900s = 15 minutos) SOMENTE para esperar o RunPod alocar a GPU e baixar o modelo
-        response = requests.post(LITELLM_BASE, json=payload, timeout=900)
+        # Timeout alto (600s = 10 minutos) SOMENTE para esperar o RunPod alocar a GPU e baixar o modelo
+        response = requests.post(LITELLM_BASE, json=payload, timeout=600)
         response.raise_for_status()
         logger.success("🟢 [RUNPOD] Servidor acordou e respondeu com sucesso! GPU Online.")
         return True
@@ -798,8 +799,8 @@ def chamar_cerebro_runpod_preditivo(lote_json: list[dict], max_tentativas: int =
 
 def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 8) -> list[dict]:
     """
-    Ordena o dossiê por urgência (maior score primeiro) e envia à IA em lotes maiores.
-    Tamanho do lote ajustado para 8 (ideal para placa de 96GB PRO e modelo 72B).
+    Ordena o dossiê por urgência (maior score primeiro) e envia à IA em lotes usando
+    concorrência (Threads) para explorar o Continuous Batching do vLLM e economizar no RunPod.
     """
     # Ordena por score de urgência (decrescente) antes de fatiar
     dossie_ordenado = sorted(
@@ -814,34 +815,46 @@ def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 8) -> li
     ]
 
     resultados_finais = []
-    barra = st.progress(0, text="Iniciando análise...")
+    barra = st.progress(0, text="🚀 Iniciando auditoria paralela no RunPod...")
+    lotes_concluidos = 0
 
-    for i, lote in enumerate(lotes):
-        barra.progress(
-            (i + 1) / len(lotes),
-            text=f"⏳ Conselho auditando lote {i + 1} de {len(lotes)} "
-                 f"({len(lote)} produtos)...",
-        )
+    # Explorando a concorrência: Envia até 5 lotes simultaneamente para a GPU
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        # Mapeia cada futuro (tarefa) ao seu lote original
+        futuros = {executor.submit(chamar_cerebro_runpod_preditivo, lote): lote for lote in lotes}
 
-        resultado_lote = chamar_cerebro_runpod_preditivo(lote)
-
-        for rec in resultado_lote:
-            original = next(
-                (d for d in lote
-                 if d["item_id"] == rec.get("item_id")
-                 and d["model_id"] == rec.get("model_id")),
-                None,
+        for futuro in concurrent.futures.as_completed(futuros):
+            lote_original = futuros[futuro]
+            try:
+                resultado_lote = futuro.result()
+                
+                # Faz o merge dos dados enriquecidos
+                for rec in resultado_lote:
+                    original = next(
+                        (d for d in lote_original
+                         if d["item_id"] == rec.get("item_id")
+                         and d["model_id"] == rec.get("model_id")),
+                        None,
+                    )
+                    if original:
+                        rec["dados_atuais"]     = original
+                        rec["score_urgencia"]   = calcular_score_urgencia(original)
+                        rec["dias_estoque"]     = calcular_dias_estoque(original)
+                        rec.setdefault("previsao_vendas_7d", original.get("previsao_vendas_7d", 0))
+                        rec.setdefault("previsao_lucro_7d", original.get("previsao_lucro_7d", 0))
+                        rec.setdefault("elasticidade_preco_volume", original.get("elasticidade_preco_volume", 0))
+                        rec.setdefault("cluster_mercado", original.get("cluster_mercado", "Estável"))
+                        rec.setdefault("recomendacao_executiva", original.get("recomendacao_executiva", "Monitorar"))
+                    resultados_finais.append(rec)
+            except Exception as e:
+                logger.error(f"Erro ao processar um dos lotes em paralelo: {e}")
+            
+            # Atualiza a barra de progresso à medida que os lotes regressam da nuvem
+            lotes_concluidos += 1
+            barra.progress(
+                lotes_concluidos / len(lotes),
+                text=f"⏳ Conselho auditando lotes em paralelo ({lotes_concluidos}/{len(lotes)} concluídos)..."
             )
-            if original:
-                rec["dados_atuais"]     = original
-                rec["score_urgencia"]   = calcular_score_urgencia(original)
-                rec["dias_estoque"]     = calcular_dias_estoque(original)
-                rec.setdefault("previsao_vendas_7d", original.get("previsao_vendas_7d", 0))
-                rec.setdefault("previsao_lucro_7d", original.get("previsao_lucro_7d", 0))
-                rec.setdefault("elasticidade_preco_volume", original.get("elasticidade_preco_volume", 0))
-                rec.setdefault("cluster_mercado", original.get("cluster_mercado", "Estável"))
-                rec.setdefault("recomendacao_executiva", original.get("recomendacao_executiva", "Monitorar"))
-            resultados_finais.append(rec)
 
     barra.empty()
     return resultados_finais

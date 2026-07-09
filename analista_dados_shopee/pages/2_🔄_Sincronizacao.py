@@ -128,7 +128,7 @@ def processar_arquivo_global(arquivo_global):
 
             for _, row in df.iterrows():
                 try:
-                    data_val = pd.to_datetime(row[col_data], errors='coerce')
+                    data_val = pd.to_datetime(row[col_data], errors='coerce', format='%d/%m/%Y')
                     if pd.isna(data_val):
                         continue
                 except Exception:
@@ -174,7 +174,17 @@ def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data
             produtos_db = cur.fetchall()
             
     linhas_trafego, linhas_ads = [], []
-    metricas_importadas = []
+    
+    # ---------------------------------------------------------
+    # CORREÇÃO: Usar um dicionário para agregar as métricas
+    # Isso impede a CardinalityViolation agrupando métricas duplicadas
+    # ---------------------------------------------------------
+    dict_metricas = {}
+
+    def add_metrica(item, data, nome, valor, fonte):
+        chave = (item, data, nome, fonte)
+        # Se a chave já existe, soma o valor. Se não, inicializa.
+        dict_metricas[chave] = dict_metricas.get(chave, 0.0) + float(valor)
 
     # 1. PLANILHA DE PERFORMANCE ORGÂNICA
     if arquivo_trafego:
@@ -207,11 +217,13 @@ def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data
                     valor_visitas = int(visitas/dias_no_periodo)
                     valor_carrinho = int(carrinho/dias_no_periodo)
                     valor_rejeicao = rejeicao / dias_no_periodo if dias_no_periodo > 0 else rejeicao
+                    
                     linhas_trafego.append((item_id, dia_registro.date(), valor_visitas, valor_rejeicao, valor_carrinho))
 
-                    metricas_importadas.append((item_id, dia_registro.date(), 'visitas_importadas', float(valor_visitas), arquivo_trafego.name))
-                    metricas_importadas.append((item_id, dia_registro.date(), 'carrinhos_importados', float(valor_carrinho), arquivo_trafego.name))
-                    metricas_importadas.append((item_id, dia_registro.date(), 'rejeicao_importada', float(valor_rejeicao), arquivo_trafego.name))
+                    # Usa a nova função de agregação
+                    add_metrica(item_id, dia_registro.date(), 'visitas_importadas', valor_visitas, arquivo_trafego.name)
+                    add_metrica(item_id, dia_registro.date(), 'carrinhos_importados', valor_carrinho, arquivo_trafego.name)
+                    add_metrica(item_id, dia_registro.date(), 'rejeicao_importada', valor_rejeicao, arquivo_trafego.name)
 
                 for col in df_t.columns:
                     if col in {col_id, col_visitas, col_carrinho, col_rejeicao}:
@@ -222,7 +234,7 @@ def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data
                             continue
                         for d in range(dias_no_periodo):
                             dia_registro = data_inicio + timedelta(days=d)
-                            metricas_importadas.append((item_id, dia_registro.date(), normalizar_nome_metric(col), float(valor / dias_no_periodo), arquivo_trafego.name))
+                            add_metrica(item_id, dia_registro.date(), normalizar_nome_metric(col), valor / dias_no_periodo, arquivo_trafego.name)
         except Exception as e:
             return 0, f"Erro ao ler Tráfego Orgânico: {e}"
 
@@ -273,9 +285,17 @@ def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data
                             continue
                         for d in range(dias_no_periodo):
                             dia_registro = data_inicio + timedelta(days=d)
-                            metricas_importadas.append((item_id, dia_registro.date(), normalizar_nome_metric(col), float(valor / dias_no_periodo), arquivo_ads.name))
+                            add_metrica(item_id, dia_registro.date(), normalizar_nome_metric(col), valor / dias_no_periodo, arquivo_ads.name)
         except Exception as e:
             return 0, f"Erro ao ler Arquivo de Ads: {e}"
+
+    # ---------------------------------------------------------
+    # Converte o dicionário agregado de volta para a lista esperada
+    # ---------------------------------------------------------
+    metricas_importadas = [
+        (chave[0], chave[1], chave[2], valor, chave[3])
+        for chave, valor in dict_metricas.items()
+    ]
 
     # INSERÇÃO PROTEGIDA (Idempotente)
     total_linhas = len(linhas_trafego) + len(linhas_ads)
@@ -422,11 +442,22 @@ with aba_principal:
 with aba_global:
     st.markdown("### Saúde Geral da Loja (Visão Macros)")
     st.markdown("""
-    Se você quiser que a IA faça análises globais de loja, como quedas de receita, variações de conversão, custos totais e comportamento de campanhas, você pode importar um arquivo de visão geral da loja.
-    O sistema tenta reconhecer automaticamente colunas de datas e métricas e armazena os valores em uma tabela própria para uso futuro.
+    Importe o arquivo de 'Produto Pago' para alimentar o Cérebro IA com a visão macro da loja.
+    O sistema processará o arquivo e atualizará as métricas globais no Data Warehouse.
     """)
     st.link_button("🔗 Ir para Visão Geral", "https://seller.shopee.com.br/datacenter/dashboard", use_container_width=True)
     
-    arquivo_global = st.file_uploader("📂 Arraste a planilha de Visão Geral (Opcional)", type=["csv", "xlsx"], key="upload_global")
+    arquivo_global = st.file_uploader("📂 Arraste a planilha 'Produto Pago' (CSV/XLSX)", type=["csv", "xlsx"], key="upload_global")
+    
+    # --- BOTÃO E FEEDBACK ADICIONADOS ---
     if arquivo_global:
-        st.info("💡 Arquivo reconhecido. O sistema tentará identificar automaticamente colunas como data, vendas, receita, conversão, custo, ads, visitas e estoque.")
+        st.info("💡 Arquivo pronto para processamento.")
+        if st.button("🚀 PROCESSAR VISÃO GERAL DA LOJA", type="primary", use_container_width=True):
+            with st.status("Processando métricas globais...", expanded=True) as status_global:
+                linhas_global, msg_global = processar_arquivo_global(arquivo_global)
+                
+                if msg_global == "Sucesso":
+                    status_global.update(label=f"Visão geral importada! ({linhas_global} métricas registradas)", state="complete")
+                    st.balloons()
+                else:
+                    status_global.update(label=f"Falha na visão geral: {msg_global}", state="error")
