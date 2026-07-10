@@ -2,27 +2,6 @@
 pages/3___Cerebro_IA.py
 ========================
 Conselho de Administração IA (CFO, CMO, COO) + Atuador Shopee.
-
-Correções aplicadas nesta versão
----------------------------------
-#7  memoria_ia — DISTINCT ON model_id (não mais item_id); salvar_log_acao
-    agora grava o model_id, impedindo que ações de uma variação "contaminem"
-    a memória de variações-irmãs do mesmo produto.
-#8  validar_sugestao_ia() — camada de segurança em código Python que bloqueia
-    sugestões fora da curva ANTES de exibir o botão de aprovação, sem depender
-    do LLM "obedecer" o prompt.
-
-Melhorias adicionais desta versão
-----------------------------------
-+   Pool de conexões via utils/db_pool (sem abrir/fechar por requisição).
-+   calcular_score_urgencia() — prioriza produtos críticos no lote enviado à IA.
-+   calcular_dias_estoque() — calcula autonomia de material ao ritmo atual.
-+   gerar_alertas_criticos() — alertas determinísticos (sem LLM) para situações
-    extremas: ROAS < 1×, material acabando em < 7 dias, lucro negativo.
-+   Dashboard de KPIs agregados antes dos relatórios por produto.
-+   Port corrigido para 8000 (alinhado com data_app.py e mesclar_llm.py).
-+   tamanho_lote padrão elevado para 8 (menos chamadas RunPod, mais contexto).
-+   Importação de criar_combo_shopee movida para o topo (evita ImportError tardio).
 """
 
 import json
@@ -108,15 +87,7 @@ def garantir_tabela_historico_variacoes():
 def gerar_dossie_produtos_com_memoria():
     """
     Query principal do Cérebro IA.
-
-    Correções aplicadas:
-    - Fix #4, #7, #9, #11, #12 e #13 mantidos rigorosamente.
-    - Fix #14 Variações Fantasmas: Filtro adicionado para '%Excluída%'.
-    - Fix #15 Visão Macro 30 Dias: Adicionadas tabelas para extrair tráfego, ads e volume 
-              dos últimos 30 dias, dando à IA uma visão real da tração sem o ruído 
-              da sazonalidade semanal.
-    - Fix #16 Trava de Insumos: Se faltarem dados de mapeamento do filamento, assume 
-              capacidade ilimitada (999_999) para evitar que a IA mande "Aguardar Reposição" em massa.
+    Contém a visão expandida de 30 dias, trava de insumos infinitos e filtro de fantasmas.
     """
     query = """
     WITH vendas_7d AS (
@@ -407,7 +378,6 @@ def gerar_dossie_produtos_com_memoria():
             if vendas_antes > 0 else (100 if vendas > 0 else 0)
         )
 
-        # ====== FIX #16: Trava do Filamento Infinito ======
         capacidade_maxima = 999_999
         if r["peso_gramas"] and float(r["peso_gramas"]) > 0 and r["estoque_material_atual"] is not None:
             estoque_g = (
@@ -423,7 +393,6 @@ def gerar_dossie_produtos_com_memoria():
             dias_estoque  = round(capacidade_maxima / taxa_diaria)
         else:
             dias_estoque  = 999
-        # =================================================
 
         historico_ia = None
         if r["ultima_acao"]:
@@ -532,40 +501,30 @@ def gerar_dossie_produtos_com_memoria():
 def calcular_score_urgencia(d: dict) -> int:
     """
     Pontua a urgência de um produto de 0 a 100.
-    Usado para ordenar o lote antes de enviar à IA — os casos mais críticos
-    chegam primeiro e, se houver timeout de RunPod, ao menos foram analisados.
     """
     score = 0
 
-    # Perdendo dinheiro em Ads (ROAS < 1 = gasta mais do que recebe)
     if d.get("ADS_gasto_7d", 0) > 5 and d.get("ADS_roas_atual", 0) < 1:
         score += 40
 
-    # Material acabando em menos de 7 dias ao ritmo atual
     if d.get("LOGISTICA_dias_estoque_restante", 999) < 7:
         score += 35
 
-    # Lucro operacional negativo
     if d.get("lucro_liquido_real_7d", 0) < 0:
         score += 30
 
-    # Queda de vendas > 30 % semana a semana
     if d.get("tendencia_vendas_WoW_perc", 0) < -30:
         score += 25
 
-    # Alta taxa de abandono + muitos favoritos = oportunidade de promoção perdida
     if d.get("taxa_abandono_carrinho_perc", 0) > 70 and d.get("REPUTACAO_curtidas_favoritos", 0) > 50:
         score += 20
 
-    # Queda de preço forte em 7 dias e vendas baixas pode indicar perda de percepção
     if d.get("preco_tendencia_7d_perc", 0) < -15 and d.get("vendas_7d_reais", 0) <= 2:
         score += 10
 
-    # Sem vendas com gasto em Ads
     if d.get("vendas_7d_reais", 0) == 0 and d.get("ADS_gasto_7d", 0) > 0:
         score += 30
 
-    # Sinais extraídos de cancelamento e contexto macro importado
     if d.get("taxa_cancelamento_7d_perc", 0) > 12:
         score += 15
 
@@ -579,12 +538,10 @@ def calcular_score_urgencia(d: dict) -> int:
 
 
 def calcular_dias_estoque(d: dict) -> int:
-    """Retorna quantos dias de material restam ao ritmo de vendas atual."""
     return d.get("LOGISTICA_dias_estoque_restante", 999)
 
 
 def calcular_elasticidade_preco_volume(preco_hoje: float, preco_7d: float, vendas_7d: int, vendas_antes: int) -> float:
-    """Estimativa simples de sensibilidade de demanda a preço usando variação semanal."""
     if preco_7d <= 0 or vendas_antes <= 0:
         return 0.0
     delta_preco_pct = ((preco_hoje - preco_7d) / preco_7d) * 100
@@ -595,7 +552,6 @@ def calcular_elasticidade_preco_volume(preco_hoje: float, preco_7d: float, venda
 
 
 def calcular_previsao_demanda_7d(d: dict) -> int:
-    """Previsão determinística de demanda para os próximos 7 dias."""
     vendas_7d = max(0, int(d.get("vendas_7d_reais", 0)))
     tendencia = float(d.get("tendencia_vendas_WoW_perc", 0))
     conversao = float(d.get("TRAFEGO_taxa_conversao_perc", 0))
@@ -623,7 +579,6 @@ def calcular_previsao_demanda_7d(d: dict) -> int:
 
 
 def gerar_recomendacao_executiva(d: dict) -> str:
-    """Gera uma recomendação executiva curta e acionável."""
     if d.get("ADS_roas_atual", 0) < 1:
         return "Pausar ads e revisar preço até o ROAS voltar a ser saudável."
     if d.get("taxa_cancelamento_7d_perc", 0) > 10:
@@ -638,7 +593,6 @@ def gerar_recomendacao_executiva(d: dict) -> str:
 
 
 def classificar_cluster(d: dict) -> str:
-    """Classifica o SKU em um cluster operacional simples."""
     if d.get("lucro_liquido_real_7d", 0) < 0 or d.get("ADS_roas_atual", 0) < 1:
         return "Em risco"
     if d.get("LOGISTICA_dias_estoque_restante", 999) < 14:
@@ -649,10 +603,6 @@ def classificar_cluster(d: dict) -> str:
 
 
 def gerar_alertas_criticos(dossie: list[dict]) -> list[dict]:
-    """
-    Detecta situações que não precisam de LLM — são matematicamente óbvias.
-    Retorna uma lista de alertas para exibir no topo do dashboard.
-    """
     alertas = []
     for d in dossie:
         nome = f"{d['nome_produto']} ({d['nome_variacao']})"
@@ -698,14 +648,16 @@ def gerar_alertas_criticos(dossie: list[dict]) -> list[dict]:
 def validar_sugestao_ia(dados: dict, analise: dict) -> tuple[bool, str]:
     """
     Fix #8 — camada de segurança em código Python.
-    Roda ANTES de exibir o botão de aprovação.
-    Não depende do LLM obedecer o prompt.
-    Retorna (True, "") se está ok, ou (False, motivo) se deve bloquear.
+    BLINDAGEM ANTI-NULL: Garante que mesmo se a IA devolver 'null', o sistema não quebra.
     """
-    preco_atual      = dados.get("preco_atual", 0)
-    capacidade_max   = dados.get("LOGISTICA_capacidade_material_restante", 999_999)
-    novo_preco       = analise.get("novo_preco_sugerido", preco_atual)
-    previsao_vendas  = analise.get("previsao_vendas_7d", 0)
+    preco_atual      = float(dados.get("preco_atual") or 0)
+    capacidade_max   = int(dados.get("LOGISTICA_capacidade_material_restante") or 999_999)
+    
+    np_raw           = analise.get("novo_preco_sugerido")
+    novo_preco       = float(np_raw) if np_raw is not None else preco_atual
+    
+    pv_raw           = analise.get("previsao_vendas_7d")
+    previsao_vendas  = int(pv_raw) if pv_raw is not None else 0
 
     if novo_preco is None or novo_preco <= 0:
         return False, "Preço sugerido é inválido (zero, negativo ou ausente)."
@@ -718,7 +670,7 @@ def validar_sugestao_ia(dados: dict, analise: dict) -> tuple[bool, str]:
                 f"de segurança de 80%. Ajuste manual necessário."
             )
 
-    if previsao_vendas and capacidade_max < 999_999:
+    if previsao_vendas > 0 and capacidade_max < 999_999:
         if previsao_vendas > capacidade_max:
             return False, (
                 f"Previsão de {previsao_vendas} un. excede a capacidade de "
@@ -729,7 +681,6 @@ def validar_sugestao_ia(dados: dict, analise: dict) -> tuple[bool, str]:
 
 
 def acordar_modelo_ia():
-    """Envia um ping simples para forçar o Cold Start do RunPod e aguarda até estar pronto."""
     payload = {
         "model": "cerebro-dados",
         "messages": [{"role": "user", "content": "Acorde. Responda apenas com a palavra 'OK'."}],
@@ -738,7 +689,6 @@ def acordar_modelo_ia():
     }
     try:
         logger.info("📡 [RUNPOD] Enviando ping de Wake-Up. Aguardando inicialização da GPU (pode levar 10 min)...")
-        # Timeout alto (600s = 10 minutos) SOMENTE para esperar o RunPod alocar a GPU e baixar o modelo
         response = requests.post(LITELLM_BASE, json=payload, timeout=600)
         response.raise_for_status()
         logger.success("🟢 [RUNPOD] Servidor acordou e respondeu com sucesso! GPU Online.")
@@ -750,10 +700,6 @@ def acordar_modelo_ia():
 
 
 def chamar_cerebro_runpod_preditivo(lote_json: list[dict], max_tentativas: int = 3) -> list[dict]:
-    """
-    Envia o lote hierárquico ao modelo no RunPod via LiteLLM Proxy (porta 8000).
-    Timeout aumentado para 300s para suportar modelos gigantes (70B/72B).
-    """
     import time 
 
     prompt_sistema = """
@@ -816,7 +762,6 @@ def chamar_cerebro_runpod_preditivo(lote_json: list[dict], max_tentativas: int =
         "temperature": 0.2
     }
 
-    # Loop de Resiliência
     for tentativa in range(1, max_tentativas + 1):
         try:
             logger.info(f"🧠 [RUNPOD] Processando lote de {len(lote_json)} submódulos (Tentativa {tentativa}/{max_tentativas})...")
@@ -835,13 +780,10 @@ def chamar_cerebro_runpod_preditivo(lote_json: list[dict], max_tentativas: int =
             logger.warning("⚠️ [RUNPOD] IA retornou um formato inesperado. Re-tentando...")
             
         except requests.exceptions.Timeout as e:
-            # SE DEU TIMEOUT: A requisição já está no RunPod ou ele está muito lento.
-            # Não devemos reenviar para não duplicar jobs na fila.
             logger.error(f"🔴 [RUNPOD] Timeout na tentativa {tentativa}. O RunPod está sobrecarregado. Abortando este lote para não duplicar jobs: {e}")
-            break # Quebra o loop, NÃO tenta de novo!
+            break
             
         except requests.exceptions.RequestException as e:
-            # Falhas de conexão (ex: recusada, proxy fora do ar) podem ser retentadas
             logger.error(f"🔴 [RUNPOD] Falha de rede na tentativa {tentativa}: {e}")
             
         except json.JSONDecodeError as e:
@@ -861,11 +803,6 @@ def chamar_cerebro_runpod_preditivo(lote_json: list[dict], max_tentativas: int =
 
 
 def processar_em_lotes(dossie_completo: list[dict], max_vars_por_lote: int = 5) -> list[dict]:
-    """
-    Agrupa o dossiê por Produto Pai.
-    GATEKEEPER: Isola produtos "Fantasmas" e gera SEO instantâneo.
-    SMART BATCHING: Fatia produtos com muitas variações para evitar Timeouts.
-    """
     # 1. Agrupar Variações por Produto Pai
     produtos_agrupados = {}
     for var in dossie_completo:
@@ -990,6 +927,13 @@ def processar_em_lotes(dossie_completo: list[dict], max_vars_por_lote: int = 5) 
                             rec["dados_atuais"]     = original
                             rec["score_urgencia"]   = calcular_score_urgencia(original)
                             rec["dias_estoque"]     = calcular_dias_estoque(original)
+                            
+                            # FALLBACK DE SEGURANÇA PARA PREVENIR TYPEERROR NONE
+                            preco_original = float(original.get("preco_atual", 0))
+                            novo_preco_sugerido = rec.get("novo_preco_sugerido")
+                            if novo_preco_sugerido is None:
+                                rec["novo_preco_sugerido"] = preco_original
+                            
                             rec.setdefault("previsao_vendas_7d", original.get("previsao_vendas_7d", 0))
                             rec.setdefault("previsao_lucro_7d", original.get("previsao_lucro_7d", 0))
                             rec.setdefault("elasticidade_preco_volume", original.get("elasticidade_preco_volume", 0))
@@ -1016,13 +960,12 @@ def processar_em_lotes(dossie_completo: list[dict], max_vars_por_lote: int = 5) 
 
 def salvar_log_acao(
     item_id: int,
-    model_id: int,         # Fix #7 — novo parâmetro
+    model_id: int,
     tipo_acao: str,
     detalhe: str,
     impacto_json: dict,
     status: str,
 ):
-    """Registra a decisão aprovada no Diário de Bordo (agora por variação)."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1056,7 +999,7 @@ if st.button("⚡ Executar Auditoria Profunda (RunPod)", type="primary"):
         st.write("📡 Enviando sinal de Wake-Up para o RunPod (pode levar 10min na 1ª vez)...")
         if not acordar_modelo_ia():
             status_boot.update(label="Falha ao iniciar o RunPod", state="error", expanded=True)
-            st.stop() # Interrompe a execução se a IA não acordar
+            st.stop() 
 
         st.write("📊 GPU online! Lendo Data Warehouse e calculando métricas...")
         dossie = gerar_dossie_produtos_com_memoria()
@@ -1235,8 +1178,20 @@ for analise in analises:
     acao          = analise.get("tipo_acao", "MANTER")
     score         = analise.get("score_urgencia", 0)
     dias_mat      = analise.get("dias_estoque", 999)
-    preco_atual   = dados["preco_atual"]
-    novo_preco    = analise.get("novo_preco_sugerido", preco_atual)
+    
+    # ====== BLINDAGEM ABSOLUTA CONTRA NULL DO JSON ======
+    preco_atual   = float(dados.get("preco_atual") or 0)
+    np_raw        = analise.get("novo_preco_sugerido")
+    novo_preco    = float(np_raw) if np_raw is not None else preco_atual
+    
+    vendas_atuais = int(dados.get("vendas_7d_reais") or 0)
+    vp_raw        = analise.get("previsao_vendas_7d")
+    vendas_proj   = int(vp_raw) if vp_raw is not None else vendas_atuais
+    
+    lucro_atual   = float(dados.get("lucro_liquido_real_7d") or 0)
+    lp_raw        = analise.get("previsao_lucro_7d")
+    lucro_proj    = float(lp_raw) if lp_raw is not None else lucro_atual
+    # ====================================================
 
     icon_acao = {
         "AUMENTAR_PRECO":  "📈",
@@ -1272,7 +1227,7 @@ for analise in analises:
             st.caption(
                 f"Custo de Fábrica (c/ refugo): **R$ {custo:.2f}** | "
                 f"Margem Bruta: **{margem:.1f}%** | "
-                f"Lucro Líquido 7d: **R$ {dados.get('lucro_liquido_real_7d', 0):.2f}**"
+                f"Lucro Líquido 7d: **R$ {lucro_atual:.2f}**"
             )
 
         with tab_cmo:
@@ -1287,7 +1242,7 @@ for analise in analises:
 
         with tab_coo:
             st.warning(analise.get("relatorio_coo_operacoes", "Análise operacional não disponível."))
-            dias_label = f"{dias_mat} dias" if dias_mat < 999 else "estoque não mapeado"
+            dias_label = f"{dias_mat} dias" if dias_mat < 999 else "estoque ilimitado"
             st.caption(
                 f"🏭 Capacidade restante: **{dados.get('LOGISTICA_capacidade_material_restante', 0)} un.** "
                 f"| Autonomia ao ritmo atual: **{dias_label}** "
@@ -1306,14 +1261,15 @@ for analise in analises:
                 st.markdown(f"**Projeção na época:** {hist.get('projetado_na_epoca', {})}")
             with col_b:
                 st.markdown("**Realidade atual (7 dias):**")
-                st.metric("Vendas reais", f"{dados.get('vendas_7d_reais', 0)} un.")
-                st.metric("Lucro real", f"R$ {dados.get('lucro_liquido_real_7d', 0):.2f}")
+                st.metric("Vendas reais", f"{vendas_atuais} un.")
+                st.metric("Lucro real", f"R$ {lucro_atual:.2f}")
 
         # ── Projeção de cenário ───────────────────────────────────────────────
         st.markdown("---")
         st.markdown("### 📊 Projeção de Cenário (Próximos 7 Dias)")
 
         c1, c2, c3 = st.columns(3)
+        
         var_preco = ((novo_preco - preco_atual) / preco_atual * 100) if preco_atual > 0 else 0
         c1.metric(
             "Ajuste de Preço",
@@ -1321,16 +1277,12 @@ for analise in analises:
             f"{var_preco:+.1f}%",
         )
 
-        vendas_atuais = dados["vendas_7d_reais"]
-        vendas_proj   = analise.get("previsao_vendas_7d", vendas_atuais)
         delta_v = (
             f"+{vendas_proj} un." if vendas_atuais == 0
             else f"{(vendas_proj - vendas_atuais) / vendas_atuais * 100:+.1f}%"
         )
         c2.metric("Volume Projetado", f"{vendas_proj} un.", delta_v)
 
-        lucro_atual = dados["lucro_liquido_real_7d"]
-        lucro_proj  = analise.get("previsao_lucro_7d", lucro_atual)
         delta_l = (
             f"R$ {lucro_proj:.2f}" if lucro_atual == 0
             else f"{(lucro_proj - lucro_atual) / abs(lucro_atual) * 100:+.1f}%"
@@ -1358,7 +1310,6 @@ for analise in analises:
                     "📌 Esta sugestão é estratégica e ficará em modo de recomendação. O sistema não executará campanhas de ads ou mudanças de orçamento automaticamente."
                 )
             else:
-                # Tudo validado — exibe o botão
                 duracao = analise.get("horas_duracao_promocao", 24)
 
                 if acao == "CRIAR_PROMOCAO":
@@ -1395,7 +1346,6 @@ for analise in analises:
                             "estrategia":        acao,
                         }
 
-                        # Fix #7 — grava model_id no log
                         if sucesso:
                             salvar_log_acao(
                                 dados["item_id"],
