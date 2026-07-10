@@ -110,19 +110,19 @@ def gerar_dossie_produtos_com_memoria():
     Query principal do Cérebro IA.
 
     Correções aplicadas:
-    - Fix #4, #7, #9, #11 e #12 mantidos rigorosamente.
-    - Fix #13 (NOVO) Alinhamento de Lucro com JS: A projeção futura (previsao_lucro_7d)
-              estava usando Preço Bruto - Custo, ignorando a taxa da Shopee nas vendas 
-              futuras. Implementada a extração da taxa média real do produto e o cálculo 
-              da 'margem_unitaria_real' para garantir que a IA veja a margem líquida exata,
-              permitindo projeções de lucro negativo para que o CFO tome atitudes severas.
+    - Fix #4, #7, #9, #11, #12 e #13 mantidos rigorosamente.
+    - Fix #14 Variações Fantasmas: Filtro adicionado para '%Excluída%'.
+    - Fix #15 Visão Macro 30 Dias: Adicionadas tabelas para extrair tráfego, ads e volume 
+              dos últimos 30 dias, dando à IA uma visão real da tração sem o ruído 
+              da sazonalidade semanal.
+    - Fix #16 Trava de Insumos: Se faltarem dados de mapeamento do filamento, assume 
+              capacidade ilimitada (999_999) para evitar que a IA mande "Aguardar Reposição" em massa.
     """
     query = """
     WITH vendas_7d AS (
         SELECT
             i.model_id,
             SUM(i.quantidade) AS qtd_vendida,
-            -- Se não tem repasse (escrow) porque o cliente ainda não confirmou, estimamos 82% do valor
             SUM(COALESCE(r.lucro_liquido_absoluto, (v.preco_venda_atual * 0.82) * i.quantidade)) AS lucro_liquido_total,
             AVG(COALESCE(r.comissao_shopee + r.taxa_servico + r.taxa_transacao, v.preco_venda_atual * 0.18)) AS taxa_media_shopee
         FROM fato_itens_pedido i
@@ -130,6 +130,16 @@ def gerar_dossie_produtos_com_memoria():
         JOIN dim_variacoes v ON v.model_id = i.model_id
         LEFT JOIN fato_repasse_escrow r ON i.order_sn = r.order_sn
         WHERE p.data_hora_criacao >= CURRENT_DATE - INTERVAL '7 days'
+          AND p.status_pedido NOT IN ('CANCELLED', 'CANCELED', 'CANCELLED_BY_BUYER', 'IN_CANCEL')
+        GROUP BY i.model_id
+    ),
+    vendas_30d AS (
+        SELECT
+            i.model_id,
+            SUM(i.quantidade) AS qtd_vendida_30d
+        FROM fato_itens_pedido i
+        JOIN fato_pedidos_venda p ON p.order_sn = i.order_sn
+        WHERE p.data_hora_criacao >= CURRENT_DATE - INTERVAL '30 days'
           AND p.status_pedido NOT IN ('CANCELLED', 'CANCELED', 'CANCELLED_BY_BUYER', 'IN_CANCEL')
         GROUP BY i.model_id
     ),
@@ -154,6 +164,14 @@ def gerar_dossie_produtos_com_memoria():
         WHERE data >= CURRENT_DATE - INTERVAL '7 days'
         GROUP BY item_id
     ),
+    ads_30d AS (
+        SELECT
+            item_id,
+            SUM(custo_total) AS gasto_ads_30d
+        FROM fato_ads_palavras_chave
+        WHERE data >= CURRENT_DATE - INTERVAL '30 days'
+        GROUP BY item_id
+    ),
     trafego_7d AS (
         SELECT
             item_id,
@@ -163,11 +181,22 @@ def gerar_dossie_produtos_com_memoria():
         WHERE data >= CURRENT_DATE - INTERVAL '7 days'
         GROUP BY item_id
     ),
+    trafego_30d AS (
+        SELECT
+            item_id,
+            SUM(visitantes_unicos) AS visitas_30d,
+            SUM(adicoes_carrinho)  AS carrinhos_30d
+        FROM fato_trafego_diario
+        WHERE data >= CURRENT_DATE - INTERVAL '30 days'
+        GROUP BY item_id
+    ),
     variacoes_por_item AS (
         SELECT
             v.item_id,
             COUNT(*) AS qtd_variacoes
         FROM dim_variacoes v
+        WHERE v.nome_variacao NOT ILIKE '%Excluída%' 
+          AND v.nome_variacao NOT ILIKE '%Excluida%'
         GROUP BY v.item_id
     ),
     pedidos_7d AS (
@@ -248,15 +277,23 @@ def gerar_dossie_produtos_com_memoria():
         COALESCE(h.estoque_7d_atras, v.estoque_shopee, 0) AS estoque_7d_atras,
 
         COALESCE(ven.qtd_vendida, 0)         AS vendas_7d,
+        COALESCE(v30.qtd_vendida_30d, 0)     AS vendas_30d,
         COALESCE(vant.qtd_vendida_antiga, 0) AS vendas_semana_passada,
         COALESCE(ven.taxa_media_shopee, 0)   AS taxa_shopee_unitaria,
         COALESCE(ven.lucro_liquido_total, 0) AS receita_liquida_7d,
+        
         COALESCE(t.visitas, 0)               AS visitas_7d,
         COALESCE(t.carrinhos, 0)             AS carrinhos_7d,
         COALESCE(a.gasto_ads, 0)             AS gasto_ads_7d,
+        
+        COALESCE(t30.visitas_30d, 0)         AS visitas_30d,
+        COALESCE(t30.carrinhos_30d, 0)       AS carrinhos_30d,
+        COALESCE(a30.gasto_ads_30d, 0)       AS gasto_ads_30d,
+        
         COALESCE(vi.qtd_variacoes, 1)        AS qtd_variacoes_produto,
         COALESCE(ped.pedidos_7d, 0)          AS pedidos_7d,
         COALESCE(can.cancelamentos_7d, 0)    AS cancelamentos_7d,
+        
         COALESCE(mi.vendas_importadas_7d, 0) AS vendas_importadas_7d,
         COALESCE(mi.receita_importada_7d, 0) AS receita_importada_7d,
         COALESCE(mi.cancelamentos_importados_7d, 0) AS cancelamentos_importados_7d,
@@ -297,9 +334,12 @@ def gerar_dossie_produtos_com_memoria():
     LEFT JOIN dim_materiais mat       ON eng.id_material = mat.id_material
     LEFT JOIN dim_maquinas  maq       ON eng.id_maquina  = maq.id_maquina
     LEFT JOIN vendas_7d     ven       ON v.model_id  = ven.model_id
+    LEFT JOIN vendas_30d    v30       ON v.model_id  = v30.model_id
     LEFT JOIN vendas_anteriores vant  ON v.model_id  = vant.model_id
     LEFT JOIN ads_7d        a         ON p.item_id   = a.item_id
+    LEFT JOIN ads_30d       a30       ON p.item_id   = a30.item_id
     LEFT JOIN trafego_7d    t         ON p.item_id   = t.item_id
+    LEFT JOIN trafego_30d   t30       ON p.item_id   = t30.item_id
     LEFT JOIN variacoes_por_item vi   ON p.item_id   = vi.item_id
     LEFT JOIN pedidos_7d    ped       ON v.model_id  = ped.model_id
     LEFT JOIN cancelamentos_7d can    ON v.model_id  = can.model_id
@@ -307,7 +347,9 @@ def gerar_dossie_produtos_com_memoria():
     LEFT JOIN macro_loja_7d macro     ON TRUE
     LEFT JOIN memoria_ia    m         ON v.model_id  = m.model_id
     LEFT JOIN historico_variacoes h   ON v.model_id  = h.model_id
-    WHERE p.status_shopee = 'NORMAL';
+    WHERE p.status_shopee = 'NORMAL'
+      AND v.nome_variacao NOT ILIKE '%Excluída%'
+      AND v.nome_variacao NOT ILIKE '%Excluida%';
     """
 
     garantir_tabela_historico_variacoes()
@@ -327,18 +369,15 @@ def gerar_dossie_produtos_com_memoria():
         custo_fab    = float(r["custo_fabricacao_com_refugo"] or 0)
         receita_liq  = float(r["receita_liquida_7d"])
 
-        # ====== ALINHAMENTO COM O SEU CÓDIGO JS ======
-        # Extrai a taxa exata que a Shopee cobrou nas vendas desta semana.
-        # Se for um produto novo/sem vendas, assume a taxa padrão base (18%).
         taxa_shopee_unitaria = float(r["taxa_shopee_unitaria"] or 0)
         if taxa_shopee_unitaria <= 0:
             taxa_shopee_unitaria = preco * 0.18
             
-        # Margem real = Preço de Venda - Taxa Shopee - Custo de Fábrica
         margem_unitaria_real = preco - taxa_shopee_unitaria - custo_fab
-        # =============================================
 
         qtd_variacoes = max(1, int(r["qtd_variacoes_produto"] or 1))
+        
+        # Rateio do UI (7 dias) mantido intacto para não quebrar os painéis gráficos
         gasto_ads    = float(r["gasto_ads_7d"]) / qtd_variacoes
         visitas      = int(r["visitas_7d"]) // qtd_variacoes
         carrinhos    = int(r["carrinhos_7d"]) // qtd_variacoes
@@ -368,8 +407,23 @@ def gerar_dossie_produtos_com_memoria():
             if vendas_antes > 0 else (100 if vendas > 0 else 0)
         )
 
+        # ====== FIX #16: Trava do Filamento Infinito ======
         capacidade_maxima = 999_999
-        dias_estoque = 999
+        if r["peso_gramas"] and float(r["peso_gramas"]) > 0 and r["estoque_material_atual"] is not None:
+            estoque_g = (
+                float(r["estoque_material_atual"]) * 1000
+                if r["unidade_material"] == "kg"
+                else float(r["estoque_material_atual"])
+            )
+            if estoque_g > 0:
+                capacidade_maxima = int(estoque_g / float(r["peso_gramas"]))
+
+        if vendas > 0:
+            taxa_diaria   = vendas / 7
+            dias_estoque  = round(capacidade_maxima / taxa_diaria)
+        else:
+            dias_estoque  = 999
+        # =================================================
 
         historico_ia = None
         if r["ultima_acao"]:
@@ -382,6 +436,7 @@ def gerar_dossie_produtos_com_memoria():
         dados_analiticos = {
             "item_id":   r["item_id"],
             "model_id":  r["model_id"],
+            "qtd_variacoes_produto": qtd_variacoes,
             "nome_produto":      r["nome_atual"],
             "nome_variacao":     r["nome_variacao"],
             "preco_atual":       preco,
@@ -396,17 +451,13 @@ def gerar_dossie_produtos_com_memoria():
             "tendencia_vendas_WoW_perc":    tendencia_perc,
             "taxa_abandono_carrinho_perc":  taxa_abandono,
             "lucro_liquido_real_7d":        round(lucro_operacional, 2),
-
             "REPUTACAO_estrelas":               float(r["estrelas"]),
             "REPUTACAO_curtidas_favoritos":     r["curtidas_favoritos"],
-            
             "LOGISTICA_capacidade_material_restante": capacidade_maxima,
             "LOGISTICA_dias_estoque_restante":  dias_estoque,
-
             "TRAFEGO_visitas_7d":           visitas,
             "TRAFEGO_adicoes_carrinho_7d":  carrinhos,
             "TRAFEGO_taxa_conversao_perc":  taxa_conversao,
-
             "ADS_gasto_7d":   round(gasto_ads, 2),
             "ADS_roas_atual": roas_atual,
             "PEDIDOS_7d": pedidos_7d,
@@ -423,6 +474,12 @@ def gerar_dossie_produtos_com_memoria():
             "LOJA_macro_estoque_7d": round(estoque_macro_7d, 2),
             "elasticidade_preco_volume": calcular_elasticidade_preco_volume(preco_hoje, preco_7d, vendas, vendas_antes),
             
+            # Chaves Macro para a IA e o Gatekeeper
+            "vendas_30d_macro": int(r["vendas_30d"] or 0),
+            "visitas_30d_macro": int(r["visitas_30d"] or 0),
+            "carrinhos_30d_macro": int(r["carrinhos_30d"] or 0),
+            "gasto_ads_30d_macro": float(r["gasto_ads_30d"] or 0),
+
             "previsao_vendas_7d": calcular_previsao_demanda_7d({
                 "vendas_7d_reais": vendas,
                 "tendencia_vendas_WoW_perc": tendencia_perc,
@@ -433,9 +490,6 @@ def gerar_dossie_produtos_com_memoria():
                 "estoque_shopee_hoje": estoque_hoje,
             }),
             
-            # Aqui está a chave mestre: a projeção agora usa a Margem Unitária Real.
-            # Removida a trava do 'max(0...)' ao redor de toda a conta para permitir que a IA veja
-            # o prejuízo (lucro negativo) se o produto for ruim.
             "previsao_lucro_7d": round(
                 (calcular_previsao_demanda_7d({
                     "vendas_7d_reais": vendas,
@@ -697,50 +751,40 @@ def acordar_modelo_ia():
 
 def chamar_cerebro_runpod_preditivo(lote_json: list[dict], max_tentativas: int = 3) -> list[dict]:
     """
-    Envia o lote ao modelo no RunPod via LiteLLM Proxy (porta 8000).
-    Possui loop de tentativas (Retry) para garantir que a análise seja 100% feita pela IA.
+    Envia o lote hierárquico ao modelo no RunPod via LiteLLM Proxy (porta 8000).
     Timeout aumentado para 300s para suportar modelos gigantes (70B/72B).
     """
-    import time  # Importação local para garantir que o sleep funcione
+    import time 
 
     prompt_sistema = """
     Você é o Conselho de Administração (CFO, CMO, COO) de uma Fazenda de Impressão 3D na Shopee.
-    Realize uma Auditoria Profunda do Lote fornecido baseando-se em microeconomia.
+    Realize uma Auditoria Estratégica.
+
+    ESTRUTURA DOS DADOS (HIERÁRQUICA E MACRO):
+    - O lote contém PRODUTOS (item_id).
+    - Cada produto possui "metricas_macro_produto_30_dias" (Tráfego e Ads acumulados em 30 dias para dar a visão geral e verdadeira da saúde do anúncio e da página).
+    - Dentro de cada produto, há uma lista de "variacoes_ativas" (model_id).
 
     DIRETRIZES TÁTICAS:
-    - COO: "LOGISTICA_capacidade_material_restante" é o teto de produção.
-      NUNCA defina "previsao_vendas_7d" acima deste valor.
-      Se "LOGISTICA_dias_estoque_restante" < 14, sugira AUMENTAR_PRECO
-      para desacelerar vendas e preservar margem até o reabastecimento.
-    - CMO: Use TRAFEGO_*, ADS_gasto_7d, ADS_roas_atual e LOJA_macro_* para avaliar saúde
-      do tráfego pago e orgânico em relação ao comportamento da loja como um todo.
-      • Use preco_tendencia_7d_perc, estoque_shopee_hoje e METRICAS_importadas_* para identificar
-        sinais de desajuste de preço, risco de ruptura e mudança de demanda.
-      • ROAS < 3× com gasto relevante → reduza preço OU pause ads antes de
-        queimar mais orçamento em promoção.
-      • Alta REPUTACAO_curtidas_favoritos + vendas baixas + tráfego saudável
-        → CRIAR_PROMOCAO (notifica os interessados com push Shopee).
-      • taxa_abandono_carrinho_perc > 65% → CRIAR_COMBO para diluir frete.
-      • Se taxa_cancelamento_7d_perc > 10 ou cancelamentos_7d forem altos,
-        priorize ações que reduzem fricção e reforcem confiança do cliente.
-    - CFO: Maximize "lucro_liquido_real_7d" (já inclui ADS_gasto_7d no cálculo).
-      Verifique se custo_fab_real * previsao_vendas_7d cabe dentro da margem.
-      Use "elasticidade_preco_volume" para entender se o item reage fortemente a preço,
-      e trate "cluster_mercado" como um sinal do estágio operacional do SKU.
+    - COO: "LOGISTICA_capacidade_material_restante" = 999999 significa capacidade virtualmente ilimitada de material na fábrica (não bloqueie vendas nem dispare alarmes de falta de insumo).
+    - CMO: Use as métricas de 30 dias para avaliar a saúde do produto. Não entre em pânico por quedas curtas de 7 dias se os últimos 30 dias mostrarem tração sustentável e acessos. 
+      • ROAS baixo no macro (30d) com gasto relevante → Mande "PAUSAR_ADS" na variação que for a vilã, ou faça "REDUZIR_PRECO".
+      • Se "adicoes_carrinho_totais_30d" for alto, mas vendas baixas → Sugira "CRIAR_COMBO" para destravar o carrinho.
+    - CFO: Projete "previsao_vendas_7d" e "previsao_lucro_7d" focando nos PRÓXIMOS 7 DIAS. Verifique se o custo de fabricação cabe no preço atual da variação para não queimar margem.
 
     AÇÕES PERMITIDAS ("tipo_acao"):
     - "AUMENTAR_PRECO" ou "REDUZIR_PRECO"
-    - "CRIAR_PROMOCAO"  (obrigatório o campo "horas_duracao_promocao")
+    - "CRIAR_PROMOCAO"  (exige definir "horas_duracao_promocao")
     - "CRIAR_COMBO"
+    - "PAUSAR_ADS"
     - "MANTER"
 
-    REGRA DE SEGURANÇA:
-    - Priorize ações operacionais seguras: preço, promoção flash e combo.
-    - Nunca sugira criação ou alteração de campanhas de ads pagas como ação executável.
-      Se o problema for ads, descreva a recomendação na análise executiva e no plano de ação,
-      mas não retorne um tipo_acao de ads como ação automática.
-
-    FORMATO DE SAÍDA (RETORNE APENAS O ARRAY JSON, SEM MARKDOWN):
+    FORMATO DE SAÍDA OBRIGATÓRIO:
+    - Retorne APENAS um ÚNICO ARRAY JSON PLANO (sem formatação markdown).
+    - O array DEVE conter um objeto para CADA VARIAÇÃO (model_id) listada nos produtos do lote. Não omita variações.
+    - A estrutura deve ser uma lista PLANA (flat) de decisões para cada variação, não crie agrupamentos no JSON de saída.
+    
+    Exemplo da estrutura esperada na resposta:
     [
       {
         "item_id": 123,
@@ -748,16 +792,16 @@ def chamar_cerebro_runpod_preditivo(lote_json: list[dict], max_tentativas: int =
         "tipo_acao": "CRIAR_PROMOCAO",
         "novo_preco_sugerido": 45.90,
         "horas_duracao_promocao": 24,
-        "previsao_vendas_7d": 80,
-        "previsao_lucro_7d": 500.00,
+        "previsao_vendas_7d": 15,
+        "previsao_lucro_7d": 120.00,
         "elasticidade_preco_volume": -1.25,
         "cluster_mercado": "Alto potencial",
-        "recomendacao_executiva": "Aumentar preço 5% se o estoque estiver saudável.",
-        "relatorio_cfo_financas": "Margem absorve refugo; queima de 10% segura.",
-        "relatorio_cmo_marketing": "ROAS 4.2× e conversão 3.1% saudáveis. 300 favoritos; push de 24h os notificará.",
-        "relatorio_coo_operacoes": "Material para 150 peças. Fábrica aguenta.",
-        "plano_acao_shopee": ["Ativar promoção relâmpago 24h para converter favoritos."],
-        "analise_de_consequencias": "Pico esperado de 15 vendas nas próximas 24h."
+        "recomendacao_executiva": "Aumentar preço 5% pois o estoque e as métricas de 30d estão saudáveis.",
+        "relatorio_cfo_financas": "Margem positiva sustentável nos últimos 30 dias.",
+        "relatorio_cmo_marketing": "Produto com tráfego excelente no mês; a promoção vai gerar urgência.",
+        "relatorio_coo_operacoes": "Material suficiente/ilimitado para suportar o pico.",
+        "plano_acao_shopee": ["Ativar promoção flash."],
+        "analise_de_consequencias": "Crescimento contínuo da tração ao longo da semana."
       }
     ]
     """
@@ -768,22 +812,19 @@ def chamar_cerebro_runpod_preditivo(lote_json: list[dict], max_tentativas: int =
             {"role": "system", "content": prompt_sistema},
             {"role": "user",   "content": f"Auditoria:\n{json.dumps(lote_json, indent=2, ensure_ascii=False)}"},
         ],
-        "max_tokens": 8000,
+        "max_tokens": 8192,
         "temperature": 0.2
     }
 
-    # Loop de Resiliência: Tenta até 3 vezes antes de desistir
+    # Loop de Resiliência
     for tentativa in range(1, max_tentativas + 1):
         try:
-            logger.info(f"🧠 [RUNPOD] Processando lote de {len(lote_json)} produtos (Tentativa {tentativa}/{max_tentativas})...")
+            logger.info(f"🧠 [RUNPOD] Processando lote de {len(lote_json)} submódulos (Tentativa {tentativa}/{max_tentativas})...")
             
-            # Timeout ajustado para 300 segundos (5 minutos)
             response = requests.post(LITELLM_BASE, json=payload, timeout=300)
             response.raise_for_status()
 
             texto = response.json()['choices'][0]['message']['content'].strip()
-            
-            # Limpeza robusta e segura
             texto = texto.replace("```json", "").replace("```", "").strip()
 
             match = re.search(r"\[.*\]", texto, re.DOTALL)
@@ -793,125 +834,179 @@ def chamar_cerebro_runpod_preditivo(lote_json: list[dict], max_tentativas: int =
             
             logger.warning("⚠️ [RUNPOD] IA retornou um formato inesperado. Re-tentando...")
             
+        except requests.exceptions.Timeout as e:
+            # SE DEU TIMEOUT: A requisição já está no RunPod ou ele está muito lento.
+            # Não devemos reenviar para não duplicar jobs na fila.
+            logger.error(f"🔴 [RUNPOD] Timeout na tentativa {tentativa}. O RunPod está sobrecarregado. Abortando este lote para não duplicar jobs: {e}")
+            break # Quebra o loop, NÃO tenta de novo!
+            
         except requests.exceptions.RequestException as e:
-            logger.error(f"🔴 [RUNPOD] Falha de conexão/Timeout na tentativa {tentativa}: {e}")
+            # Falhas de conexão (ex: recusada, proxy fora do ar) podem ser retentadas
+            logger.error(f"🔴 [RUNPOD] Falha de rede na tentativa {tentativa}: {e}")
+            
         except json.JSONDecodeError as e:
-            logger.error(f"🔴 [RUNPOD] Falha ao decodificar JSON na tentativa {tentativa}: {e}")
+            logger.error(f"🔴 [RUNPOD] IA retornou JSON inválido na tentativa {tentativa}: {e}")
+            
         except Exception as e:
             logger.error(f"🔴 [RUNPOD] Erro inesperado na tentativa {tentativa}: {e}")
         
-        # Se chegou aqui, falhou. Espera 5 segundos e tenta de novo.
         if tentativa < max_tentativas:
             logger.info("⏳ Aguardando 5 segundos antes de tentar novamente...")
             time.sleep(5)
             
-    # Se sair do loop, todas as tentativas falharam. Trava o sistema.
-    mensagem_critica = "🚨 FALHA CRÍTICA: A IA não conseguiu processar este lote após 3 tentativas. A operação foi abortada para garantir que nenhuma análise seja feita sem IA."
+    mensagem_critica = "🚨 FALHA CRÍTICA: A IA não conseguiu processar este lote após 3 tentativas."
     logger.critical(mensagem_critica)
     st.error(mensagem_critica)
     st.stop()
 
 
-def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 8) -> list[dict]:
+def processar_em_lotes(dossie_completo: list[dict], max_vars_por_lote: int = 5) -> list[dict]:
     """
-    Ordena o dossiê por urgência (maior score primeiro) e envia à IA em lotes usando
-    concorrência (Threads) para explorar o Continuous Batching do vLLM e economizar no RunPod.
+    Agrupa o dossiê por Produto Pai.
+    GATEKEEPER: Isola produtos "Fantasmas" e gera SEO instantâneo.
+    SMART BATCHING: Fatia produtos com muitas variações para evitar Timeouts.
     """
-    # Ordena por score de urgência (decrescente) antes de fatiar
-    dossie_ordenado = sorted(
-        dossie_completo,
-        key=calcular_score_urgencia,
-        reverse=True,
-    )
+    # 1. Agrupar Variações por Produto Pai
+    produtos_agrupados = {}
+    for var in dossie_completo:
+        iid = var["item_id"]
+        if iid not in produtos_agrupados:
+            produtos_agrupados[iid] = {
+                "item_id": iid,
+                "nome_produto": var["nome_produto"],
+                "score_urgencia_maximo": 0,
+                "metricas_macro_produto_30_dias": {
+                    "visitas_totais_30d": var.get("visitas_30d_macro", 0),
+                    "adicoes_carrinho_totais_30d": var.get("carrinhos_30d_macro", 0),
+                    "gasto_ads_total_30d": round(var.get("gasto_ads_30d_macro", 0), 2),
+                    "estrelas": var.get("REPUTACAO_estrelas", 0),
+                    "favoritos": var.get("REPUTACAO_curtidas_favoritos", 0)
+                },
+                "variacoes_ativas": []
+            }
+        
+        score_var = calcular_score_urgencia(var)
+        produtos_agrupados[iid]["score_urgencia_maximo"] = max(produtos_agrupados[iid]["score_urgencia_maximo"], score_var)
+        
+        produtos_agrupados[iid]["variacoes_ativas"].append({
+            "model_id": var["model_id"],
+            "nome_variacao": var["nome_variacao"],
+            "preco_atual": var["preco_atual"],
+            "vendas_30d_reais": var["vendas_30d_macro"],
+            "vendas_7d_reais": var["vendas_7d_reais"],
+            "lucro_liquido_real_7d": var["lucro_liquido_real_7d"],
+            "taxa_cancelamento_7d_perc": var["taxa_cancelamento_7d_perc"],
+            "estoque_shopee_hoje": var["estoque_shopee_hoje"],
+            "LOGISTICA_capacidade_material_restante": var["LOGISTICA_capacidade_material_restante"],
+            "LOGISTICA_dias_estoque_restante": var["LOGISTICA_dias_estoque_restante"],
+            "historico_acoes_passadas": var["historico_acoes_passadas"]
+        })
 
-    lotes = [
-        dossie_ordenado[i : i + tamanho_lote]
-        for i in range(0, len(dossie_ordenado), tamanho_lote)
-    ]
-
+    # 2. O GATEKEEPER: Separar os Vivos dos Fantasmas
+    produtos_ativos = []
     resultados_finais = []
-    barra = st.progress(0, text="🚀 Iniciando auditoria paralela no RunPod...")
-    lotes_concluidos = 0
+    
+    for p in produtos_agrupados.values():
+        macro = p["metricas_macro_produto_30_dias"]
+        vendas_totais_30d = sum(v["vendas_30d_reais"] for v in p["variacoes_ativas"])
+        
+        if macro["visitas_totais_30d"] <= 10 and macro["gasto_ads_total_30d"] == 0 and vendas_totais_30d == 0:
+            # Processamento GRATUITO e INSTANTÂNEO
+            for var in p["variacoes_ativas"]:
+                original = next((d for d in dossie_completo if d["item_id"] == p["item_id"] and d["model_id"] == var["model_id"]), None)
+                if original:
+                    rec_fantasma = {
+                        "item_id": p["item_id"],
+                        "model_id": var["model_id"],
+                        "tipo_acao": "MANTER",
+                        "novo_preco_sugerido": var["preco_atual"],
+                        "previsao_vendas_7d": 0,
+                        "previsao_lucro_7d": 0.0,
+                        "elasticidade_preco_volume": 0.0,
+                        "cluster_mercado": "Fantasma (Invisível)",
+                        "recomendacao_executiva": "Produto sem tráfego orgânico. O problema é descoberta, não o preço.",
+                        "relatorio_cfo_financas": "Sem custos variáveis, mas representa capital/esforço criativo parado.",
+                        "relatorio_cmo_marketing": f"Apenas {macro['visitas_totais_30d']} visitas em 30 dias. O anúncio não está aparecendo nas buscas.",
+                        "relatorio_coo_operacoes": "Operação ociosa para este SKU.",
+                        "plano_acao_shopee": [
+                            "1. TÍTULO: Reescreva incluindo palavras-chave exatas da busca.",
+                            "2. FOTO: Troque a capa por uma imagem do item em uso.",
+                            "3. IMPULSO: Inscreva em Campanhas Shopee gratuitas.",
+                            "4. VALIDAÇÃO: Ative R$ 3,00 em 'Busca por Descoberta' só para testar impressões."
+                        ],
+                        "analise_de_consequencias": "Melhorar o SEO e a foto tirará o produto da invisibilidade para gerar os primeiros cliques.",
+                        "dados_atuais": original,
+                        "score_urgencia": 0,
+                        "dias_estoque": calcular_dias_estoque(original)
+                    }
+                    resultados_finais.append(rec_fantasma)
+        else:
+            produtos_ativos.append(p)
 
-    # Explorando a concorrência: Envia até 5 lotes simultaneamente para a GPU
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        # Mapeia cada futuro (tarefa) ao seu lote original
-        futuros = {executor.submit(chamar_cerebro_runpod_preditivo, lote): lote for lote in lotes}
+    produtos_ativos = sorted(produtos_ativos, key=lambda x: x["score_urgencia_maximo"], reverse=True)
 
-        for futuro in concurrent.futures.as_completed(futuros):
-            lote_original = futuros[futuro]
-            try:
-                resultado_lote = futuro.result()
-<<<<<<< HEAD
+    # 3. SMART BATCHING: Fatiamento de Variações
+    lotes = []
+    for p in produtos_ativos:
+        vars_ativas = p["variacoes_ativas"]
+        for i in range(0, len(vars_ativas), max_vars_por_lote):
+            chunk_vars = vars_ativas[i : i + max_vars_por_lote]
+            p_chunk = {
+                "item_id": p["item_id"],
+                "nome_produto": p["nome_produto"],
+                "metricas_macro_produto_30_dias": p["metricas_macro_produto_30_dias"],
+                "variacoes_ativas": chunk_vars
+            }
+            lotes.append([p_chunk])
 
-                # Faz o merge dos dados enriquecidos
-                for rec in resultado_lote:
-                    # Fix #10: blinda contra o LLM devolver item_id/model_id como
-                    # string em vez de int — sem isso, o match falha e o produto
-                    # some silenciosamente do relatório.
-                    try:
-                        rec_item_id = int(rec.get("item_id"))
-                        rec_model_id = int(rec.get("model_id"))
-                    except (TypeError, ValueError):
-                        logger.warning(
-                            f"⚠️ [RUNPOD] Registro com item_id/model_id inválido, ignorado: {rec}"
+    if lotes:
+        barra = st.progress(0, text="🚀 Iniciando auditoria C-Level (Smart Batching) no RunPod...")
+        lotes_concluidos = 0
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futuros = {executor.submit(chamar_cerebro_runpod_preditivo, lote): lote for lote in lotes}
+
+            for futuro in concurrent.futures.as_completed(futuros):
+                try:
+                    resultado_lote = futuro.result()
+
+                    for rec in resultado_lote:
+                        try:
+                            rec_item_id = int(rec.get("item_id"))
+                            rec_model_id = int(rec.get("model_id"))
+                        except (TypeError, ValueError):
+                            continue
+
+                        original = next(
+                            (d for d in dossie_completo
+                             if int(d["item_id"]) == rec_item_id
+                             and int(d["model_id"]) == rec_model_id),
+                            None,
                         )
-                        continue
+                        
+                        if original:
+                            rec["item_id"] = rec_item_id
+                            rec["model_id"] = rec_model_id
+                            rec["dados_atuais"]     = original
+                            rec["score_urgencia"]   = calcular_score_urgencia(original)
+                            rec["dias_estoque"]     = calcular_dias_estoque(original)
+                            rec.setdefault("previsao_vendas_7d", original.get("previsao_vendas_7d", 0))
+                            rec.setdefault("previsao_lucro_7d", original.get("previsao_lucro_7d", 0))
+                            rec.setdefault("elasticidade_preco_volume", original.get("elasticidade_preco_volume", 0))
+                            rec.setdefault("cluster_mercado", original.get("cluster_mercado", "Estável"))
+                            rec.setdefault("recomendacao_executiva", original.get("recomendacao_executiva", "Monitorar"))
+                            resultados_finais.append(rec)
+                except Exception as e:
+                    logger.error(f"Erro ao processar um dos lotes em paralelo: {e}")
 
-                    original = next(
-                        (d for d in lote_original
-                         if int(d["item_id"]) == rec_item_id
-                         and int(d["model_id"]) == rec_model_id),
-                        None,
-                    )
-                    if original:
-                        rec["item_id"] = rec_item_id
-                        rec["model_id"] = rec_model_id
-=======
-                
-                # Faz o merge dos dados enriquecidos
-                for rec in resultado_lote:
-                    original = next(
-                        (d for d in lote_original
-                         if d["item_id"] == rec.get("item_id")
-                         and d["model_id"] == rec.get("model_id")),
-                        None,
-                    )
-                    if original:
->>>>>>> 5ef92e814c0146ec7e0a8e6b0d4cf1d6d6348d4f
-                        rec["dados_atuais"]     = original
-                        rec["score_urgencia"]   = calcular_score_urgencia(original)
-                        rec["dias_estoque"]     = calcular_dias_estoque(original)
-                        rec.setdefault("previsao_vendas_7d", original.get("previsao_vendas_7d", 0))
-                        rec.setdefault("previsao_lucro_7d", original.get("previsao_lucro_7d", 0))
-                        rec.setdefault("elasticidade_preco_volume", original.get("elasticidade_preco_volume", 0))
-                        rec.setdefault("cluster_mercado", original.get("cluster_mercado", "Estável"))
-                        rec.setdefault("recomendacao_executiva", original.get("recomendacao_executiva", "Monitorar"))
-<<<<<<< HEAD
-                    else:
-                        logger.warning(
-                            f"⚠️ [RUNPOD] Nenhum produto original encontrado para "
-                            f"item_id={rec_item_id}, model_id={rec_model_id} — descartado."
-                        )
-                        continue
-                    resultados_finais.append(rec)
-            except Exception as e:
-                logger.error(f"Erro ao processar um dos lotes em paralelo: {e}")
+                lotes_concluidos += 1
+                barra.progress(
+                    lotes_concluidos / len(lotes),
+                    text=f"⏳ Conselho auditando {lotes_concluidos}/{len(lotes)} submódulos ativos..."
+                )
 
-=======
-                    resultados_finais.append(rec)
-            except Exception as e:
-                logger.error(f"Erro ao processar um dos lotes em paralelo: {e}")
-            
->>>>>>> 5ef92e814c0146ec7e0a8e6b0d4cf1d6d6348d4f
-            # Atualiza a barra de progresso à medida que os lotes regressam da nuvem
-            lotes_concluidos += 1
-            barra.progress(
-                lotes_concluidos / len(lotes),
-                text=f"⏳ Conselho auditando lotes em paralelo ({lotes_concluidos}/{len(lotes)} concluídos)..."
-            )
-
-    barra.empty()
+        barra.empty()
+        
     return resultados_finais
 
 
