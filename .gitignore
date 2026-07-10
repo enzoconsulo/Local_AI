@@ -7,3 +7,4 @@ estudio_shopee\peças_brutas\*
 *.png
 *.venv
 **/__pycache__/
+ultima_auditoria.json
