@@ -175,15 +175,10 @@ def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data
             
     linhas_trafego, linhas_ads = [], []
     
-    # ---------------------------------------------------------
-    # CORREÇÃO: Usar um dicionário para agregar as métricas
-    # Isso impede a CardinalityViolation agrupando métricas duplicadas
-    # ---------------------------------------------------------
     dict_metricas = {}
 
     def add_metrica(item, data, nome, valor, fonte):
         chave = (item, data, nome, fonte)
-        # Se a chave já existe, soma o valor. Se não, inicializa.
         dict_metricas[chave] = dict_metricas.get(chave, 0.0) + float(valor)
 
     # 1. PLANILHA DE PERFORMANCE ORGÂNICA
@@ -220,7 +215,6 @@ def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data
                     
                     linhas_trafego.append((item_id, dia_registro.date(), valor_visitas, valor_rejeicao, valor_carrinho))
 
-                    # Usa a nova função de agregação
                     add_metrica(item_id, dia_registro.date(), 'visitas_importadas', valor_visitas, arquivo_trafego.name)
                     add_metrica(item_id, dia_registro.date(), 'carrinhos_importados', valor_carrinho, arquivo_trafego.name)
                     add_metrica(item_id, dia_registro.date(), 'rejeicao_importada', valor_rejeicao, arquivo_trafego.name)
@@ -289,36 +283,38 @@ def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data
         except Exception as e:
             return 0, f"Erro ao ler Arquivo de Ads: {e}"
 
-    # ---------------------------------------------------------
-    # Converte o dicionário agregado de volta para a lista esperada
-    # ---------------------------------------------------------
     metricas_importadas = [
         (chave[0], chave[1], chave[2], valor, chave[3])
         for chave, valor in dict_metricas.items()
     ]
 
-    # INSERÇÃO PROTEGIDA (Idempotente)
     total_linhas = len(linhas_trafego) + len(linhas_ads)
     if total_linhas > 0:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                for d in range(dias_no_periodo):
-                    dia_del = (data_inicio + timedelta(days=d)).date()
-                    if arquivo_trafego: cur.execute("DELETE FROM fato_trafego_diario WHERE data = %s", (dia_del,))
-                    if arquivo_ads: cur.execute("DELETE FROM fato_ads_palavras_chave WHERE data = %s", (dia_del,))
-                
+                # INSERÇÃO PROTEGIDA - Sem uso de DELETE para garantir a manutenção de dados históricos de arquivos parciais
                 if linhas_trafego:
                     psycopg2.extras.execute_values(cur, """
-                        INSERT INTO fato_trafego_diario (item_id, data, visitantes_unicos, taxa_rejeicao, adicoes_carrinho) VALUES %s
+                        INSERT INTO fato_trafego_diario (item_id, data, visitantes_unicos, taxa_rejeicao, adicoes_carrinho) 
+                        VALUES %s
+                        ON CONFLICT (item_id, data) DO UPDATE SET
+                            visitantes_unicos = EXCLUDED.visitantes_unicos,
+                            taxa_rejeicao = EXCLUDED.taxa_rejeicao,
+                            adicoes_carrinho = EXCLUDED.adicoes_carrinho;
                     """, linhas_trafego)
                 
                 if linhas_ads:
                     psycopg2.extras.execute_values(cur, """
-                        INSERT INTO fato_ads_palavras_chave (item_id, keyword, data, impressoes, cliques, custo_total, gmv_gerado) VALUES %s
+                        INSERT INTO fato_ads_palavras_chave (item_id, keyword, data, impressoes, cliques, custo_total, gmv_gerado) 
+                        VALUES %s
+                        ON CONFLICT (item_id, keyword, data) DO UPDATE SET
+                            impressoes = EXCLUDED.impressoes,
+                            cliques = EXCLUDED.cliques,
+                            custo_total = EXCLUDED.custo_total,
+                            gmv_gerado = EXCLUDED.gmv_gerado;
                     """, linhas_ads)
 
                 if metricas_importadas:
-                    cur.execute("DELETE FROM fato_metricas_produto_importadas WHERE data_registro BETWEEN %s AND %s", (data_inicio.date(), data_fim.date()))
                     psycopg2.extras.execute_values(cur, """
                         INSERT INTO fato_metricas_produto_importadas (item_id, data_registro, metric_name, metric_value, fonte)
                         VALUES %s
@@ -398,9 +394,13 @@ with aba_principal:
                 status.update(label="Falha na API de catálogo.", state="error"); st.stop()
 
         with st.status("2. Conectando API: Pedidos e Lucro (Escrow)...", expanded=True) as status:
-            dt_inicio_pedidos = ultima_sync_pedidos or datetime(2026, 1, 26)
+            # CORREÇÃO: Lookback Window (Sobreposição) de 4 dias para capturar alterações de status em pedidos antigos (ex: Cancelamentos tardios)
+            if ultima_sync_pedidos:
+                dt_inicio_pedidos = ultima_sync_pedidos - timedelta(days=4) 
+            else:
+                dt_inicio_pedidos = datetime(2026, 1, 26)
             
-            if dt_inicio_pedidos >= agora - timedelta(minutes=10):
+            if ultima_sync_pedidos and ultima_sync_pedidos >= agora - timedelta(minutes=10):
                 status.update(label="Pedidos já estão atualizados na última hora.", state="complete")
             else:
                 blocos = fatiar_periodo(dt_inicio_pedidos, agora)
@@ -411,13 +411,15 @@ with aba_principal:
                     res_ped = sincronizar_pedidos(inicio_bloco, fim_bloco)
                     if res_ped["status"] == "sucesso":
                         total_pedidos += res_ped["registros"]
-                        registrar_sincronizacao('PEDIDOS', inicio_bloco, fim_bloco, 'SUCESSO', res_ped["registros"])
+                        # Registra o sucesso usando a data original de 'agora' para não quebrar a lógica de auditoria do sys_controle_sync
+                        if i == len(blocos) - 1:
+                             registrar_sincronizacao('PEDIDOS', ultima_sync_pedidos or dt_inicio_pedidos, agora, 'SUCESSO', total_pedidos)
                     else:
                         st.error("Erro no processamento da API de Pedidos.")
                         break
                     barra.progress((i + 1) / len(blocos))
                     
-                status.update(label=f"Motor Financeiro atualizado! ({total_pedidos} novos pedidos)", state="complete")
+                status.update(label=f"Motor Financeiro atualizado! (Registros consolidados)", state="complete")
 
         with st.status(f"3. Processando Data Warehouse ({dt_inicio_csv.strftime('%d/%m')} a {dt_fim_csv.strftime('%d/%m')})...", expanded=True) as status:
             linhas, msg = processar_arquivos_marketing(arquivo_trafego, arquivo_ads, dt_inicio_csv, dt_fim_csv)
@@ -438,7 +440,7 @@ with aba_principal:
                 
         st.balloons()
         st.success("🎉 Processo Finalizado! O Cérebro IA já pode analisar ROAS, conversão, estoque, preço e performance de cada variação com mais contexto.")
-
+        
 with aba_global:
     st.markdown("### Saúde Geral da Loja (Visão Macros)")
     st.markdown("""

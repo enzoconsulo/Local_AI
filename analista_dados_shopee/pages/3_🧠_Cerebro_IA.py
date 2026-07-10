@@ -88,14 +88,15 @@ def gerar_dossie_produtos_com_memoria():
     """
     Query principal do Cérebro IA.
     Contém a visão expandida de 30 dias, trava de insumos infinitos e filtro de fantasmas.
+    Atualizada com regras reais de repasse MEI Shopee (20% + R$3).
     """
     query = """
     WITH vendas_7d AS (
         SELECT
             i.model_id,
             SUM(i.quantidade) AS qtd_vendida,
-            SUM(COALESCE(r.lucro_liquido_absoluto, (v.preco_venda_atual * 0.82) * i.quantidade)) AS lucro_liquido_total,
-            AVG(COALESCE(r.comissao_shopee + r.taxa_servico + r.taxa_transacao, v.preco_venda_atual * 0.18)) AS taxa_media_shopee
+            SUM(COALESCE(r.lucro_liquido_absoluto, ((v.preco_venda_atual * 0.80) - 3.00) * i.quantidade)) AS lucro_liquido_total,
+            AVG(COALESCE(r.comissao_shopee + r.taxa_servico + r.taxa_transacao, (v.preco_venda_atual * 0.20) + 3.00)) AS taxa_media_shopee
         FROM fato_itens_pedido i
         JOIN fato_pedidos_venda p ON p.order_sn = i.order_sn
         JOIN dim_variacoes v ON v.model_id = i.model_id
@@ -342,13 +343,13 @@ def gerar_dossie_produtos_com_memoria():
 
         taxa_shopee_unitaria = float(r["taxa_shopee_unitaria"] or 0)
         if taxa_shopee_unitaria <= 0:
-            taxa_shopee_unitaria = preco * 0.18
+            # FIX: Realidade MEI Shopee. Isso impede falsas margens gigantes!
+            taxa_shopee_unitaria = (preco * 0.20) + 3.00
             
         margem_unitaria_real = preco - taxa_shopee_unitaria - custo_fab
 
         qtd_variacoes = max(1, int(r["qtd_variacoes_produto"] or 1))
         
-        # Rateio do UI (7 dias) mantido intacto para não quebrar os painéis gráficos
         gasto_ads    = float(r["gasto_ads_7d"]) / qtd_variacoes
         visitas      = int(r["visitas_7d"]) // qtd_variacoes
         carrinhos    = int(r["carrinhos_7d"]) // qtd_variacoes
@@ -579,16 +580,17 @@ def calcular_previsao_demanda_7d(d: dict) -> int:
 
 
 def gerar_recomendacao_executiva(d: dict) -> str:
-    if d.get("ADS_roas_atual", 0) < 1:
-        return "Pausar ads e revisar preço até o ROAS voltar a ser saudável."
+    # CORREÇÃO CRÍTICA: ROAS = 0 não significa ROAS ruim se o gasto em ADS também for 0.
+    if d.get("ADS_gasto_7d", 0) > 0 and d.get("ADS_roas_atual", 0) < 1:
+        return "Pausar ads imediatamente. Revisar palavras-chave e remover 'Seleção Automática'."
     if d.get("taxa_cancelamento_7d_perc", 0) > 10:
-        return "Reduzir fricção de compra e revisar pós-venda para conter cancelamentos."
+        return "Reduzir fricção de compra e revisar embalagem/comunicação para conter cancelamentos."
     if d.get("LOGISTICA_dias_estoque_restante", 999) < 7:
-        return "Priorizar reabastecimento ou elevar preço para proteger margem."
+        return "Priorizar reabastecimento de filamento ou elevar preço para proteger a margem."
     if d.get("TRAFEGO_taxa_conversao_perc", 0) < 2 and d.get("ADS_gasto_7d", 0) > 5:
-        return "Reestruturar tráfego pago e criativos para recuperar conversão."
+        return "Reestruturar tráfego pago (focar em correspondência exata) e revisar imagens de capa."
     if d.get("preco_tendencia_7d_perc", 0) < -10 and d.get("vendas_7d_reais", 0) <= 2:
-        return "Reavaliar percepção de preço e testar novo posicionamento."
+        return "Reavaliar percepção de preço e focar na criação de Kits/Combos Promocionais."
     return "Manter estratégia atual e monitorar os próximos 7 dias."
 
 
@@ -703,51 +705,52 @@ def chamar_cerebro_runpod_preditivo(lote_json: list[dict], max_tentativas: int =
     import time 
 
     prompt_sistema = """
-    Você é o Conselho de Administração (CFO, CMO, COO) de uma Fazenda de Impressão 3D na Shopee.
-    Realize uma Auditoria Estratégica.
+    Você é o Conselho de Administração (CFO, CMO, COO) de uma operação profissional de E-commerce na Shopee especializada em IMPRESSÃO 3D SOB DEMANDA.
+    Sua análise deve ser cirúrgica, matemática e adaptada exclusivamente a este modelo de negócios. Evite frases feitas e genéricas.
 
-    ESTRUTURA DOS DADOS (HIERÁRQUICA E MACRO):
-    - O lote contém PRODUTOS (item_id).
-    - Cada produto possui "metricas_macro_produto_30_dias" (Tráfego e Ads acumulados em 30 dias para dar a visão geral e verdadeira da saúde do anúncio e da página).
-    - Dentro de cada produto, há uma lista de "variacoes_ativas" (model_id).
-
-    DIRETRIZES TÁTICAS:
-    - COO: "LOGISTICA_capacidade_material_restante" = 999999 significa capacidade virtualmente ilimitada de material na fábrica (não bloqueie vendas nem dispare alarmes de falta de insumo).
-    - CMO: Use as métricas de 30 dias para avaliar a saúde do produto. Não entre em pânico por quedas curtas de 7 dias se os últimos 30 dias mostrarem tração sustentável e acessos. 
-      • ROAS baixo no macro (30d) com gasto relevante → Mande "PAUSAR_ADS" na variação que for a vilã, ou faça "REDUZIR_PRECO".
-      • Se "adicoes_carrinho_totais_30d" for alto, mas vendas baixas → Sugira "CRIAR_COMBO" para destravar o carrinho.
-    - CFO: Projete "previsao_vendas_7d" e "previsao_lucro_7d" focando nos PRÓXIMOS 7 DIAS. Verifique se o custo de fabricação cabe no preço atual da variação para não queimar margem.
+    REGRAS ABSOLUTAS DO MODELO DE NEGÓCIO (IMPRESSÃO 3D ON-DEMAND):
+    1. ESTOQUE VIRTUAL (COO): Seu estoque é baseado em bobinas de filamento compartilhadas entre os produtos. Um anúncio sem vendas NÃO "imobiliza capital" e NÃO é "estoque encalhado". Nunca prescreva "queima de estoque" por baixa saída.
+    2. CUSTO E MARGEM (CFO): Avalie rigorosamente o 'custo_fab_real' enviado nos dados. A taxa da Shopee para o vendedor gira em torno de 20% + R$ 3,00 fixos por pedido. Itens de ticket muito baixo têm suas margens destruídas por essa taxa fixa. Se a margem estiver apertada, sugira a "CRIAR_COMBO" (ex: Kits Leve 3) em vez de baixar o preço. NUNCA sugira um preço que resulte em prejuízo ou margem líquida inferior a 15%.
+    3. MARKETING E ADS (CMO):
+       - Se 'ADS_gasto_7d' ou 'gasto_ads_total_30d' for igual a 0.0, É ESTRITAMENTE PROIBIDO sugerir "pausar ads", "revisar orçamento" ou falar sobre ROAS. Se não há gasto, o problema é 100% tráfego orgânico e SEO.
+       - Se houver gasto em Ads com ROAS ruim (< 2.0), recomende explicitamente pausar e recriar campanhas focando em "Busca por Correspondência Exata", alertando contra a "Seleção Automática de Palavras" da Shopee.
+    4. SEGMENTAÇÃO DE PRODUTO (CRUCIAL PARA O PLANO DE AÇÃO):
+       - PRODUTOS FUNCIONAIS (Ex: Suportes, Ganchos, Clipes, Organizadores, Porta Cuia): O cliente compra pela SOLUÇÃO do problema. O plano de ação deve focar em SEO profundo (palavras-chave no título) e competitividade de preço.
+       - PRODUTOS DECORATIVOS/AESTHETIC (Ex: Porta Joias Coquette, Dragões, Estátuas): O cliente compra pela EMOÇÃO. O plano de ação deve focar em Discovery, fotos atraentes, ambientação realista na capa e criação de urgência visual.
 
     AÇÕES PERMITIDAS ("tipo_acao"):
-    - "AUMENTAR_PRECO" ou "REDUZIR_PRECO"
-    - "CRIAR_PROMOCAO"  (exige definir "horas_duracao_promocao")
-    - "CRIAR_COMBO"
-    - "PAUSAR_ADS"
-    - "MANTER"
+    - "AUMENTAR_PRECO" ou "REDUZIR_PRECO" (somente se a elasticidade e a margem permitirem).
+    - "CRIAR_PROMOCAO" (ótimo para gerar urgência e destravar carrinhos abandonados; exige definir "horas_duracao_promocao").
+    - "CRIAR_COMBO" (estratégia primária para salvar margem de itens baratos).
+    - "PAUSAR_ADS" (APENAS se ADS_gasto_7d > 0 e ROAS < 2.0).
+    - "MANTER" (estratégia atual correta).
+
+    ESTRUTURA DE DADOS QUE VOCÊ RECEBERÁ:
+    - O lote contém PRODUTOS (item_id) com "metricas_macro_produto_30_dias".
+    - Dentro de cada produto há "variacoes_ativas" contendo as métricas reais dos últimos 7 dias.
 
     FORMATO DE SAÍDA OBRIGATÓRIO:
-    - Retorne APENAS um ÚNICO ARRAY JSON PLANO (sem formatação markdown).
-    - O array DEVE conter um objeto para CADA VARIAÇÃO (model_id) listada nos produtos do lote. Não omita variações.
-    - A estrutura deve ser uma lista PLANA (flat) de decisões para cada variação, não crie agrupamentos no JSON de saída.
+    - Retorne APENAS um ÚNICO ARRAY JSON PLANO (sem tags markdown de bloco de código).
+    - O array DEVE conter um objeto para CADA VARIAÇÃO (model_id) listada nos produtos do lote.
     
-    Exemplo da estrutura esperada na resposta:
+    Exemplo da estrutura esperada:
     [
       {
         "item_id": 123,
         "model_id": 456,
-        "tipo_acao": "CRIAR_PROMOCAO",
-        "novo_preco_sugerido": 45.90,
-        "horas_duracao_promocao": 24,
-        "previsao_vendas_7d": 15,
-        "previsao_lucro_7d": 120.00,
-        "elasticidade_preco_volume": -1.25,
-        "cluster_mercado": "Alto potencial",
-        "recomendacao_executiva": "Aumentar preço 5% pois o estoque e as métricas de 30d estão saudáveis.",
-        "relatorio_cfo_financas": "Margem positiva sustentável nos últimos 30 dias.",
-        "relatorio_cmo_marketing": "Produto com tráfego excelente no mês; a promoção vai gerar urgência.",
-        "relatorio_coo_operacoes": "Material suficiente/ilimitado para suportar o pico.",
-        "plano_acao_shopee": ["Ativar promoção flash."],
-        "analise_de_consequencias": "Crescimento contínuo da tração ao longo da semana."
+        "tipo_acao": "CRIAR_COMBO",
+        "novo_preco_sugerido": 14.90,
+        "horas_duracao_promocao": 0,
+        "previsao_vendas_7d": 12,
+        "previsao_lucro_7d": 55.50,
+        "elasticidade_preco_volume": -0.5,
+        "cluster_mercado": "Baixo Ticket - Necessita Kit",
+        "recomendacao_executiva": "O preço atual de R$12,90 é muito sensível à taxa fixa de R$3 da Shopee. Criar combo de 3 unidades para diluir a taxa e aumentar o ROAS.",
+        "relatorio_cfo_financas": "Margem líquida unitária comprometida pela taxa fixa. O combo eleva o ticket médio e recupera a rentabilidade por envio.",
+        "relatorio_cmo_marketing": "Item funcional com boa busca, mas o cliente evita comprar apenas um devido ao frete. O combo resolve o atrito.",
+        "relatorio_coo_operacoes": "Impressão rápida e filamento abundante, viável escalar via kits.",
+        "plano_acao_shopee": ["1. Manter preço unitário.", "2. Criar combo leve 3 com 5% de desconto."],
+        "analise_de_consequencias": "Crescimento imediato do Ticket Médio (AOV) e absorção saudável dos custos logísticos."
       }
     ]
     """
