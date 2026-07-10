@@ -842,6 +842,7 @@ def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 8) -> li
             lote_original = futuros[futuro]
             try:
                 resultado_lote = futuro.result()
+<<<<<<< HEAD
 
                 # Faz o merge dos dados enriquecidos
                 for rec in resultado_lote:
@@ -866,6 +867,18 @@ def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 8) -> li
                     if original:
                         rec["item_id"] = rec_item_id
                         rec["model_id"] = rec_model_id
+=======
+                
+                # Faz o merge dos dados enriquecidos
+                for rec in resultado_lote:
+                    original = next(
+                        (d for d in lote_original
+                         if d["item_id"] == rec.get("item_id")
+                         and d["model_id"] == rec.get("model_id")),
+                        None,
+                    )
+                    if original:
+>>>>>>> 5ef92e814c0146ec7e0a8e6b0d4cf1d6d6348d4f
                         rec["dados_atuais"]     = original
                         rec["score_urgencia"]   = calcular_score_urgencia(original)
                         rec["dias_estoque"]     = calcular_dias_estoque(original)
@@ -874,6 +887,7 @@ def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 8) -> li
                         rec.setdefault("elasticidade_preco_volume", original.get("elasticidade_preco_volume", 0))
                         rec.setdefault("cluster_mercado", original.get("cluster_mercado", "Estável"))
                         rec.setdefault("recomendacao_executiva", original.get("recomendacao_executiva", "Monitorar"))
+<<<<<<< HEAD
                     else:
                         logger.warning(
                             f"⚠️ [RUNPOD] Nenhum produto original encontrado para "
@@ -884,6 +898,12 @@ def processar_em_lotes(dossie_completo: list[dict], tamanho_lote: int = 8) -> li
             except Exception as e:
                 logger.error(f"Erro ao processar um dos lotes em paralelo: {e}")
 
+=======
+                    resultados_finais.append(rec)
+            except Exception as e:
+                logger.error(f"Erro ao processar um dos lotes em paralelo: {e}")
+            
+>>>>>>> 5ef92e814c0146ec7e0a8e6b0d4cf1d6d6348d4f
             # Atualiza a barra de progresso à medida que os lotes regressam da nuvem
             lotes_concluidos += 1
             barra.progress(
