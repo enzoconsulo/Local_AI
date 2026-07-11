@@ -27,15 +27,32 @@ def get_db_connection():
         password=os.getenv("POSTGRES_PASSWORD")
     )
 
+def validar_sql_somente_leitura(query: str) -> str:
+    """Impede múltiplas instruções e DML oculto em CTEs antes de consultar o banco."""
+    sem_comentarios = re.sub(r"/\*.*?\*/|--[^\n]*", "", query, flags=re.DOTALL).strip()
+    if not sem_comentarios:
+        raise ValueError("A consulta SQL está vazia.")
+    if sem_comentarios.endswith(";"):
+        sem_comentarios = sem_comentarios[:-1].strip()
+    if ";" in sem_comentarios:
+        raise ValueError("O chat aceita somente uma instrução SQL por vez.")
+    if not re.match(r"^(SELECT|WITH|EXPLAIN)\b", sem_comentarios, flags=re.IGNORECASE):
+        raise ValueError("Por segurança, apenas consultas de leitura são permitidas.")
+    proibidos = r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|COPY|CALL|DO|VACUUM)\b"
+    if re.search(proibidos, sem_comentarios, flags=re.IGNORECASE):
+        raise ValueError("A consulta contém um comando de escrita ou administração proibido.")
+    return sem_comentarios
+
+
 def run_query(query):
-    """Executa consultas de leitura no banco de dados e retorna um DataFrame Pandas"""
-    query_normalizada = query.strip().lstrip("(").strip().upper()
-    if not query_normalizada.startswith("SELECT") and not query_normalizada.startswith("WITH"):
-        raise ValueError("Por segurança, apenas comandos SELECT são permitidos neste chat.")
+    """Executa apenas uma consulta de leitura, com transação read-only e limite de tempo."""
+    query_segura = validar_sql_somente_leitura(query)
     try:
         with get_db_connection() as conn:
+            conn.set_session(readonly=True, autocommit=False)
             with conn.cursor() as cur:
-                cur.execute(query)
+                cur.execute("SET LOCAL statement_timeout = '10s'")
+                cur.execute(query_segura)
                 if cur.description:
                     col_names = [desc[0] for desc in cur.description]
                     df = pd.DataFrame(cur.fetchall(), columns=col_names)
@@ -70,7 +87,7 @@ def obter_contexto_estrategico_atual():
 # ==============================================================================
 LITELLM_URL = "http://localhost:8000/v1/chat/completions" # Porta 8000 conforme definimos no boot
 
-# SCHEMA ATUALIZADO (Com todas as colunas da Migration 02)
+# Schema operacional e analítico atualizado até as migrações 08 e 09.
 SCHEMA_DO_BANCO = """
 O banco de dados PostgreSQL contém as seguintes tabelas relacionais da loja Shopee:
 1. dim_produtos (item_id BIGINT, nome_atual VARCHAR, category_id BIGINT, status_shopee VARCHAR, data_criacao TIMESTAMP, nota_media_estrelas DECIMAL, likes_count INTEGER, dias_pre_encomenda INTEGER)
@@ -79,9 +96,13 @@ O banco de dados PostgreSQL contém as seguintes tabelas relacionais da loja Sho
 4. fato_pedidos_venda (order_sn VARCHAR, data_hora_criacao TIMESTAMP, uf_destino CHAR, status_pedido VARCHAR, motivo_cancelamento_devolucao VARCHAR)
 5. fato_itens_pedido (order_sn VARCHAR, model_id BIGINT, quantidade INTEGER, preco_praticado DECIMAL)
 6. fato_repasse_escrow (order_sn VARCHAR, comissao_shopee DECIMAL, taxa_servico DECIMAL, taxa_transacao DECIMAL, custo_frete_reverso DECIMAL, lucro_liquido_absoluto DECIMAL)
-7. fato_trafego_diario (item_id BIGINT, data DATE, visitantes_unicos INTEGER, taxa_rejeicao DECIMAL, adicoes_carrinho INTEGER)
-8. fato_ads_palavras_chave (item_id BIGINT, keyword VARCHAR, data DATE, impressoes INTEGER, cliques INTEGER, custo_total DECIMAL, gmv_gerado DECIMAL)
-9. log_acoes_shopee (id_log SERIAL, item_id BIGINT, tipo_acao VARCHAR, detalhe_acao TEXT, impacto_projetado JSONB, data_aplicacao TIMESTAMP, status_api VARCHAR)
+7. fato_trafego_diario (item_id BIGINT, data DATE, impressoes INTEGER NULL, cliques INTEGER NULL, visitantes_unicos INTEGER, taxa_rejeicao DECIMAL, adicoes_carrinho INTEGER, granularidade_origem VARCHAR)
+8. fato_ads_performance_produto (item_id BIGINT, data_registro DATE, tipo_campanha VARCHAR, impressoes INTEGER NULL, cliques INTEGER NULL, investimento DECIMAL, vendas_gmv DECIMAL, adicoes_carrinho INTEGER, conversoes INTEGER, itens_vendidos INTEGER, roas DECIMAL, acos DECIMAL, granularidade_origem VARCHAR)
+9. fato_ads_palavras_chave (fonte legada: item_id BIGINT, keyword VARCHAR, data DATE, impressoes INTEGER, cliques INTEGER, custo_total DECIMAL, gmv_gerado DECIMAL)
+10. log_acoes_shopee (id_log SERIAL, item_id BIGINT, model_id BIGINT, tipo_acao VARCHAR, detalhe_acao TEXT, impacto_projetado JSONB, data_aplicacao TIMESTAMP, status_api VARCHAR, id_execucao_origem UUID)
+11. ia_execucoes_analiticas (id_execucao UUID, criado_em TIMESTAMPTZ, horizonte_dias SMALLINT, cobertura_dados JSONB, resumo_executivo JSONB, status VARCHAR)
+12. ia_snapshots_variacao (id_execucao UUID, item_id BIGINT, model_id BIGINT, metricas_observadas JSONB, previsoes JSONB, recomendacao JSONB)
+13. ia_avaliacoes_acoes (id_log BIGINT, model_id BIGINT, baseline JSONB, previsto JSONB, observado JSONB, comparacao JSONB, status VARCHAR)
 
 CHAVES ESTRANGEIRAS CRUCIAIS:
 - fato_itens_pedido.order_sn -> fato_pedidos_venda.order_sn

@@ -5,10 +5,10 @@ Conselho de Administração IA (CFO, CMO, COO) + Atuador Shopee.
 """
 
 import json
+import hashlib
+import math
 import os
-import re
 import sys
-import litellm
 import pandas as pd
 import psycopg2.extras
 import streamlit as st
@@ -16,8 +16,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 import requests
 from loguru import logger
-import concurrent.futures
 from datetime import datetime
+from requests.adapters import HTTPAdapter
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
@@ -38,11 +38,26 @@ st.set_page_config(
     layout="wide"
 )
 
-# Porta 8000 — alinhada com data_app.py e o bootstrap llm.py
-LITELLM_BASE = "http://localhost:8000/v1/chat/completions"
+# Inferência externa direta: não depende de RunPod, LiteLLM local ou GPU ligada.
+OPENAI_API_BASE_URL = (os.getenv("OPENAI_API_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+OPENAI_CHAT_COMPLETIONS_URL = (
+    OPENAI_API_BASE_URL
+    if OPENAI_API_BASE_URL.endswith("/chat/completions")
+    else f"{OPENAI_API_BASE_URL}/chat/completions"
+)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL_7D = os.getenv("OPENAI_MODEL_7D", "gpt-5.4").strip()
+OPENAI_MODEL_30D = os.getenv("OPENAI_MODEL_30D", "gpt-5.5").strip()
+OPENAI_REASONING_7D = os.getenv("OPENAI_REASONING_7D", "low").strip().lower()
+OPENAI_REASONING_30D = os.getenv("OPENAI_REASONING_30D", "medium").strip().lower()
+HTTP_SESSION = requests.Session()
+HTTP_SESSION.mount("http://", HTTPAdapter(pool_connections=2, pool_maxsize=4, max_retries=0))
+HTTP_SESSION.mount("https://", HTTPAdapter(pool_connections=2, pool_maxsize=4, max_retries=0))
 
 # Caminho para salvar a última auditoria no disco
 CACHE_AUDITORIA = ROOT_DIR / "ultima_auditoria.json"
+CACHE_AUDITORIA_7D = ROOT_DIR / "ultima_auditoria_7d.json"
+CACHE_AUDITORIA_30D = ROOT_DIR / "ultima_auditoria_30d.json"
 
 # Regras de execução recomendadas para o fluxo Shopee
 ACTIONS_EXECUTAVEIS_SEGURAS = {"AUMENTAR_PRECO", "REDUZIR_PRECO", "CRIAR_PROMOCAO", "CRIAR_COMBO"}
@@ -89,13 +104,14 @@ def gerar_dossie_produtos_com_memoria():
     """
     Query principal do Cérebro IA.
     Contém a visão expandida de 30 dias, trava de insumos infinitos e filtro de fantasmas.
-    Atualizada com regras reais de repasse MEI Shopee (20% + R$3).
+    Atualizada com regras reais de repasse MEI Shopee (20% + R$3) e funil de Tráfego/Ads blindado.
     """
     query = """
     WITH vendas_7d AS (
         SELECT
             i.model_id,
             SUM(i.quantidade) AS qtd_vendida,
+            COUNT(DISTINCT p.data_hora_criacao::date) AS dias_com_venda_7d,
             SUM(COALESCE(r.lucro_liquido_absoluto, ((v.preco_venda_atual * 0.80) - 3.00) * i.quantidade)) AS lucro_liquido_total,
             AVG(COALESCE(r.comissao_shopee + r.taxa_servico + r.taxa_transacao, (v.preco_venda_atual * 0.20) + 3.00)) AS taxa_media_shopee
         FROM fato_itens_pedido i
@@ -110,6 +126,7 @@ def gerar_dossie_produtos_com_memoria():
         SELECT
             i.model_id,
             SUM(i.quantidade) AS qtd_vendida_30d,
+            COUNT(DISTINCT p.data_hora_criacao::date) AS dias_com_venda_30d,
             SUM(COALESCE(r.lucro_liquido_absoluto, ((v.preco_venda_atual * 0.80) - 3.00) * i.quantidade)) AS receita_liquida_30d,
             AVG(COALESCE(r.comissao_shopee + r.taxa_servico + r.taxa_transacao, (v.preco_venda_atual * 0.20) + 3.00)) AS taxa_media_shopee_30d
         FROM fato_itens_pedido i
@@ -134,26 +151,45 @@ def gerar_dossie_produtos_com_memoria():
     ads_7d AS (
         SELECT
             item_id,
-            SUM(impressoes)  AS impressoes,
-            SUM(cliques)     AS cliques,
-            SUM(custo_total) AS gasto_ads
-        FROM fato_ads_palavras_chave
-        WHERE data >= CURRENT_DATE - INTERVAL '7 days'
+            SUM(COALESCE(impressoes, 0)) AS impressoes_ads,
+            SUM(COALESCE(cliques, 0)) AS cliques_ads,
+            COUNT(impressoes) AS registros_impressoes_ads,
+            COUNT(cliques) AS registros_cliques_ads,
+            SUM(COALESCE(investimento, 0)) AS gasto_ads,
+            COUNT(DISTINCT data_registro) FILTER (WHERE granularidade_origem = 'DIARIA') AS dias_ads_7d,
+            SUM(COALESCE(vendas_gmv, 0)) AS gmv_ads,
+            AVG(COALESCE(acos, 0)) AS acos_medio
+        FROM fato_ads_performance_produto
+        WHERE data_registro >= CURRENT_DATE - INTERVAL '7 days'
         GROUP BY item_id
     ),
     ads_30d AS (
         SELECT
             item_id,
-            SUM(custo_total) AS gasto_ads_30d
-        FROM fato_ads_palavras_chave
-        WHERE data >= CURRENT_DATE - INTERVAL '30 days'
+            SUM(COALESCE(impressoes, 0)) AS impressoes_ads_30d,
+            SUM(COALESCE(cliques, 0)) AS cliques_ads_30d,
+            COUNT(impressoes) AS registros_impressoes_ads_30d,
+            COUNT(cliques) AS registros_cliques_ads_30d,
+            SUM(COALESCE(investimento, 0)) AS gasto_ads_30d,
+            COUNT(DISTINCT data_registro) FILTER (WHERE granularidade_origem = 'DIARIA') AS dias_ads_30d,
+            SUM(COALESCE(vendas_gmv, 0)) AS gmv_ads_30d,
+            SUM(COALESCE(conversoes, 0)) AS conversoes_ads_30d,
+            SUM(COALESCE(itens_vendidos, 0)) AS itens_vendidos_ads_30d
+        FROM fato_ads_performance_produto
+        WHERE data_registro >= CURRENT_DATE - INTERVAL '30 days'
         GROUP BY item_id
     ),
     trafego_7d AS (
         SELECT
             item_id,
-            SUM(visitantes_unicos) AS visitas,
-            SUM(adicoes_carrinho)  AS carrinhos
+            SUM(COALESCE(impressoes, 0)) AS impressoes_org,
+            SUM(COALESCE(cliques, 0)) AS cliques_org,
+            COUNT(impressoes) AS registros_impressoes_org,
+            COUNT(cliques) AS registros_cliques_org,
+            SUM(COALESCE(visitantes_unicos, 0)) AS visitas,
+            SUM(COALESCE(adicoes_carrinho, 0)) AS carrinhos,
+            COUNT(DISTINCT data) FILTER (WHERE granularidade_origem = 'DIARIA') AS dias_trafego_7d,
+            AVG(COALESCE(taxa_rejeicao, 0)) AS rejeicao_media
         FROM fato_trafego_diario
         WHERE data >= CURRENT_DATE - INTERVAL '7 days'
         GROUP BY item_id
@@ -161,8 +197,14 @@ def gerar_dossie_produtos_com_memoria():
     trafego_30d AS (
         SELECT
             item_id,
-            SUM(visitantes_unicos) AS visitas_30d,
-            SUM(adicoes_carrinho)  AS carrinhos_30d
+            SUM(COALESCE(impressoes, 0)) AS impressoes_org_30d,
+            SUM(COALESCE(cliques, 0)) AS cliques_org_30d,
+            COUNT(impressoes) AS registros_impressoes_org_30d,
+            COUNT(cliques) AS registros_cliques_org_30d,
+            SUM(COALESCE(visitantes_unicos, 0)) AS visitas_30d,
+            SUM(COALESCE(adicoes_carrinho, 0))  AS carrinhos_30d,
+            COUNT(DISTINCT data) FILTER (WHERE granularidade_origem = 'DIARIA') AS dias_trafego_30d,
+            AVG(taxa_rejeicao) AS rejeicao_media_30d
         FROM fato_trafego_diario
         WHERE data >= CURRENT_DATE - INTERVAL '30 days'
         GROUP BY item_id
@@ -172,7 +214,7 @@ def gerar_dossie_produtos_com_memoria():
             v.item_id,
             COUNT(*) AS qtd_variacoes
         FROM dim_variacoes v
-        WHERE v.nome_variacao NOT ILIKE '%Excluída%' 
+        WHERE v.nome_variacao NOT ILIKE '%Excluída%'
           AND v.nome_variacao NOT ILIKE '%Excluida%'
         GROUP BY v.item_id
     ),
@@ -276,26 +318,57 @@ def gerar_dossie_produtos_com_memoria():
         COALESCE(h.estoque_30d_atras, v.estoque_shopee, 0) AS estoque_30d_atras,
 
         COALESCE(ven.qtd_vendida, 0)         AS vendas_7d,
+        COALESCE(ven.dias_com_venda_7d, 0)   AS dias_com_venda_7d,
         COALESCE(v30.qtd_vendida_30d, 0)     AS vendas_30d,
+        COALESCE(v30.dias_com_venda_30d, 0)  AS dias_com_venda_30d,
         COALESCE(v30.receita_liquida_30d, 0) AS receita_liquida_30d,
         COALESCE(vant.qtd_vendida_antiga, 0) AS vendas_semana_passada,
         COALESCE(ven.taxa_media_shopee, 0)   AS taxa_shopee_unitaria,
         COALESCE(ven.lucro_liquido_total, 0) AS receita_liquida_7d,
-        
+
+        -- INJEÇÃO: Funil Orgânico e Pago --
+        COALESCE(t.impressoes_org, 0)        AS impressoes_org,
+        COALESCE(t.cliques_org, 0)           AS cliques_org,
+        COALESCE(t.registros_impressoes_org, 0) AS registros_impressoes_org,
+        COALESCE(t.registros_cliques_org, 0) AS registros_cliques_org,
+        COALESCE(t.rejeicao_media, 0)        AS rejeicao_media,
+        COALESCE(a.impressoes_ads, 0)        AS impressoes_ads,
+        COALESCE(a.cliques_ads, 0)           AS cliques_ads,
+        COALESCE(a.registros_impressoes_ads, 0) AS registros_impressoes_ads,
+        COALESCE(a.registros_cliques_ads, 0) AS registros_cliques_ads,
+        COALESCE(a.gmv_ads, 0)               AS gmv_ads,
+        COALESCE(a.acos_medio, 0)            AS acos_medio,
+        ------------------------------------
+
         COALESCE(t.visitas, 0)               AS visitas_7d,
         COALESCE(t.carrinhos, 0)             AS carrinhos_7d,
+        COALESCE(t.dias_trafego_7d, 0)       AS dias_trafego_7d,
         COALESCE(a.gasto_ads, 0)             AS gasto_ads_7d,
-        
+        COALESCE(a.dias_ads_7d, 0)           AS dias_ads_7d,
+
         COALESCE(t30.visitas_30d, 0)         AS visitas_30d,
         COALESCE(t30.carrinhos_30d, 0)       AS carrinhos_30d,
+        COALESCE(t30.dias_trafego_30d, 0)    AS dias_trafego_30d,
+        COALESCE(t30.impressoes_org_30d, 0)  AS impressoes_org_30d,
+        COALESCE(t30.cliques_org_30d, 0)     AS cliques_org_30d,
+        COALESCE(t30.registros_impressoes_org_30d, 0) AS registros_impressoes_org_30d,
+        COALESCE(t30.registros_cliques_org_30d, 0) AS registros_cliques_org_30d,
         COALESCE(a30.gasto_ads_30d, 0)       AS gasto_ads_30d,
-        
+        COALESCE(a30.dias_ads_30d, 0)        AS dias_ads_30d,
+        COALESCE(a30.impressoes_ads_30d, 0)  AS impressoes_ads_30d,
+        COALESCE(a30.cliques_ads_30d, 0)     AS cliques_ads_30d,
+        COALESCE(a30.registros_impressoes_ads_30d, 0) AS registros_impressoes_ads_30d,
+        COALESCE(a30.registros_cliques_ads_30d, 0) AS registros_cliques_ads_30d,
+        COALESCE(a30.gmv_ads_30d, 0)         AS gmv_ads_30d,
+        COALESCE(a30.conversoes_ads_30d, 0)  AS conversoes_ads_30d,
+        COALESCE(a30.itens_vendidos_ads_30d, 0) AS itens_vendidos_ads_30d,
+
         COALESCE(vi.qtd_variacoes, 1)        AS qtd_variacoes_produto,
         COALESCE(ped.pedidos_7d, 0)          AS pedidos_7d,
         COALESCE(can.cancelamentos_7d, 0)    AS cancelamentos_7d,
         COALESCE(ped30.pedidos_30d, 0)       AS pedidos_30d,
         COALESCE(can30.cancelamentos_30d, 0) AS cancelamentos_30d,
-        
+
         COALESCE(mi.vendas_importadas_7d, 0) AS vendas_importadas_7d,
         COALESCE(mi.receita_importada_7d, 0) AS receita_importada_7d,
         COALESCE(mi.cancelamentos_importados_7d, 0) AS cancelamentos_importados_7d,
@@ -378,19 +451,54 @@ def gerar_dossie_produtos_com_memoria():
 
         taxa_shopee_unitaria = float(r["taxa_shopee_unitaria"] or 0)
         if taxa_shopee_unitaria <= 0:
-            # FIX: Realidade MEI Shopee. Isso impede falsas margens gigantes!
             taxa_shopee_unitaria = (preco * 0.20) + 3.00
-            
+
         margem_unitaria_real = preco - taxa_shopee_unitaria - custo_fab
 
         qtd_variacoes = max(1, int(r["qtd_variacoes_produto"] or 1))
-        
+
         gasto_ads    = float(r["gasto_ads_7d"]) / qtd_variacoes
         visitas      = int(r["visitas_7d"]) // qtd_variacoes
         carrinhos    = int(r["carrinhos_7d"]) // qtd_variacoes
         gasto_ads_30d = float(r["gasto_ads_30d"] or 0) / qtd_variacoes
         visitas_30d = int(r["visitas_30d"] or 0) // qtd_variacoes
         carrinhos_30d = int(r["carrinhos_30d"] or 0) // qtd_variacoes
+
+        # INJEÇÃO: Processamento do Funil Rateado
+        impressoes_org = int(r["impressoes_org"] or 0) // qtd_variacoes
+        cliques_org = int(r["cliques_org"] or 0) // qtd_variacoes
+        rejeicao_media = float(r["rejeicao_media"] or 0)
+        org_impressoes_disponiveis = int(r["registros_impressoes_org"] or 0) > 0 and (impressoes_org > 0 or visitas == 0)
+        org_cliques_disponiveis = int(r["registros_cliques_org"] or 0) > 0 and (cliques_org > 0 or visitas == 0)
+
+        impressoes_ads = int(r["impressoes_ads"] or 0) // qtd_variacoes
+        cliques_ads = int(r["cliques_ads"] or 0) // qtd_variacoes
+        gmv_ads = float(r["gmv_ads"] or 0) / qtd_variacoes
+        acos_medio = float(r["acos_medio"] or 0)
+        ads_impressoes_disponiveis = int(r["registros_impressoes_ads"] or 0) > 0 and (impressoes_ads > 0 or gasto_ads == 0)
+        ads_cliques_disponiveis = int(r["registros_cliques_ads"] or 0) > 0 and (cliques_ads > 0 or gasto_ads == 0)
+
+        ctr_org = round((cliques_org / impressoes_org) * 100, 2) if org_impressoes_disponiveis and org_cliques_disponiveis and impressoes_org > 0 else None
+        ctr_ads = round((cliques_ads / impressoes_ads) * 100, 2) if ads_impressoes_disponiveis and ads_cliques_disponiveis and impressoes_ads > 0 else None
+
+        impressoes_org_30d = int(r["impressoes_org_30d"] or 0) // qtd_variacoes
+        cliques_org_30d = int(r["cliques_org_30d"] or 0) // qtd_variacoes
+        org_impressoes_30d_disponiveis = int(r["registros_impressoes_org_30d"] or 0) > 0 and (impressoes_org_30d > 0 or visitas_30d == 0)
+        org_cliques_30d_disponiveis = int(r["registros_cliques_org_30d"] or 0) > 0 and (cliques_org_30d > 0 or visitas_30d == 0)
+        ctr_org_30d = round((cliques_org_30d / impressoes_org_30d) * 100, 2) if org_impressoes_30d_disponiveis and org_cliques_30d_disponiveis and impressoes_org_30d > 0 else None
+
+        impressoes_ads_30d = int(r["impressoes_ads_30d"] or 0) // qtd_variacoes
+        cliques_ads_30d = int(r["cliques_ads_30d"] or 0) // qtd_variacoes
+        ads_impressoes_30d_disponiveis = int(r["registros_impressoes_ads_30d"] or 0) > 0 and (impressoes_ads_30d > 0 or gasto_ads_30d == 0)
+        ads_cliques_30d_disponiveis = int(r["registros_cliques_ads_30d"] or 0) > 0 and (cliques_ads_30d > 0 or gasto_ads_30d == 0)
+        ctr_ads_30d = round((cliques_ads_30d / impressoes_ads_30d) * 100, 2) if ads_impressoes_30d_disponiveis and ads_cliques_30d_disponiveis and impressoes_ads_30d > 0 else None
+        gmv_ads_30d = float(r["gmv_ads_30d"] or 0) / qtd_variacoes
+
+        # O ESCUDO ANTI-ALUCINAÇÃO:
+        # Se um item teve visitas/gasto, mas impressões vieram 0, significa que a planilha upada não tinha a coluna impressões.
+        # Nesses casos, passamos 'None' em vez de '0' para a IA não achar que o produto sofreu shadowban.
+        dados_org_completos = True if impressoes_org > 0 or visitas == 0 else False
+        dados_ads_completos = True if impressoes_ads > 0 or gasto_ads == 0 else False
 
         vendas       = int(r["vendas_7d"])
         vendas_30d   = int(r["vendas_30d"] or 0)
@@ -476,8 +584,10 @@ def gerar_dossie_produtos_com_memoria():
 
             "vendas_7d_reais":              vendas,
             "vendas_30d_reais":             vendas_30d,
+            "COBERTURA_dias_com_venda_7d": int(r["dias_com_venda_7d"] or 0),
+            "COBERTURA_dias_com_venda_30d": int(r["dias_com_venda_30d"] or 0),
             "tendencia_vendas_WoW_perc":    tendencia_perc,
-            "ritmo_7d_vs_30d_perc":          ritmo_7d_vs_30d_perc,
+            "ritmo_7d_vs_30d_perc":         ritmo_7d_vs_30d_perc,
             "taxa_abandono_carrinho_perc":  taxa_abandono,
             "lucro_liquido_real_7d":        round(lucro_operacional, 2),
             "lucro_liquido_real_30d":       round(lucro_operacional_30d, 2),
@@ -486,16 +596,41 @@ def gerar_dossie_produtos_com_memoria():
             "LOGISTICA_capacidade_material_restante": capacidade_maxima,
             "LOGISTICA_dias_estoque_restante":  dias_estoque,
             "LOGISTICA_dias_estoque_base_30d":  dias_estoque_30d,
+
+            # --- INJEÇÃO DO FUNIL DE DADOS ---
+            "TRAFEGO_ORG_impressoes_7d": impressoes_org if org_impressoes_disponiveis else None,
+            "TRAFEGO_ORG_cliques_7d": cliques_org if org_cliques_disponiveis else None,
+            "TRAFEGO_ORG_ctr_perc": ctr_org,
+            "TRAFEGO_ORG_taxa_rejeicao_perc": rejeicao_media if dados_org_completos else None,
+
+            "ADS_impressoes_7d": impressoes_ads if ads_impressoes_disponiveis else None,
+            "ADS_cliques_7d": cliques_ads if ads_cliques_disponiveis else None,
+            "ADS_ctr_perc": ctr_ads,
+            "ADS_gmv_7d": round(gmv_ads, 2),
+            "ADS_acos_medio": round(acos_medio, 2),
+            "TRAFEGO_ORG_impressoes_30d": impressoes_org_30d if org_impressoes_30d_disponiveis else None,
+            "TRAFEGO_ORG_cliques_30d": cliques_org_30d if org_cliques_30d_disponiveis else None,
+            "TRAFEGO_ORG_ctr_30d_perc": ctr_org_30d,
+            "ADS_impressoes_30d": impressoes_ads_30d if ads_impressoes_30d_disponiveis else None,
+            "ADS_cliques_30d": cliques_ads_30d if ads_cliques_30d_disponiveis else None,
+            "ADS_ctr_30d_perc": ctr_ads_30d,
+            "ADS_gmv_30d": round(gmv_ads_30d, 2),
+            # ---------------------------------
+
             "TRAFEGO_visitas_7d":           visitas,
             "TRAFEGO_adicoes_carrinho_7d":  carrinhos,
+            "COBERTURA_dias_trafego_7d": int(r["dias_trafego_7d"] or 0),
             "TRAFEGO_taxa_conversao_perc":  taxa_conversao,
             "TRAFEGO_visitas_30d":          visitas_30d,
             "TRAFEGO_adicoes_carrinho_30d": carrinhos_30d,
+            "COBERTURA_dias_trafego_30d": int(r["dias_trafego_30d"] or 0),
             "TRAFEGO_taxa_conversao_30d_perc": taxa_conversao_30d,
             "taxa_abandono_carrinho_30d_perc": taxa_abandono_30d,
             "ADS_gasto_7d":   round(gasto_ads, 2),
+            "COBERTURA_dias_ads_7d": int(r["dias_ads_7d"] or 0),
             "ADS_roas_atual": roas_atual,
             "ADS_gasto_30d": round(gasto_ads_30d, 2),
+            "COBERTURA_dias_ads_30d": int(r["dias_ads_30d"] or 0),
             "ADS_retorno_liquido_30d": retorno_ads_30d,
             "PEDIDOS_7d": pedidos_7d,
             "cancelamentos_7d": cancelamentos_7d,
@@ -513,7 +648,7 @@ def gerar_dossie_produtos_com_memoria():
             "LOJA_macro_visitas_7d": round(visitas_macro_7d, 2),
             "LOJA_macro_estoque_7d": round(estoque_macro_7d, 2),
             "elasticidade_preco_volume": calcular_elasticidade_preco_volume(preco_hoje, preco_7d, vendas, vendas_antes),
-            
+
             # Chaves Macro para a IA e o Gatekeeper
             "vendas_30d_macro": int(r["vendas_30d"] or 0),
             "visitas_30d_macro": int(r["visitas_30d"] or 0),
@@ -530,7 +665,7 @@ def gerar_dossie_produtos_com_memoria():
                 "LOGISTICA_capacidade_material_restante": capacidade_maxima,
                 "estoque_shopee_hoje": estoque_hoje,
             }),
-            
+
             "previsao_lucro_7d": round(
                 (calcular_previsao_demanda_7d({
                     "vendas_7d_reais": vendas,
@@ -543,7 +678,7 @@ def gerar_dossie_produtos_com_memoria():
                     "estoque_shopee_hoje": estoque_hoje,
                 }) * margem_unitaria_real) - (gasto_ads * 0.9), 2
             ),
-            
+
             "previsao_vendas_30d": calcular_previsao_demanda_30d({
                 "vendas_7d_reais": vendas,
                 "vendas_30d_reais": vendas_30d,
@@ -580,7 +715,624 @@ def gerar_dossie_produtos_com_memoria():
         }
         dossie.append(dados_analiticos)
 
+    return enriquecer_dossie_com_memoria(dossie)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _memoria_analitica_disponivel() -> bool:
+    """Permite iniciar o app antes da migração 08, sem mascarar uma falha de banco."""
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('public.ia_execucoes_analiticas')")
+                return cur.fetchone()[0] is not None
+    except Exception as exc:
+        logger.warning(f"Não foi possível verificar memória analítica: {exc}")
+        return False
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cache_semantico_disponivel() -> bool:
+    """Confirma a migração 10; sem ela, mantém persistência legada e desliga só o cache."""
+    if not _memoria_analitica_disponivel():
+        return False
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'ia_snapshots_variacao'
+                          AND column_name = 'fingerprint_entrada'
+                    )
+                """)
+                return bool(cur.fetchone()[0])
+    except Exception as exc:
+        logger.warning(f"Não foi possível verificar a migração do cache semântico: {exc}")
+        return False
+
+
+def enriquecer_dossie_com_memoria(dossie: list[dict]) -> list[dict]:
+    """Anexa a última estratégia mensal e a última avaliação de ação por variação."""
+    if not dossie or not _memoria_analitica_disponivel():
+        return dossie
+
+    model_ids = [int(d["model_id"]) for d in dossie if d.get("model_id") is not None]
+    if not model_ids:
+        return dossie
+
+    query = """
+        WITH ultimo_mensal AS (
+            SELECT DISTINCT ON (s.model_id)
+                s.model_id, e.criado_em, s.metricas_observadas, s.previsoes,
+                s.recomendacao, s.qualidade_evidencia
+            FROM ia_snapshots_variacao s
+            JOIN ia_execucoes_analiticas e ON e.id_execucao = s.id_execucao
+            WHERE e.horizonte_dias = 30 AND e.status = 'CONCLUIDA'
+              AND s.model_id = ANY(%s)
+            ORDER BY s.model_id, e.criado_em DESC
+        ), ultima_avaliacao AS (
+            SELECT DISTINCT ON (a.model_id)
+                a.model_id, a.avaliado_em, a.comparacao, a.status
+            FROM ia_avaliacoes_acoes a
+            WHERE a.model_id = ANY(%s)
+            ORDER BY a.model_id, a.avaliado_em DESC
+        )
+        SELECT m.model_id, m.criado_em, m.metricas_observadas, m.previsoes,
+               m.recomendacao, m.qualidade_evidencia,
+               a.avaliado_em, a.comparacao, a.status AS status_avaliacao
+        FROM ultimo_mensal m
+        LEFT JOIN ultima_avaliacao a ON a.model_id = m.model_id;
+    """
+    memoria_por_modelo = {}
+    try:
+        with get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(query, (model_ids, model_ids))
+                for linha in cur.fetchall():
+                    memoria_por_modelo[int(linha["model_id"])] = {
+                        "ultima_analise_30d_em": linha["criado_em"].isoformat() if linha["criado_em"] else None,
+                        "qualidade_evidencia": linha["qualidade_evidencia"],
+                        "metricas_observadas": linha["metricas_observadas"] or {},
+                        "previsoes": linha["previsoes"] or {},
+                        "recomendacao": linha["recomendacao"] or {},
+                        "ultima_avaliacao_em": linha["avaliado_em"].isoformat() if linha["avaliado_em"] else None,
+                        "comparacao_ultima_acao": linha["comparacao"] or {},
+                        "status_ultima_avaliacao": linha["status_avaliacao"],
+                    }
+    except Exception as exc:
+        logger.warning(f"Memória analítica indisponível; auditoria seguirá sem histórico persistido: {exc}")
+        return dossie
+
+    for dados in dossie:
+        memoria = memoria_por_modelo.get(int(dados["model_id"]))
+        dados["MEMORIA_ESTRATEGICA_30D"] = memoria or None
     return dossie
+
+
+def calcular_fingerprint_entrada(dados: dict, horizonte: str) -> str:
+    """Hash determinístico dos fatos que realmente influenciam cada horizonte."""
+    campos_7d = {
+        "item_id", "model_id", "nome_produto", "nome_variacao", "preco_atual",
+        "custo_fab_real", "vendas_7d_reais", "tendencia_vendas_WoW_perc",
+        "lucro_liquido_real_7d", "TRAFEGO_visitas_7d", "TRAFEGO_adicoes_carrinho_7d",
+        "TRAFEGO_taxa_conversao_perc", "taxa_abandono_carrinho_perc",
+        "ADS_gasto_7d", "ADS_roas_atual", "taxa_cancelamento_7d_perc",
+        "estoque_shopee_hoje", "LOGISTICA_capacidade_material_restante",
+        "LOGISTICA_dias_estoque_restante", "previsao_vendas_7d", "previsao_lucro_7d",
+        "TRAFEGO_ORG_impressoes_7d", "TRAFEGO_ORG_cliques_7d", "TRAFEGO_ORG_ctr_perc",
+        "ADS_impressoes_7d", "ADS_cliques_7d", "ADS_ctr_perc", "ADS_acos_medio",
+        "MEMORIA_ESTRATEGICA_30D", "historico_acoes_passadas",
+    }
+    if horizonte == "30d":
+        # A saída mensal anterior não é um fato novo e não pode invalidar o próprio cache.
+        # Apenas a avaliação observada de ações passadas entra como nova evidência.
+        selecionados = {k: v for k, v in dados.items() if k != "MEMORIA_ESTRATEGICA_30D"}
+        memoria = dados.get("MEMORIA_ESTRATEGICA_30D") or {}
+        selecionados["RESULTADO_OBSERVADO_ACAO"] = {
+            "ultima_avaliacao_em": memoria.get("ultima_avaliacao_em"),
+            "comparacao_ultima_acao": memoria.get("comparacao_ultima_acao"),
+            "status_ultima_avaliacao": memoria.get("status_ultima_avaliacao"),
+        }
+    else:
+        selecionados = {k: dados.get(k) for k in sorted(campos_7d)}
+    selecionados["CONFIGURACAO_IA"] = {
+        "provedor": "openai",
+        "modelo": OPENAI_MODEL_7D if horizonte == "7d" else OPENAI_MODEL_30D,
+        "reasoning_effort": OPENAI_REASONING_7D if horizonte == "7d" else OPENAI_REASONING_30D,
+        "versao_prompt": "openai-json-v1",
+    }
+    serializado = json.dumps(selecionados, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+    return hashlib.sha256(serializado.encode("utf-8")).hexdigest()
+
+
+def persistir_auditoria_analitica(horizonte: str, resultados: list[dict]) -> str | None:
+    """Persiste uma auditoria e snapshots imutáveis sem duplicar os fatos do DW."""
+    if not resultados or not _memoria_analitica_disponivel():
+        return None
+
+    horizonte_dias = 7 if horizonte == "7d" else 30
+    modelo_ia = f"openai:{OPENAI_MODEL_7D if horizonte == '7d' else OPENAI_MODEL_30D}"
+    snapshots = []
+    for resultado in resultados:
+        dados = resultado.get("dados_atuais", {})
+        if not dados.get("model_id") or not dados.get("item_id"):
+            continue
+        previsoes = {
+            chave: resultado.get(chave, dados.get(chave))
+            for chave in ("previsao_vendas_7d", "previsao_lucro_7d", "previsao_vendas_30d", "previsao_lucro_30d")
+        }
+        recomendacao = {
+            chave: resultado.get(chave)
+            for chave in (
+                "tipo_acao", "novo_preco_sugerido", "horas_duracao_promocao",
+                "recomendacao_executiva", "plano_curto_prazo_7d", "plano_longo_prazo_30d",
+                "analise_de_consequencias", "cluster_mercado", "relatorio_cfo_financas",
+                "relatorio_cmo_marketing", "relatorio_coo_operacoes", "plano_acao_shopee",
+                "elasticidade_preco_volume", "falha_modelo_externo"
+            ) if resultado.get(chave) is not None
+        }
+        snapshots.append((
+            int(dados["item_id"]), int(dados["model_id"]),
+            int(resultado.get("score_urgencia", 0) or 0),
+            classificar_confianca_evidencia(dados)[0],
+            resultado.get("tipo_acao", "MANTER"), calcular_fingerprint_entrada(dados, horizonte),
+            json.dumps(dados, ensure_ascii=False),
+            json.dumps(previsoes, ensure_ascii=False), json.dumps(recomendacao, ensure_ascii=False),
+        ))
+
+    if not snapshots:
+        return None
+
+    cobertura = {
+        "variacoes": len(snapshots),
+        "dias_trafego_30d_mediana": int(pd.Series([
+            s.get("dados_atuais", {}).get("COBERTURA_dias_trafego_30d", 0) for s in resultados
+        ]).median() or 0),
+    }
+    resumo = {
+        "acoes_recomendadas": sum(1 for r in resultados if r.get("tipo_acao") not in (None, "MANTER")),
+        "falhas_modelo_externo": sum(1 for r in resultados if r.get("falha_modelo_externo")),
+        "resultado_operacional_observado": round(sum(
+            float(r.get("dados_atuais", {}).get(f"lucro_liquido_real_{horizonte_dias}d", 0) or 0)
+            for r in resultados
+        ), 2),
+    }
+    status_execucao = "PARCIAL" if resumo["falhas_modelo_externo"] else "CONCLUIDA"
+    cache_semantico = _cache_semantico_disponivel()
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO ia_execucoes_analiticas
+                        (horizonte_dias, inicio_janela, fim_janela, modelo_ia, total_variacoes,
+                         cobertura_dados, resumo_executivo, status)
+                    VALUES (%s, CURRENT_DATE - (%s * INTERVAL '1 day'), CURRENT_DATE, %s, %s, %s::jsonb, %s::jsonb, %s)
+                    RETURNING id_execucao;
+                """, (
+                    horizonte_dias, horizonte_dias, modelo_ia, len(snapshots),
+                    json.dumps(cobertura), json.dumps(resumo), status_execucao,
+                ))
+                id_execucao = str(cur.fetchone()[0])
+                if cache_semantico:
+                    psycopg2.extras.execute_values(cur, """
+                        INSERT INTO ia_snapshots_variacao
+                            (id_execucao, item_id, model_id, score_urgencia, qualidade_evidencia,
+                             tipo_acao_recomendada, fingerprint_entrada, metricas_observadas, previsoes, recomendacao)
+                        VALUES %s
+                    """, [
+                        (id_execucao, *snapshot)
+                        for snapshot in snapshots
+                    ], template="(%s::uuid, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)")
+                else:
+                    psycopg2.extras.execute_values(cur, """
+                        INSERT INTO ia_snapshots_variacao
+                            (id_execucao, item_id, model_id, score_urgencia, qualidade_evidencia,
+                             tipo_acao_recomendada, metricas_observadas, previsoes, recomendacao)
+                        VALUES %s
+                    """, [
+                        (id_execucao, *snapshot[:5], *snapshot[6:])
+                        for snapshot in snapshots
+                    ], template="(%s::uuid, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)")
+            conn.commit()
+        return id_execucao
+    except Exception as exc:
+        logger.error(f"Falha ao persistir auditoria analítica: {exc}")
+        return None
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _checkpoint_analitico_disponivel() -> bool:
+    """Exige as migrations 10 e 11 antes de ativar retomada por lote."""
+    if not _cache_semantico_disponivel():
+        return False
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'ia_execucoes_analiticas'
+                          AND column_name = 'atualizado_em'
+                    )
+                """)
+                return bool(cur.fetchone()[0])
+    except Exception as exc:
+        logger.warning(f"Checkpoint analítico indisponível: {exc}")
+        return False
+
+
+def _montar_snapshots_analiticos(horizonte: str, resultados: list[dict]) -> list[tuple]:
+    """Converte resultados em registros idempotentes de snapshot para uma mesma execução."""
+    snapshots = []
+    for resultado in resultados:
+        dados = resultado.get("dados_atuais", {})
+        if not dados.get("model_id") or not dados.get("item_id"):
+            continue
+        previsoes = {
+            chave: resultado.get(chave, dados.get(chave))
+            for chave in (
+                "previsao_vendas_7d", "previsao_lucro_7d",
+                "previsao_vendas_30d", "previsao_lucro_30d",
+            )
+        }
+        recomendacao = {
+            chave: resultado.get(chave)
+            for chave in (
+                "tipo_acao", "novo_preco_sugerido", "horas_duracao_promocao",
+                "recomendacao_executiva", "plano_curto_prazo_7d", "plano_longo_prazo_30d",
+                "analise_de_consequencias", "cluster_mercado", "relatorio_cfo_financas",
+                "relatorio_cmo_marketing", "relatorio_coo_operacoes", "plano_acao_shopee",
+                "elasticidade_preco_volume", "falha_modelo_externo",
+            ) if resultado.get(chave) is not None
+        }
+        snapshots.append((
+            int(dados["item_id"]), int(dados["model_id"]),
+            int(resultado.get("score_urgencia", 0) or 0),
+            classificar_confianca_evidencia(dados)[0],
+            resultado.get("tipo_acao", "MANTER"),
+            calcular_fingerprint_entrada(dados, horizonte),
+            json.dumps(dados, ensure_ascii=False),
+            json.dumps(previsoes, ensure_ascii=False),
+            json.dumps(recomendacao, ensure_ascii=False),
+        ))
+    return snapshots
+
+
+def iniciar_ou_retomar_checkpoint(
+    horizonte: str, total_variacoes: int, cobertura: dict,
+) -> tuple[str | None, bool]:
+    """Abre uma execução durável ou retoma a execução incompleta da janela corrente."""
+    if not _checkpoint_analitico_disponivel():
+        return None, False
+    horizonte_dias = 7 if horizonte == "7d" else 30
+    modelo_ia = f"openai:{OPENAI_MODEL_7D if horizonte == '7d' else OPENAI_MODEL_30D}"
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Não retoma uma janela móvel expirada; preserva seus lotes válidos como parcial.
+                cur.execute("""
+                    UPDATE ia_execucoes_analiticas
+                    SET status = 'PARCIAL',
+                        resumo_executivo = COALESCE(resumo_executivo, '{}'::jsonb)
+                            || jsonb_build_object('motivo_parcial', 'Janela expirada antes da conclusão'),
+                        atualizado_em = CURRENT_TIMESTAMP
+                    WHERE horizonte_dias = %s
+                      AND fim_janela < CURRENT_DATE
+                      AND status = 'EM_ANDAMENTO';
+                """, (horizonte_dias,))
+                cur.execute("""
+                    SELECT id_execucao
+                    FROM ia_execucoes_analiticas
+                    WHERE horizonte_dias = %s
+                      AND fim_janela = CURRENT_DATE
+                      AND status = 'EM_ANDAMENTO'
+                    ORDER BY atualizado_em DESC
+                    LIMIT 1;
+                """, (horizonte_dias,))
+                existente = cur.fetchone()
+                if existente:
+                    id_execucao = str(existente[0])
+                    cur.execute("""
+                        UPDATE ia_execucoes_analiticas
+                        SET total_variacoes = %s,
+                            modelo_ia = %s,
+                            cobertura_dados = %s::jsonb,
+                            atualizado_em = CURRENT_TIMESTAMP
+                        WHERE id_execucao = %s::uuid;
+                    """, (total_variacoes, modelo_ia, json.dumps(cobertura), id_execucao))
+                    retomada = True
+                else:
+                    cur.execute("""
+                        INSERT INTO ia_execucoes_analiticas
+                            (horizonte_dias, inicio_janela, fim_janela, modelo_ia, total_variacoes,
+                             cobertura_dados, resumo_executivo, status, atualizado_em)
+                        VALUES (
+                            %s, CURRENT_DATE - (%s * INTERVAL '1 day'), CURRENT_DATE, %s, %s,
+                            %s::jsonb, %s::jsonb, 'EM_ANDAMENTO', CURRENT_TIMESTAMP
+                        )
+                        RETURNING id_execucao;
+                    """, (
+                        horizonte_dias, horizonte_dias, modelo_ia, total_variacoes,
+                        json.dumps(cobertura), json.dumps({"checkpoint": True}),
+                    ))
+                    id_execucao = str(cur.fetchone()[0])
+                    retomada = False
+            conn.commit()
+        return id_execucao, retomada
+    except Exception as exc:
+        logger.error(f"Não foi possível abrir checkpoint analítico: {exc}")
+        return None, False
+
+
+def persistir_lote_no_checkpoint(id_execucao: str, horizonte: str, resultados: list[dict]) -> bool:
+    """Confirma cada lote em transação própria; uma queda não apaga lotes anteriores."""
+    snapshots = _montar_snapshots_analiticos(horizonte, resultados)
+    if not snapshots:
+        return True
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_values(cur, """
+                    INSERT INTO ia_snapshots_variacao
+                        (id_execucao, item_id, model_id, score_urgencia, qualidade_evidencia,
+                         tipo_acao_recomendada, fingerprint_entrada, metricas_observadas, previsoes, recomendacao)
+                    VALUES %s
+                    ON CONFLICT (id_execucao, model_id) DO UPDATE SET
+                        item_id = EXCLUDED.item_id,
+                        score_urgencia = EXCLUDED.score_urgencia,
+                        qualidade_evidencia = EXCLUDED.qualidade_evidencia,
+                        tipo_acao_recomendada = EXCLUDED.tipo_acao_recomendada,
+                        fingerprint_entrada = EXCLUDED.fingerprint_entrada,
+                        metricas_observadas = EXCLUDED.metricas_observadas,
+                        previsoes = EXCLUDED.previsoes,
+                        recomendacao = EXCLUDED.recomendacao,
+                        criado_em = CURRENT_TIMESTAMP;
+                """, [(id_execucao, *snapshot) for snapshot in snapshots],
+                template="(%s::uuid, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)")
+                cur.execute("""
+                    UPDATE ia_execucoes_analiticas
+                    SET atualizado_em = CURRENT_TIMESTAMP
+                    WHERE id_execucao = %s::uuid;
+                """, (id_execucao,))
+            conn.commit()
+        return True
+    except Exception as exc:
+        logger.error(f"Falha ao confirmar lote no checkpoint: {exc}")
+        return False
+
+
+def _resultado_de_snapshot(anterior, dados: dict, horizonte: str, retomado: bool) -> dict:
+    return {
+        **(anterior["previsoes"] or {}),
+        **(anterior["recomendacao"] or {}),
+        "item_id": int(dados["item_id"]),
+        "model_id": int(dados["model_id"]),
+        "dados_atuais": dados,
+        "score_urgencia": calcular_score_urgencia(dados),
+        "dias_estoque": calcular_dias_estoque(dados),
+        "horizonte_auditoria": horizonte,
+        "resultado_reutilizado": not retomado,
+        "resultado_retomado": retomado,
+        "id_execucao_analitica": str(anterior["id_execucao"]),
+    }
+
+
+def separar_resultados_do_checkpoint(
+    id_execucao: str, horizonte: str, dossie: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Recupera somente snapshots do checkpoint ainda compatíveis com os fatos atuais."""
+    if not id_execucao or not dossie:
+        return [], dossie
+    entradas = [
+        {"model_id": int(d["model_id"]), "fingerprint_entrada": calcular_fingerprint_entrada(d, horizonte)}
+        for d in dossie
+    ]
+    query = """
+        WITH entradas AS (
+            SELECT x.model_id, x.fingerprint_entrada
+            FROM jsonb_to_recordset(%s::jsonb)
+                AS x(model_id BIGINT, fingerprint_entrada TEXT)
+        )
+        SELECT s.id_execucao, s.model_id, s.previsoes, s.recomendacao
+        FROM ia_snapshots_variacao s
+        JOIN entradas i
+          ON i.model_id = s.model_id
+         AND i.fingerprint_entrada::CHAR(64) = s.fingerprint_entrada
+        WHERE s.id_execucao = %s::uuid
+          AND COALESCE((s.recomendacao->>'falha_modelo_externo')::boolean, FALSE) = FALSE;
+    """
+    try:
+        with get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(query, (json.dumps(entradas), id_execucao))
+                anteriores = {int(r["model_id"]): r for r in cur.fetchall()}
+    except Exception as exc:
+        logger.warning(f"Não foi possível recuperar checkpoint: {exc}")
+        return [], dossie
+
+    retomados, pendentes = [], []
+    for dados in dossie:
+        anterior = anteriores.get(int(dados["model_id"]))
+        if anterior:
+            retomados.append(_resultado_de_snapshot(anterior, dados, horizonte, retomado=True))
+        else:
+            pendentes.append(dados)
+    return retomados, pendentes
+
+
+def finalizar_checkpoint(
+    id_execucao: str, horizonte: str, resultados: list[dict], total_esperado: int,
+) -> bool:
+    """Fecha a execução apenas após validar cobertura e preserva PARCIAL quando necessário."""
+    horizonte_dias = 7 if horizonte == "7d" else 30
+    cobertura = {
+        "variacoes": len(resultados),
+        "dias_trafego_30d_mediana": int(pd.Series([
+            r.get("dados_atuais", {}).get("COBERTURA_dias_trafego_30d", 0) for r in resultados
+        ]).median() or 0),
+    }
+    resumo = {
+        "checkpoint": True,
+        "acoes_recomendadas": sum(1 for r in resultados if r.get("tipo_acao") not in (None, "MANTER")),
+        "falhas_modelo_externo": sum(1 for r in resultados if r.get("falha_modelo_externo")),
+        "resultado_operacional_observado": round(sum(
+            float(r.get("dados_atuais", {}).get(f"lucro_liquido_real_{horizonte_dias}d", 0) or 0)
+            for r in resultados
+        ), 2),
+    }
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM ia_snapshots_variacao WHERE id_execucao = %s::uuid", (id_execucao,))
+                total_persistido = int(cur.fetchone()[0])
+                status = (
+                    "CONCLUIDA"
+                    if total_persistido >= total_esperado and not resumo["falhas_modelo_externo"]
+                    else "PARCIAL"
+                )
+                cur.execute("""
+                    UPDATE ia_execucoes_analiticas
+                    SET total_variacoes = %s,
+                        cobertura_dados = %s::jsonb,
+                        resumo_executivo = %s::jsonb,
+                        status = %s,
+                        atualizado_em = CURRENT_TIMESTAMP
+                    WHERE id_execucao = %s::uuid;
+                """, (
+                    total_esperado, json.dumps(cobertura), json.dumps(resumo), status, id_execucao,
+                ))
+            conn.commit()
+        return status == "CONCLUIDA"
+    except Exception as exc:
+        logger.error(f"Falha ao finalizar checkpoint: {exc}")
+        return False
+
+
+def separar_resultados_reutilizaveis(horizonte: str, dossie: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Reutiliza inferência recente somente quando o fingerprint dos fatos é idêntico."""
+    if not dossie or not _cache_semantico_disponivel():
+        return [], dossie
+    dias_cache = 1 if horizonte == "7d" else 7
+    entradas = [
+        {
+            "model_id": int(dados["model_id"]),
+            "fingerprint_entrada": calcular_fingerprint_entrada(dados, horizonte),
+        }
+        for dados in dossie
+    ]
+    query = """
+        WITH entradas AS (
+            SELECT x.model_id, x.fingerprint_entrada
+            FROM jsonb_to_recordset(%s::jsonb)
+                AS x(model_id BIGINT, fingerprint_entrada TEXT)
+        )
+        SELECT DISTINCT ON (s.model_id)
+            s.id_execucao, s.model_id, s.fingerprint_entrada, s.previsoes, s.recomendacao
+        FROM ia_snapshots_variacao s
+        JOIN ia_execucoes_analiticas e ON e.id_execucao = s.id_execucao
+        JOIN entradas i
+          ON i.model_id = s.model_id
+         AND i.fingerprint_entrada::CHAR(64) = s.fingerprint_entrada
+        WHERE e.horizonte_dias = %s AND e.status IN ('CONCLUIDA', 'PARCIAL')
+          AND e.criado_em >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 day')
+          AND s.fingerprint_entrada IS NOT NULL
+          AND COALESCE((s.recomendacao->>'falha_modelo_externo')::boolean, FALSE) = FALSE
+        ORDER BY s.model_id, e.criado_em DESC;
+    """
+    anteriores = {}
+    try:
+        with get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(query, (json.dumps(entradas), 7 if horizonte == "7d" else 30, dias_cache))
+                anteriores = {int(r["model_id"]): r for r in cur.fetchall()}
+    except Exception as exc:
+        logger.warning(f"Cache semântico indisponível; todos os SKUs serão analisados: {exc}")
+        return [], dossie
+
+    reutilizados, pendentes = [], []
+    for dados in dossie:
+        anterior = anteriores.get(int(dados["model_id"]))
+        if not anterior:
+            pendentes.append(dados)
+            continue
+        resultado = {
+            **(anterior["previsoes"] or {}),
+            **(anterior["recomendacao"] or {}),
+            "item_id": int(dados["item_id"]),
+            "model_id": int(dados["model_id"]),
+            "dados_atuais": dados,
+            "score_urgencia": calcular_score_urgencia(dados),
+            "dias_estoque": calcular_dias_estoque(dados),
+            "horizonte_auditoria": horizonte,
+            "resultado_reutilizado": True,
+            "id_execucao_analitica": str(anterior["id_execucao"]),
+        }
+        reutilizados.append(resultado)
+    return reutilizados, pendentes
+
+
+def avaliar_acoes_maduras(dossie_atual: list[dict]) -> int:
+    """Compara ações com pelo menos 7 dias ao estado atual; registra associação, não causalidade."""
+    if not dossie_atual or not _memoria_analitica_disponivel():
+        return 0
+    atuais = {int(d["model_id"]): d for d in dossie_atual if d.get("model_id") is not None}
+    if not atuais:
+        return 0
+
+    query = """
+        SELECT l.id_log, l.id_execucao_origem, l.item_id, l.model_id, l.data_aplicacao,
+               l.impacto_projetado, s.metricas_observadas
+        FROM log_acoes_shopee l
+        JOIN ia_snapshots_variacao s
+          ON s.id_execucao = l.id_execucao_origem AND s.model_id = l.model_id
+        LEFT JOIN ia_avaliacoes_acoes a ON a.id_log = l.id_log
+        WHERE l.status_api = 'SUCESSO'
+          AND l.model_id = ANY(%s)
+          AND l.data_aplicacao <= CURRENT_TIMESTAMP - INTERVAL '7 days'
+          AND a.id_log IS NULL;
+    """
+    avaliadas = 0
+    try:
+        with get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(query, (list(atuais),))
+                pendentes = cur.fetchall()
+                for acao in pendentes:
+                    atual = atuais[int(acao["model_id"])]
+                    baseline = acao["metricas_observadas"] or {}
+                    previsto = acao["impacto_projetado"] or {}
+                    observado = {
+                        "vendas_7d": atual.get("vendas_7d_reais"),
+                        "lucro_7d": atual.get("lucro_liquido_real_7d"),
+                        "conversao_7d": atual.get("TRAFEGO_taxa_conversao_perc"),
+                    }
+                    comparacao = {
+                        "delta_vendas_vs_baseline": (atual.get("vendas_7d_reais", 0) or 0) - (baseline.get("vendas_7d_reais", 0) or 0),
+                        "delta_lucro_vs_baseline": round((atual.get("lucro_liquido_real_7d", 0) or 0) - (baseline.get("lucro_liquido_real_7d", 0) or 0), 2),
+                        "delta_vendas_vs_previsto": (atual.get("vendas_7d_reais", 0) or 0) - (previsto.get("vendas_projetadas", 0) or 0),
+                        "delta_lucro_vs_previsto": round((atual.get("lucro_liquido_real_7d", 0) or 0) - (previsto.get("lucro_projetado", 0) or 0), 2),
+                    }
+                    status = "DADOS_INSUFICIENTES" if atual.get("TRAFEGO_visitas_7d", 0) in (None, 0) and atual.get("vendas_7d_reais", 0) == 0 else "AVALIADA"
+                    cur.execute("""
+                        INSERT INTO ia_avaliacoes_acoes
+                            (id_log, id_execucao_origem, item_id, model_id, horizonte_observacao_dias,
+                             data_inicio_observacao, data_fim_observacao, baseline, previsto, observado, comparacao, status)
+                        VALUES (%s, %s::uuid, %s, %s, 7, %s, CURRENT_TIMESTAMP,
+                                %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s)
+                    """, (
+                        acao["id_log"], str(acao["id_execucao_origem"]), acao["item_id"], acao["model_id"], acao["data_aplicacao"],
+                        json.dumps(baseline), json.dumps(previsto), json.dumps(observado), json.dumps(comparacao), status
+                    ))
+                    avaliadas += 1
+            conn.commit()
+    except Exception as exc:
+        logger.error(f"Falha ao avaliar ações maduras: {exc}")
+    return avaliadas
 
 
 # ==============================================================================
@@ -763,7 +1515,7 @@ def gerar_alertas_criticos(dossie: list[dict]) -> list[dict]:
 
 
 # ==============================================================================
-# SEÇÃO 3 — MOTOR PREDITIVO (RUNPOD via LiteLLM Proxy)
+# SEÇÃO 3 — MOTOR PREDITIVO (OpenAI API)
 # ==============================================================================
 
 def validar_sugestao_ia(dados: dict, analise: dict) -> tuple[bool, str]:
@@ -773,10 +1525,10 @@ def validar_sugestao_ia(dados: dict, analise: dict) -> tuple[bool, str]:
     """
     preco_atual      = float(dados.get("preco_atual") or 0)
     capacidade_max   = int(dados.get("LOGISTICA_capacidade_material_restante") or 999_999)
-    
+
     np_raw           = analise.get("novo_preco_sugerido")
     novo_preco       = float(np_raw) if np_raw is not None else preco_atual
-    
+
     pv_raw           = analise.get("previsao_vendas_7d")
     previsao_vendas  = int(pv_raw) if pv_raw is not None else 0
 
@@ -801,130 +1553,369 @@ def validar_sugestao_ia(dados: dict, analise: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def acordar_modelo_ia():
-    payload = {
-        "model": "cerebro-dados",
-        "messages": [{"role": "user", "content": "Acorde. Responda apenas com a palavra 'OK'."}],
-        "max_tokens": 5,
-        "temperature": 0.1
-    }
-    try:
-        logger.info("📡 [RUNPOD] Enviando ping de Wake-Up. Aguardando inicialização da GPU (pode levar 10 min)...")
-        response = requests.post(LITELLM_BASE, json=payload, timeout=600)
-        response.raise_for_status()
-        logger.success("🟢 [RUNPOD] Servidor acordou e respondeu com sucesso! GPU Online.")
-        return True
-    except Exception as e:
-        logger.error(f"🔴 [RUNPOD] Falha no Wake-Up: {e}")
-        st.error(f"Falha ao acordar o modelo. Verifique os logs do RunPod. Erro: {e}")
+def configuracao_openai_valida() -> bool:
+    """Valida credenciais localmente; APIs não exigem wake-up nem GPU residente."""
+    if not OPENAI_API_KEY or OPENAI_API_KEY.lower().startswith("sua_chave"):
+        st.error("OPENAI_API_KEY não foi configurada. Adicione a chave ao CHAVES_DADOS.env e reinicie o app.")
         return False
+    if not OPENAI_MODEL_7D or not OPENAI_MODEL_30D:
+        st.error("Defina OPENAI_MODEL_7D e OPENAI_MODEL_30D no CHAVES_DADOS.env.")
+        return False
+    return True
 
 
-def chamar_cerebro_runpod_preditivo(lote_json: list[dict], max_tentativas: int = 3) -> list[dict]:
-    import time 
+def resumir_memoria_para_prompt(memoria: dict | None) -> dict | None:
+    """Mantém o aprendizado útil sem reenviar relatórios extensos a cada leitura de 7 dias."""
+    if not isinstance(memoria, dict):
+        return None
+    recomendacao = memoria.get("recomendacao") or {}
+    return {
+        "ultima_analise_30d_em": memoria.get("ultima_analise_30d_em"),
+        "qualidade_evidencia": memoria.get("qualidade_evidencia"),
+        "previsoes": memoria.get("previsoes") or {},
+        "decisao_anterior": {
+            chave: recomendacao.get(chave)
+            for chave in ("tipo_acao", "novo_preco_sugerido", "recomendacao_executiva", "cluster_mercado")
+            if recomendacao.get(chave) is not None
+        },
+        "avaliacao_da_acao": {
+            "status": memoria.get("status_ultima_avaliacao"),
+            "comparacao": memoria.get("comparacao_ultima_acao") or {},
+        },
+    }
 
-    prompt_sistema = """
-    Você é o Conselho de Administração (CFO, CMO, COO) de uma operação profissional de E-commerce na Shopee especializada em IMPRESSÃO 3D SOB DEMANDA.
-    Sua análise deve ser cirúrgica, matemática e adaptada exclusivamente a este modelo de negócios. Evite frases feitas e genéricas.
 
-    REGRAS ABSOLUTAS DO MODELO DE NEGÓCIO (IMPRESSÃO 3D ON-DEMAND):
-    1. ESTOQUE VIRTUAL (COO): Seu estoque é baseado em bobinas de filamento compartilhadas entre os produtos. Um anúncio sem vendas NÃO "imobiliza capital" e NÃO é "estoque encalhado". Nunca prescreva "queima de estoque" por baixa saída.
-    2. CUSTO E MARGEM (CFO): Avalie rigorosamente o 'custo_fab_real' enviado nos dados. A taxa da Shopee para o vendedor gira em torno de 20% + R$ 3,00 fixos por pedido. Itens de ticket muito baixo têm suas margens destruídas por essa taxa fixa. Se a margem estiver apertada, sugira a "CRIAR_COMBO" (ex: Kits Leve 3) em vez de baixar o preço. NUNCA sugira um preço que resulte em prejuízo ou margem líquida inferior a 15%.
-    3. MARKETING E ADS (CMO):
-       - Se 'ADS_gasto_7d' ou 'gasto_ads_total_30d' for igual a 0.0, É ESTRITAMENTE PROIBIDO sugerir "pausar ads", "revisar orçamento" ou falar sobre ROAS. Se não há gasto, o problema é 100% tráfego orgânico e SEO.
-       - Se houver gasto em Ads com ROAS ruim (< 2.0), recomende explicitamente pausar e recriar campanhas focando em "Busca por Correspondência Exata", alertando contra a "Seleção Automática de Palavras" da Shopee.
-    4. SEGMENTAÇÃO DE PRODUTO (CRUCIAL PARA O PLANO DE AÇÃO):
-       - PRODUTOS FUNCIONAIS (Ex: Suportes, Ganchos, Clipes, Organizadores, Porta Cuia): O cliente compra pela SOLUÇÃO do problema. O plano de ação deve focar em SEO profundo (palavras-chave no título) e competitividade de preço.
-       - PRODUTOS DECORATIVOS/AESTHETIC (Ex: Porta Joias Coquette, Dragões, Estátuas): O cliente compra pela EMOÇÃO. O plano de ação deve focar em Discovery, fotos atraentes, ambientação realista na capa e criação de urgência visual.
+def compactar_lote_por_horizonte(lote_json: list[dict], horizonte: str) -> list[dict]:
+    """Envia ao modelo apenas os sinais necessários ao horizonte solicitado."""
+    campos_7d = {
+        "model_id", "nome_variacao", "preco_atual", "custo_fabricacao_unitario",
+        "vendas_7d_reais", "tendencia_vendas_WoW_perc", "lucro_liquido_real_7d",
+        "trafego_visitas_7d", "trafego_conversao_perc", "abandono_carrinho_perc",
+        "ads_gasto_7d", "retorno_liquido_por_ads", "taxa_cancelamento_7d_perc",
+        "estoque_shopee_hoje", "LOGISTICA_capacidade_material_restante",
+        "LOGISTICA_dias_estoque_restante", "previsao_deterministica_vendas_7d",
+        "previsao_deterministica_lucro_7d",
+        "funil_organico_impressoes", "funil_organico_cliques", "funil_organico_ctr_perc",
+        "funil_ads_impressoes", "funil_ads_cliques", "funil_ads_ctr_perc",
+        "funil_ads_acos_medio", "qualidade_evidencia", "limite_evidencia",
+        "historico_acoes_passadas", "memoria_estrategica_30d"
+    }
+    resultado = []
+    for produto in lote_json:
+        variacoes = produto.get("variacoes_ativas", [])
+        if horizonte == "7d":
+            variacoes = [{k: v for k, v in variacao.items() if k in campos_7d} for variacao in variacoes]
+            for variacao in variacoes:
+                variacao["memoria_estrategica_30d"] = resumir_memoria_para_prompt(
+                    variacao.get("memoria_estrategica_30d")
+                )
+        resultado.append({
+            "item_id": produto.get("item_id"),
+            "nome_produto": produto.get("nome_produto"),
+            "horizonte_solicitado": horizonte,
+            "metricas_macro_produto_30_dias": produto.get("metricas_macro_produto_30_dias", {}) if horizonte == "30d" else {},
+            "variacoes_ativas": variacoes,
+        })
+    return resultado
 
-    AÇÕES PERMITIDAS ("tipo_acao"):
-    - "AUMENTAR_PRECO" ou "REDUZIR_PRECO" (somente se a elasticidade e a margem permitirem).
-    - "CRIAR_PROMOCAO" (ótimo para gerar urgência e destravar carrinhos abandonados; exige definir "horas_duracao_promocao").
-    - "CRIAR_COMBO" (estratégia primária para salvar margem de itens baratos).
-    - "PAUSAR_ADS" (APENAS se ADS_gasto_7d > 0 e ROAS < 2.0).
-    - "MANTER" (estratégia atual correta).
 
-    ESTRUTURA DE DADOS QUE VOCÊ RECEBERÁ:
-    - O lote contém PRODUTOS (item_id) com "metricas_macro_produto_30_dias".
-    - Dentro de cada produto há "variacoes_ativas" contendo as métricas reais dos últimos 7 dias.
+def construir_prompt_otimizado(horizonte: str) -> str:
+    """Prompt curto e determinístico para maximizar prefix cache e reduzir tokens."""
+    base = """Você é um conselho CFO/CMO/COO para uma loja Shopee de impressão 3D sob demanda.
+Analise apenas os dados JSON fornecidos. Seja matemático, específico e conciso.
 
-    FORMATO DE SAÍDA OBRIGATÓRIO:
-    - Retorne APENAS um ÚNICO ARRAY JSON PLANO (sem tags markdown de bloco de código).
-    - O array DEVE conter um objeto para CADA VARIAÇÃO (model_id) listada nos produtos do lote.
-    
-    Exemplo da estrutura esperada:
-    [
-      {
-        "item_id": 123,
-        "model_id": 456,
-        "tipo_acao": "CRIAR_COMBO",
-        "novo_preco_sugerido": 14.90,
-        "horas_duracao_promocao": 0,
-        "previsao_vendas_7d": 12,
-        "previsao_lucro_7d": 55.50,
-        "elasticidade_preco_volume": -0.5,
-        "cluster_mercado": "Baixo Ticket - Necessita Kit",
-        "recomendacao_executiva": "O preço atual de R$12,90 é muito sensível à taxa fixa de R$3 da Shopee. Criar combo de 3 unidades para diluir a taxa e aumentar o ROAS.",
-        "relatorio_cfo_financas": "Margem líquida unitária comprometida pela taxa fixa. O combo eleva o ticket médio e recupera a rentabilidade por envio.",
-        "relatorio_cmo_marketing": "Item funcional com boa busca, mas o cliente evita comprar apenas um devido ao frete. O combo resolve o atrito.",
-        "relatorio_coo_operacoes": "Impressão rápida e filamento abundante, viável escalar via kits.",
-        "plano_acao_shopee": ["1. Manter preço unitário.", "2. Criar combo leve 3 com 5% de desconto."],
-        "analise_de_consequencias": "Crescimento imediato do Ticket Médio (AOV) e absorção saudável dos custos logísticos."
-      }
-    ]
-    """
-    
+REGRAS:
+1. null = dado não coletado; nunca converta null em zero nem infira CTR, shadowban ou baixa descoberta.
+2. CTR só existe com impressões > 0 e cliques numéricos. Correlação não prova causalidade.
+3. Estoque é virtual e depende de filamento compartilhado; produto sem vendas não imobiliza estoque acabado.
+4. Considere custo de fabricação, taxa Shopee aproximada de 20% + R$3 e margem mínima de segurança de 15%.
+5. Sem gasto em ads, não fale em ROAS nem recomende pausar campanha. Com gasto e retorno ruim, ação de ads é apenas manual.
+6. Ações permitidas: AUMENTAR_PRECO, REDUZIR_PRECO, CRIAR_PROMOCAO, CRIAR_COMBO, PAUSAR_ADS ou MANTER.
+7. A previsão determinística é a âncora. Só se afaste dela quando um dado explícito justificar, explicando o motivo.
+8. Retorne somente um objeto JSON válido no formato {"resultados":[...]}, com exatamente um objeto por model_id. Sem markdown ou texto externo.
+"""
+    if horizonte == "7d":
+        return base + """
+HORIZONTE: próximos 7 dias. Gere intervenção tática, reversível e objetiva.
+Campos obrigatórios por objeto: item_id, model_id, tipo_acao, novo_preco_sugerido,
+horas_duracao_promocao, previsao_vendas_7d, previsao_lucro_7d,
+elasticidade_preco_volume, cluster_mercado, recomendacao_executiva,
+relatorio_cfo_financas, relatorio_cmo_marketing, relatorio_coo_operacoes,
+plano_curto_prazo_7d (máximo 3 passos) e analise_de_consequencias.
+Limites: cada parecer até 240 caracteres; recomendação até 350; consequência até 300; cada passo até 180.
+Não produza campos ou plano de 30 dias.
+"""
+    return base + """
+HORIZONTE: próximos 30 dias. Use o realizado mensal como base e os 7 dias apenas como sinal recente.
+Campos obrigatórios por objeto: item_id, model_id, tipo_acao, novo_preco_sugerido,
+horas_duracao_promocao, previsao_vendas_7d, previsao_lucro_7d,
+previsao_vendas_30d, previsao_lucro_30d, elasticidade_preco_volume,
+cluster_mercado, recomendacao_executiva, relatorio_cfo_financas,
+relatorio_cmo_marketing, relatorio_coo_operacoes, plano_curto_prazo_7d,
+plano_longo_prazo_30d e analise_de_consequencias.
+Limites: cada relatório até 500 caracteres; plano mensal até 4 passos verificáveis.
+O plano mensal nunca é executável automaticamente.
+"""
+
+
+def extrair_array_json_resposta(texto: str) -> list[dict]:
+    """Extrai a lista de resultados do JSON mode, aceitando legado em array puro."""
+    def obter_resultados(carregado) -> list[dict] | None:
+        if isinstance(carregado, list):
+            return carregado
+        if isinstance(carregado, dict) and isinstance(carregado.get("resultados"), list):
+            return carregado["resultados"]
+        return None
+
+    limpo = texto.replace("```json", "").replace("```", "").strip()
+    try:
+        carregado = json.loads(limpo)
+        resultados = obter_resultados(carregado)
+        if resultados is not None:
+            return resultados
+    except json.JSONDecodeError:
+        pass
+    inicios = [pos for pos in (limpo.find("["), limpo.find("{")) if pos >= 0]
+    if not inicios:
+        raise ValueError("A resposta não contém JSON estruturado.")
+    inicio = min(inicios)
+    carregado, _ = json.JSONDecoder().raw_decode(limpo[inicio:])
+    resultados = obter_resultados(carregado)
+    if resultados is None:
+        raise ValueError("A resposta JSON não contém a lista 'resultados'.")
+    return resultados
+
+
+def gerar_fallback_lote(lote_json: list[dict], horizonte: str, motivo: str) -> list[dict]:
+    """Mantém a auditoria utilizável quando o endpoint falha, sem inventar análise."""
+    resultados = []
+    for produto in lote_json:
+        for variacao in produto.get("variacoes_ativas", []):
+            preco = float(variacao.get("preco_atual") or 0)
+            resultados.append({
+                "item_id": produto.get("item_id"),
+                "model_id": variacao.get("model_id"),
+                "tipo_acao": "MANTER",
+                "novo_preco_sugerido": preco,
+                "horas_duracao_promocao": 0,
+                "previsao_vendas_7d": variacao.get("previsao_deterministica_vendas_7d", 0),
+                "previsao_lucro_7d": variacao.get("previsao_deterministica_lucro_7d", 0.0),
+                "previsao_vendas_30d": variacao.get("previsao_deterministica_vendas_30d", 0),
+                "previsao_lucro_30d": variacao.get("previsao_deterministica_lucro_30d", 0.0),
+                "plano_curto_prazo_7d": ["Repetir a análise quando o endpoint de IA estiver disponível."],
+                "plano_longo_prazo_30d": [] if horizonte == "7d" else ["Preservar a estratégia atual até nova análise completa."],
+                "elasticidade_preco_volume": variacao.get("elasticidade_preco_volume", 0),
+                "cluster_mercado": "Análise indisponível",
+                "recomendacao_executiva": "Nenhuma mudança automática foi recomendada porque a análise externa não foi concluída.",
+                "analise_de_consequencias": motivo,
+                "falha_modelo_externo": True,
+            })
+    return resultados
+
+
+def normalizar_saida_modelo(recomendacao: dict, dados: dict) -> dict:
+    """Normaliza tipos e ações antes que qualquer saída do LLM alcance interface ou API."""
+    resultado = dict(recomendacao)
+    alertas = []
+
+    def numero_finito(valor, padrao: float) -> float:
+        try:
+            convertido = float(valor)
+            return convertido if math.isfinite(convertido) else float(padrao)
+        except (TypeError, ValueError):
+            return float(padrao)
+
+    acoes_validas = {
+        "AUMENTAR_PRECO", "REDUZIR_PRECO", "CRIAR_PROMOCAO",
+        "CRIAR_COMBO", "PAUSAR_ADS", "MANTER",
+    }
+    acao = str(resultado.get("tipo_acao") or "MANTER").strip().upper()
+    if acao not in acoes_validas:
+        alertas.append(f"Ação desconhecida '{acao}' substituída por MANTER.")
+        acao = "MANTER"
+    resultado["tipo_acao"] = acao
+
+    preco_atual = numero_finito(dados.get("preco_atual"), 0)
+    novo_preco = numero_finito(resultado.get("novo_preco_sugerido"), preco_atual)
+    if novo_preco <= 0:
+        alertas.append("Preço inválido substituído pelo preço atual.")
+        novo_preco = preco_atual
+    resultado["novo_preco_sugerido"] = round(novo_preco, 2)
+
+    for campo, padrao in (
+        ("previsao_vendas_7d", dados.get("previsao_vendas_7d", 0)),
+        ("previsao_vendas_30d", dados.get("previsao_vendas_30d", 0)),
+    ):
+        resultado[campo] = max(0, int(round(numero_finito(resultado.get(campo), padrao))))
+    for campo, padrao in (
+        ("previsao_lucro_7d", dados.get("previsao_lucro_7d", 0)),
+        ("previsao_lucro_30d", dados.get("previsao_lucro_30d", 0)),
+        ("elasticidade_preco_volume", dados.get("elasticidade_preco_volume", 0)),
+    ):
+        resultado[campo] = round(numero_finito(resultado.get(campo), padrao), 4)
+
+    duracao = int(round(numero_finito(resultado.get("horas_duracao_promocao"), 0)))
+    resultado["horas_duracao_promocao"] = max(0, min(168, duracao))
+
+    for campo in ("plano_curto_prazo_7d", "plano_longo_prazo_30d", "plano_acao_shopee"):
+        valor = resultado.get(campo, [])
+        if isinstance(valor, str):
+            valor = [valor]
+        elif not isinstance(valor, list):
+            valor = []
+        resultado[campo] = [str(item)[:500] for item in valor if item is not None][:6]
+
+    for campo in (
+        "cluster_mercado", "recomendacao_executiva", "analise_de_consequencias",
+        "relatorio_cfo_financas", "relatorio_cmo_marketing", "relatorio_coo_operacoes",
+    ):
+        valor = resultado.get(campo)
+        if valor is not None:
+            resultado[campo] = str(valor)[:2000]
+
+    resultado["falha_modelo_externo"] = False
+    if alertas:
+        resultado["alerta_validacao_modelo"] = " ".join(alertas)
+    return resultado
+
+
+def chamar_cerebro_openai_preditivo(lote_json: list[dict], horizonte: str = "7d", max_tentativas: int = 2) -> list[dict]:
+    """Executa a análise via API OpenAI com JSON mode, sem dependência de GPU remota."""
+    import time
+
+    if horizonte not in {"7d", "30d"}:
+        raise ValueError("Horizonte de auditoria inválido. Use '7d' ou '30d'.")
+
+    modelo = OPENAI_MODEL_7D if horizonte == "7d" else OPENAI_MODEL_30D
+    esforco_raciocinio = OPENAI_REASONING_7D if horizonte == "7d" else OPENAI_REASONING_30D
+    timeout_request = 180 if horizonte == "7d" else 300
+
+    lote_compacto = compactar_lote_por_horizonte(lote_json, horizonte)
+    total_variacoes = sum(len(p.get("variacoes_ativas", [])) for p in lote_compacto)
+    max_tokens = (
+        min(3200, 450 + 550 * total_variacoes)
+        if horizonte == "7d"
+        else min(3600, 600 + 1400 * total_variacoes)
+    )
+    prompt_sistema = construir_prompt_otimizado(horizonte)
+    auditoria_json = json.dumps(lote_compacto, ensure_ascii=False, separators=(",", ":"), default=str)
+
     payload = {
-        "model": "cerebro-dados",
+        "model": modelo,
         "messages": [
             {"role": "system", "content": prompt_sistema},
-            {"role": "user",   "content": f"Auditoria:\n{json.dumps(lote_json, indent=2, ensure_ascii=False)}"},
+            {"role": "user", "content": f"Auditoria:{auditoria_json}"},
         ],
-        "max_tokens": 8192,
-        "temperature": 0.2
+        "max_completion_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
+    }
+    if esforco_raciocinio in {"low", "medium", "high"}:
+        payload["reasoning_effort"] = esforco_raciocinio
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
     }
 
+    tentativas_executadas = 0
+    fallback_sem_reasoning = False
     for tentativa in range(1, max_tentativas + 1):
+        tentativas_executadas = tentativa
         try:
-            logger.info(f"🧠 [RUNPOD] Processando lote de {len(lote_json)} submódulos (Tentativa {tentativa}/{max_tentativas})...")
-            
-            response = requests.post(LITELLM_BASE, json=payload, timeout=300)
+            logger.info(
+                f"🧠 [OPENAI:{modelo}] Processando {total_variacoes} SKU(s) em {len(lote_json)} produto(s) "
+                f"(tentativa {tentativa}/{max_tentativas})..."
+            )
+
+            response = HTTP_SESSION.post(
+                OPENAI_CHAT_COMPLETIONS_URL,
+                headers=headers,
+                json=payload,
+                timeout=(10, timeout_request),
+            )
+            if response.status_code == 400 and "reasoning_effort" in payload and not fallback_sem_reasoning:
+                logger.warning("A API rejeitou reasoning_effort; repetindo uma única vez sem esse parâmetro.")
+                payload.pop("reasoning_effort", None)
+                fallback_sem_reasoning = True
+                continue
+            if response.status_code in {401, 403}:
+                logger.error("🔴 [OPENAI] Credencial inválida ou sem permissão para o modelo configurado.")
+                break
+            if response.status_code == 429:
+                try:
+                    espera = int(response.headers.get("Retry-After", "3") or 3)
+                except (TypeError, ValueError):
+                    espera = 3
+                espera = min(15, max(1, espera))
+                logger.warning(f"🟠 [OPENAI] Limite temporário atingido; aguardando {espera}s.")
+                time.sleep(espera)
+                continue
+            if 400 <= response.status_code < 500:
+                logger.error(
+                    f"🔴 [OPENAI] Requisição rejeitada ({response.status_code}): "
+                    f"{response.text[:300]}"
+                )
+                break
             response.raise_for_status()
 
-            texto = response.json()['choices'][0]['message']['content'].strip()
-            texto = texto.replace("```json", "").replace("```", "").strip()
+            corpo_resposta = response.json()
+            texto = corpo_resposta["choices"][0]["message"]["content"].strip()
+            resultado = extrair_array_json_resposta(texto)
+            chaves_esperadas = {
+                (int(p["item_id"]), int(v["model_id"]))
+                for p in lote_json for v in p.get("variacoes_ativas", [])
+                if p.get("item_id") is not None and v.get("model_id") is not None
+            }
+            chaves_recebidas = {
+                (int(r["item_id"]), int(r["model_id"]))
+                for r in resultado
+                if isinstance(r, dict) and r.get("item_id") is not None and r.get("model_id") is not None
+            }
+            if chaves_recebidas != chaves_esperadas or len(resultado) != len(chaves_esperadas):
+                raise ValueError(
+                    f"Resposta incompleta: esperados {len(chaves_esperadas)} SKUs, "
+                    f"recebidos {len(chaves_recebidas)} pares válidos de produto/SKU."
+                )
+            uso = corpo_resposta.get("usage") or {}
+            logger.success(
+                f"✅ [OPENAI:{modelo}] Lote concluído. "
+                f"Tokens entrada/saída: {uso.get('prompt_tokens', 'n/d')}/{uso.get('completion_tokens', 'n/d')}."
+            )
+            return resultado
 
-            match = re.search(r"\[.*\]", texto, re.DOTALL)
-            if match:
-                logger.success(f"✅ [RUNPOD] Lote processado com sucesso na tentativa {tentativa}!")
-                return json.loads(match.group(0))
-            
-            logger.warning("⚠️ [RUNPOD] IA retornou um formato inesperado. Re-tentando...")
-            
         except requests.exceptions.Timeout as e:
-            logger.error(f"🔴 [RUNPOD] Timeout na tentativa {tentativa}. O RunPod está sobrecarregado. Abortando este lote para não duplicar jobs: {e}")
+            logger.error(f"🔴 [OPENAI] Timeout na tentativa {tentativa}; não haverá reenvio ambíguo para evitar custo duplicado.")
             break
-            
+
         except requests.exceptions.RequestException as e:
-            logger.error(f"🔴 [RUNPOD] Falha de rede na tentativa {tentativa}: {e}")
-            
+            logger.error(f"🔴 [OPENAI] Falha de rede na tentativa {tentativa}: {e}")
+
         except json.JSONDecodeError as e:
-            logger.error(f"🔴 [RUNPOD] IA retornou JSON inválido na tentativa {tentativa}: {e}")
-            
+            logger.error(f"🔴 [OPENAI] IA retornou JSON inválido na tentativa {tentativa}: {e}")
+
         except Exception as e:
-            logger.error(f"🔴 [RUNPOD] Erro inesperado na tentativa {tentativa}: {e}")
-        
+            logger.error(f"🔴 [OPENAI] Erro inesperado na tentativa {tentativa}: {e}")
+
         if tentativa < max_tentativas:
             logger.info("⏳ Aguardando 5 segundos antes de tentar novamente...")
             time.sleep(5)
-            
-    mensagem_critica = "🚨 FALHA CRÍTICA: A IA não conseguiu processar este lote após 3 tentativas."
-    logger.critical(mensagem_critica)
-    st.error(mensagem_critica)
-    st.stop()
+
+    mensagem_critica = f"A IA externa não concluiu o lote após {tentativas_executadas} tentativa(s)."
+    logger.error(mensagem_critica)
+    return gerar_fallback_lote(lote_json, horizonte, mensagem_critica)
 
 
-def processar_em_lotes(dossie_completo: list[dict], max_vars_por_lote: int = 5) -> list[dict]:
+def processar_em_lotes(
+    dossie_completo: list[dict], horizonte: str, ao_concluir_lote=None,
+) -> list[dict]:
+    """Processa um único horizonte por vez para evitar competição de contexto na GPU."""
+    if horizonte not in {"7d", "30d"}:
+        raise ValueError("Horizonte de auditoria inválido. Use '7d' ou '30d'.")
+    max_vars_por_lote = 5 if horizonte == "7d" else 2
+    originais_por_chave = {
+        (int(d["item_id"]), int(d["model_id"])): d
+        for d in dossie_completo
+        if d.get("item_id") is not None and d.get("model_id") is not None
+    }
     # 1. Agrupar Variações por Produto Pai
     produtos_agrupados = {}
     for var in dossie_completo:
@@ -938,15 +1929,16 @@ def processar_em_lotes(dossie_completo: list[dict], max_vars_por_lote: int = 5) 
                     "visitas_totais_30d": var.get("visitas_30d_macro", 0),
                     "adicoes_carrinho_totais_30d": var.get("carrinhos_30d_macro", 0),
                     "gasto_ads_total_30d": round(var.get("gasto_ads_30d_macro", 0), 2),
+                    "dias_trafego_coletados_30d": var.get("COBERTURA_dias_trafego_30d", 0),
                     "estrelas": var.get("REPUTACAO_estrelas", 0),
                     "favoritos": var.get("REPUTACAO_curtidas_favoritos", 0)
                 },
                 "variacoes_ativas": []
             }
-        
+
         score_var = calcular_score_urgencia(var)
         produtos_agrupados[iid]["score_urgencia_maximo"] = max(produtos_agrupados[iid]["score_urgencia_maximo"], score_var)
-        
+
         produtos_agrupados[iid]["variacoes_ativas"].append({
             "model_id": var["model_id"],
             "nome_variacao": var["nome_variacao"],
@@ -955,10 +1947,31 @@ def processar_em_lotes(dossie_completo: list[dict], max_vars_por_lote: int = 5) 
             "preco_tendencia_7d_perc": var.get("preco_tendencia_7d_perc", 0),
             "vendas_30d_reais": var["vendas_30d_macro"],
             "vendas_7d_reais": var["vendas_7d_reais"],
+            "cobertura_dias_trafego_30d": var.get("COBERTURA_dias_trafego_30d", 0),
+            "cobertura_dias_com_venda_30d": var.get("COBERTURA_dias_com_venda_30d", 0),
             "tendencia_vendas_WoW_perc": var.get("tendencia_vendas_WoW_perc", 0),
             "ritmo_7d_vs_30d_perc": var.get("ritmo_7d_vs_30d_perc", 0),
             "lucro_liquido_real_7d": var["lucro_liquido_real_7d"],
             "lucro_liquido_real_30d": var.get("lucro_liquido_real_30d", 0),
+
+            # --- INJEÇÃO DE DADOS PARA A IA (Com blindagem para Nulos) ---
+            "funil_organico_impressoes": var.get("TRAFEGO_ORG_impressoes_7d"),
+            "funil_organico_cliques": var.get("TRAFEGO_ORG_cliques_7d"),
+            "funil_organico_ctr_perc": var.get("TRAFEGO_ORG_ctr_perc"),
+            "funil_organico_rejeicao_perc": var.get("TRAFEGO_ORG_taxa_rejeicao_perc"),
+            "funil_organico_impressoes_30d": var.get("TRAFEGO_ORG_impressoes_30d"),
+            "funil_organico_cliques_30d": var.get("TRAFEGO_ORG_cliques_30d"),
+            "funil_organico_ctr_30d_perc": var.get("TRAFEGO_ORG_ctr_30d_perc"),
+            "funil_ads_impressoes": var.get("ADS_impressoes_7d"),
+            "funil_ads_cliques": var.get("ADS_cliques_7d"),
+            "funil_ads_ctr_perc": var.get("ADS_ctr_perc"),
+            "funil_ads_acos_medio": var.get("ADS_acos_medio"),
+            "funil_ads_impressoes_30d": var.get("ADS_impressoes_30d"),
+            "funil_ads_cliques_30d": var.get("ADS_cliques_30d"),
+            "funil_ads_ctr_30d_perc": var.get("ADS_ctr_30d_perc"),
+            "funil_ads_gmv_30d": var.get("ADS_gmv_30d"),
+            # --------------------------------------------------------------
+
             "trafego_visitas_7d": var.get("TRAFEGO_visitas_7d", 0),
             "trafego_conversao_perc": var.get("TRAFEGO_taxa_conversao_perc", 0),
             "abandono_carrinho_perc": var.get("taxa_abandono_carrinho_perc", 0),
@@ -977,24 +1990,38 @@ def processar_em_lotes(dossie_completo: list[dict], max_vars_por_lote: int = 5) 
             "LOGISTICA_dias_estoque_restante": var["LOGISTICA_dias_estoque_restante"],
             "LOGISTICA_dias_estoque_base_30d": var.get("LOGISTICA_dias_estoque_base_30d", 999),
             "previsao_deterministica_vendas_7d": var.get("previsao_vendas_7d", 0),
+            "previsao_deterministica_lucro_7d": var.get("previsao_lucro_7d", 0),
             "previsao_deterministica_vendas_30d": var.get("previsao_vendas_30d", 0),
+            "previsao_deterministica_lucro_30d": var.get("previsao_lucro_30d", 0),
             "qualidade_evidencia": classificar_confianca_evidencia(var)[0],
             "limite_evidencia": classificar_confianca_evidencia(var)[1],
-            "historico_acoes_passadas": var["historico_acoes_passadas"]
+            "historico_acoes_passadas": var["historico_acoes_passadas"],
+            "memoria_estrategica_30d": var.get("MEMORIA_ESTRATEGICA_30D"),
         })
 
     # 2. O GATEKEEPER: Separar os Vivos dos Fantasmas
     produtos_ativos = []
     resultados_finais = []
-    
+
     for p in produtos_agrupados.values():
         macro = p["metricas_macro_produto_30_dias"]
         vendas_totais_30d = sum(v["vendas_30d_reais"] for v in p["variacoes_ativas"])
-        
-        if macro["visitas_totais_30d"] <= 10 and macro["gasto_ads_total_30d"] == 0 and vendas_totais_30d == 0:
+        topo_mensuravel = any(
+            v.get("funil_organico_impressoes_30d") is not None
+            for v in p["variacoes_ativas"]
+        )
+        cobertura_trafego = int(macro.get("dias_trafego_coletados_30d", 0) or 0)
+        evidencia_descoberta = cobertura_trafego >= 7 or topo_mensuravel
+
+        if (
+            evidencia_descoberta
+            and macro["visitas_totais_30d"] <= 10
+            and macro["gasto_ads_total_30d"] == 0
+            and vendas_totais_30d == 0
+        ):
             # Processamento GRATUITO e INSTANTÂNEO
             for var in p["variacoes_ativas"]:
-                original = next((d for d in dossie_completo if d["item_id"] == p["item_id"] and d["model_id"] == var["model_id"]), None)
+                original = originais_por_chave.get((int(p["item_id"]), int(var["model_id"])))
                 if original:
                     rec_fantasma = {
                         "item_id": p["item_id"],
@@ -1003,11 +2030,19 @@ def processar_em_lotes(dossie_completo: list[dict], max_vars_por_lote: int = 5) 
                         "novo_preco_sugerido": var["preco_atual"],
                         "previsao_vendas_7d": 0,
                         "previsao_lucro_7d": 0.0,
+                        "previsao_vendas_30d": 0,
+                        "previsao_lucro_30d": 0.0,
+                        "plano_curto_prazo_7d": ["Validar título, atributos e imagem de capa antes de investir em mídia."],
+                        "plano_longo_prazo_30d": ["Reavaliar descoberta após 30 dias com dados de impressões e cliques, se disponíveis."],
                         "elasticidade_preco_volume": 0.0,
-                        "cluster_mercado": "Fantasma (Invisível)",
-                        "recomendacao_executiva": "Produto sem tráfego orgânico. O problema é descoberta, não o preço.",
-                        "relatorio_cfo_financas": "Sem custos variáveis, mas representa capital/esforço criativo parado.",
-                        "relatorio_cmo_marketing": f"Apenas {macro['visitas_totais_30d']} visitas em 30 dias. O anúncio não está aparecendo nas buscas.",
+                        "cluster_mercado": "Baixa atividade observada",
+                        "recomendacao_executiva": "Há pouca atividade observada com cobertura suficiente; valide descoberta e atratividade antes de alterar preço.",
+                        "relatorio_cfo_financas": "Sem vendas observadas; não há evidência suficiente para atribuir o resultado ao preço.",
+                        "relatorio_cmo_marketing": (
+                            f"Foram observadas {macro['visitas_totais_30d']} visitas em "
+                            f"{cobertura_trafego or 30} dia(s) de referência. "
+                            + ("O topo do funil está mensurado." if topo_mensuravel else "Impressões/cliques estão indisponíveis; não foi inferido CTR.")
+                        ),
                         "relatorio_coo_operacoes": "Operação ociosa para este SKU.",
                         "plano_acao_shopee": [
                             "1. TÍTULO: Reescreva incluindo palavras-chave exatas da busca.",
@@ -1026,8 +2061,13 @@ def processar_em_lotes(dossie_completo: list[dict], max_vars_por_lote: int = 5) 
 
     produtos_ativos = sorted(produtos_ativos, key=lambda x: x["score_urgencia_maximo"], reverse=True)
 
+    if resultados_finais and ao_concluir_lote:
+        ao_concluir_lote(list(resultados_finais))
+
     # 3. SMART BATCHING: Fatiamento de Variações
     lotes = []
+    lote_atual = []
+    variacoes_no_lote = 0
     for p in produtos_ativos:
         vars_ativas = p["variacoes_ativas"]
         for i in range(0, len(vars_ativas), max_vars_por_lote):
@@ -1038,64 +2078,178 @@ def processar_em_lotes(dossie_completo: list[dict], max_vars_por_lote: int = 5) 
                 "metricas_macro_produto_30_dias": p["metricas_macro_produto_30_dias"],
                 "variacoes_ativas": chunk_vars
             }
-            lotes.append([p_chunk])
+            if lote_atual and variacoes_no_lote + len(chunk_vars) > max_vars_por_lote:
+                lotes.append(lote_atual)
+                lote_atual = []
+                variacoes_no_lote = 0
+            lote_atual.append(p_chunk)
+            variacoes_no_lote += len(chunk_vars)
+    if lote_atual:
+        lotes.append(lote_atual)
 
     if lotes:
-        barra = st.progress(0, text="🚀 Iniciando auditoria C-Level (Smart Batching) no RunPod...")
+        barra = st.progress(0, text="🚀 Iniciando auditoria C-Level por API OpenAI...")
         lotes_concluidos = 0
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futuros = {executor.submit(chamar_cerebro_runpod_preditivo, lote): lote for lote in lotes}
+        # Uma única requisição por vez evita competição por KV cache na GPU única.
+        # O lote pequeno explora o modelo 72B sem repetir o contexto após timeout.
+        for lote in lotes:
+            resultados_do_lote = []
+            try:
+                resultado_lote = chamar_cerebro_openai_preditivo(lote, horizonte)
+                for rec in resultado_lote:
+                    try:
+                        rec_item_id = int(rec.get("item_id"))
+                        rec_model_id = int(rec.get("model_id"))
+                    except (TypeError, ValueError):
+                        continue
 
-            for futuro in concurrent.futures.as_completed(futuros):
-                try:
-                    resultado_lote = futuro.result()
+                    original = originais_por_chave.get((rec_item_id, rec_model_id))
+                    if not original:
+                        continue
 
-                    for rec in resultado_lote:
-                        try:
-                            rec_item_id = int(rec.get("item_id"))
-                            rec_model_id = int(rec.get("model_id"))
-                        except (TypeError, ValueError):
-                            continue
+                    rec = normalizar_saida_modelo(rec, original)
+                    rec["item_id"] = rec_item_id
+                    rec["model_id"] = rec_model_id
+                    rec["horizonte_auditoria"] = horizonte
+                    rec["dados_atuais"] = original
+                    rec["score_urgencia"] = calcular_score_urgencia(original)
+                    rec["dias_estoque"] = calcular_dias_estoque(original)
 
-                        original = next(
-                            (d for d in dossie_completo
-                             if int(d["item_id"]) == rec_item_id
-                             and int(d["model_id"]) == rec_model_id),
-                            None,
-                        )
-                        
-                        if original:
-                            rec["item_id"] = rec_item_id
-                            rec["model_id"] = rec_model_id
-                            rec["dados_atuais"]     = original
-                            rec["score_urgencia"]   = calcular_score_urgencia(original)
-                            rec["dias_estoque"]     = calcular_dias_estoque(original)
-                            
-                            # FALLBACK DE SEGURANÇA PARA PREVENIR TYPEERROR NONE
-                            preco_original = float(original.get("preco_atual", 0))
-                            novo_preco_sugerido = rec.get("novo_preco_sugerido")
-                            if novo_preco_sugerido is None:
-                                rec["novo_preco_sugerido"] = preco_original
-                            
-                            rec.setdefault("previsao_vendas_7d", original.get("previsao_vendas_7d", 0))
-                            rec.setdefault("previsao_lucro_7d", original.get("previsao_lucro_7d", 0))
-                            rec.setdefault("elasticidade_preco_volume", original.get("elasticidade_preco_volume", 0))
-                            rec.setdefault("cluster_mercado", original.get("cluster_mercado", "Estável"))
-                            rec.setdefault("recomendacao_executiva", original.get("recomendacao_executiva", "Monitorar"))
-                            resultados_finais.append(rec)
-                except Exception as e:
-                    logger.error(f"Erro ao processar um dos lotes em paralelo: {e}")
+                    preco_original = float(original.get("preco_atual", 0) or 0)
+                    if rec.get("novo_preco_sugerido") is None:
+                        rec["novo_preco_sugerido"] = preco_original
 
-                lotes_concluidos += 1
-                barra.progress(
-                    lotes_concluidos / len(lotes),
-                    text=f"⏳ Conselho auditando {lotes_concluidos}/{len(lotes)} submódulos ativos..."
-                )
+                    rec.setdefault("previsao_vendas_7d", original.get("previsao_vendas_7d", 0))
+                    rec.setdefault("previsao_lucro_7d", original.get("previsao_lucro_7d", 0))
+                    rec.setdefault("previsao_vendas_30d", original.get("previsao_vendas_30d", 0))
+                    rec.setdefault("previsao_lucro_30d", original.get("previsao_lucro_30d", 0))
+                    rec.setdefault("plano_curto_prazo_7d", [])
+                    rec.setdefault("plano_longo_prazo_30d", [])
+                    rec.setdefault("elasticidade_preco_volume", original.get("elasticidade_preco_volume", 0))
+                    rec.setdefault("cluster_mercado", original.get("cluster_mercado", "Estável"))
+                    rec.setdefault("recomendacao_executiva", original.get("recomendacao_executiva", "Monitorar"))
+                    resultados_finais.append(rec)
+                    resultados_do_lote.append(rec)
+            except Exception as e:
+                logger.error(f"Erro ao processar lote: {e}")
+                raise
+
+            if resultados_do_lote and ao_concluir_lote:
+                ao_concluir_lote(resultados_do_lote)
+
+            lotes_concluidos += 1
+            barra.progress(
+                lotes_concluidos / len(lotes),
+                text=f"⏳ Conselho auditando {lotes_concluidos}/{len(lotes)} submódulos ativos..."
+            )
 
         barra.empty()
-        
+
     return resultados_finais
+
+
+# ==============================================================================
+# ORQUESTRAÇÃO DOS HORIZONTES
+# ==============================================================================
+def executar_auditoria_por_horizonte(horizonte: str, status_boot) -> list[dict]:
+    """Executa e persiste um único horizonte; 7d é recorrente, 30d é estratégico."""
+    if horizonte not in {"7d", "30d"}:
+        raise ValueError("Horizonte de auditoria inválido. Use '7d' ou '30d'.")
+
+    status_boot.write("Lendo Data Warehouse e consolidando métricas...")
+    dossie = gerar_dossie_produtos_com_memoria()
+    if not dossie:
+        status_boot.update(label="Sem produtos ativos para auditar", state="error", expanded=True)
+        st.stop()
+
+    acoes_avaliadas = avaliar_acoes_maduras(dossie)
+    if acoes_avaliadas:
+        status_boot.write(f"Atualizando aprendizagem com {acoes_avaliadas} ação(ões) já maturadas...")
+        dossie = enriquecer_dossie_com_memoria(dossie)
+
+    descricao = "operacional de 7 dias" if horizonte == "7d" else "estratégica de 30 dias"
+    cobertura_inicial = {
+        "variacoes_esperadas": len(dossie),
+        "dias_trafego_30d_mediana": int(pd.Series([
+            d.get("COBERTURA_dias_trafego_30d", 0) for d in dossie
+        ]).median() or 0),
+    }
+    id_checkpoint, _ = iniciar_ou_retomar_checkpoint(
+        horizonte, len(dossie), cobertura_inicial,
+    )
+
+    retomados, dossie_a_verificar = (
+        separar_resultados_do_checkpoint(id_checkpoint, horizonte, dossie)
+        if id_checkpoint else ([], dossie)
+    )
+    reutilizados, pendentes = separar_resultados_reutilizaveis(horizonte, dossie_a_verificar)
+    resultados_iniciais = retomados + reutilizados
+
+    if id_checkpoint and resultados_iniciais:
+        persistir_lote_no_checkpoint(id_checkpoint, horizonte, resultados_iniciais)
+    if retomados:
+        status_boot.write(
+            f"Retomada segura: {len(retomados)} variação(ões) já concluídas foram restauradas do checkpoint."
+        )
+    if reutilizados:
+        status_boot.write(
+            f"Economia de inferência: {len(reutilizados)} variação(ões) sem mudança reutilizadas com segurança."
+        )
+
+    novos_resultados = []
+    if pendentes:
+        status_boot.write(
+            f"Enviando somente {len(pendentes)} de {len(dossie)} variações para análise {descricao}..."
+        )
+        if not configuracao_openai_valida():
+            status_boot.update(label="Configuração OpenAI pendente", state="error", expanded=True)
+            st.stop()
+
+        def confirmar_lote(lote: list[dict]) -> None:
+            if id_checkpoint and not persistir_lote_no_checkpoint(id_checkpoint, horizonte, lote):
+                raise RuntimeError("Falha ao confirmar o lote no checkpoint; a execução poderá ser retomada.")
+
+        novos_resultados = processar_em_lotes(
+            pendentes,
+            horizonte=horizonte,
+            ao_concluir_lote=confirmar_lote if id_checkpoint else None,
+        )
+    else:
+        status_boot.write("Nenhum fato mudou; nenhuma chamada à OpenAI foi necessária.")
+
+    resultados = resultados_iniciais + novos_resultados
+    resultados.sort(key=lambda r: int(r.get("score_urgencia", 0) or 0), reverse=True)
+    for resultado in resultados:
+        resultado["horizonte_auditoria"] = horizonte
+
+    if id_checkpoint:
+        finalizar_checkpoint(id_checkpoint, horizonte, resultados, len(dossie))
+        id_execucao = id_checkpoint
+    else:
+        id_execucao = persistir_auditoria_analitica(horizonte, resultados)
+    if id_execucao:
+        st.session_state.id_execucao_analitica = id_execucao
+        for resultado in resultados:
+            resultado["id_execucao_analitica"] = id_execucao
+
+    destino = CACHE_AUDITORIA_7D if horizonte == "7d" else CACHE_AUDITORIA_30D
+    with open(destino, "w", encoding="utf-8") as arquivo:
+        json.dump(resultados, arquivo, ensure_ascii=False, indent=4)
+    # Mantém o arquivo legado atualizado para não quebrar instalações existentes.
+    with open(CACHE_AUDITORIA, "w", encoding="utf-8") as arquivo:
+        json.dump(resultados, arquivo, ensure_ascii=False, indent=4)
+    return resultados
+
+
+def executar_analise_7_dias(status_boot) -> list[dict]:
+    """Fluxo recorrente: decisão operacional baseada exclusivamente nos sinais de 7 dias."""
+    return executar_auditoria_por_horizonte("7d", status_boot)
+
+
+def executar_analise_30_dias(status_boot) -> list[dict]:
+    """Fluxo estratégico: diagnóstico mensal completo para a primeira execução e revisões ocasionais."""
+    return executar_auditoria_por_horizonte("30d", status_boot)
 
 
 # ==============================================================================
@@ -1110,16 +2264,27 @@ def salvar_log_acao(
     impacto_json: dict,
     status: str,
 ):
+    id_execucao_origem = st.session_state.get("id_execucao_analitica")
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO log_acoes_shopee
-                    (item_id, model_id, tipo_acao, detalhe_acao, impacto_projetado, status_api)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (item_id, model_id, tipo_acao, detalhe, json.dumps(impacto_json), status),
-            )
+            if id_execucao_origem:
+                cur.execute(
+                    """
+                    INSERT INTO log_acoes_shopee
+                        (item_id, model_id, tipo_acao, detalhe_acao, impacto_projetado, status_api, id_execucao_origem)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::uuid)
+                    """,
+                    (item_id, model_id, tipo_acao, detalhe, json.dumps(impacto_json), status, id_execucao_origem),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO log_acoes_shopee
+                        (item_id, model_id, tipo_acao, detalhe_acao, impacto_projetado, status_api)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (item_id, model_id, tipo_acao, detalhe, json.dumps(impacto_json), status),
+                )
         conn.commit()
 
 
@@ -1131,7 +2296,7 @@ def processar_acao_api(acao: str, dados_var: dict, analise_var: dict, novo_preco
     """Isola a chamada da API da Shopee para manter o front-end responsivo."""
     duracao = analise_var.get("horas_duracao_promocao", 24)
     sucesso, msg = False, "Erro Desconhecido"
-    
+
     try:
         if acao == "CRIAR_PROMOCAO":
             sucesso, msg = criar_promocao_shopee(dados_var["item_id"], dados_var["model_id"], novo_preco, duracao)
@@ -1139,13 +2304,13 @@ def processar_acao_api(acao: str, dados_var: dict, analise_var: dict, novo_preco
             sucesso, msg = atualizar_preco_shopee(dados_var["item_id"], dados_var["model_id"], novo_preco)
         elif acao == "CRIAR_COMBO":
             sucesso, msg = criar_combo_shopee(dados_var["item_id"], percentual_desconto=10)
-            
+
         impacto_log = {
             "vendas_projetadas": analise_var.get("previsao_vendas_7d", 0),
             "lucro_projetado": analise_var.get("previsao_lucro_7d", 0),
             "estrategia": acao
         }
-        
+
         if sucesso:
             salvar_log_acao(dados_var["item_id"], dados_var["model_id"], acao, f"Aprovado (Alvo: R$ {novo_preco:.2f})", impacto_log, "SUCESSO")
             return True, msg
@@ -1169,12 +2334,15 @@ def classificar_confianca_evidencia(dados: dict) -> tuple[str, str, str]:
     vendas_30d = int(dados.get("vendas_30d_macro", 0) or 0)
     visitas_30d = int(dados.get("visitas_30d_macro", 0) or 0)
     vendas_7d = int(dados.get("vendas_7d_reais", 0) or 0)
+    cobertura_trafego = int(dados.get("COBERTURA_dias_trafego_30d", 0) or 0)
+    cobertura_vendas = int(dados.get("COBERTURA_dias_com_venda_30d", 0) or 0)
     preco_mudou = abs(float(dados.get("preco_tendencia_7d_perc", 0) or 0)) >= 0.5
 
-    if vendas_30d >= 20 and visitas_30d >= 100 and vendas_7d > 0:
-        return "Alta", "Boa base de volume (30 dias)", "success"
+    if vendas_30d >= 20 and visitas_30d >= 100 and vendas_7d > 0 and cobertura_trafego >= 21 and cobertura_vendas >= 7:
+        return "Alta", "Volume e cobertura consistentes no período de 30 dias", "success"
     if vendas_30d >= 5 or visitas_30d >= 30:
-        detalhe = "Amostra moderada; valide antes de escalar"
+        cobertura = f"Cobertura: {cobertura_trafego}/30 dias de tráfego, {cobertura_vendas}/30 dias com vendas"
+        detalhe = f"Amostra moderada; valide antes de escalar. {cobertura}"
         if not preco_mudou:
             detalhe += ". Sem variação de preço suficiente para medir elasticidade"
         return "Moderada", detalhe, "warning"
@@ -1221,41 +2389,39 @@ st.markdown("Auditoria profunda de **Finanças, Marketing e Fábrica** com predi
 # Inicialização e Cache
 if "analises_preditivas" not in st.session_state:
     st.session_state.analises_preditivas = []
-    if CACHE_AUDITORIA.exists():
+    st.session_state.horizonte_auditoria = None
+    for cache, horizonte in ((CACHE_AUDITORIA_7D, "7d"), (CACHE_AUDITORIA_30D, "30d"), (CACHE_AUDITORIA, None)):
+        if not cache.exists():
+            continue
         try:
-            with open(CACHE_AUDITORIA, "r", encoding="utf-8") as f:
+            with open(cache, "r", encoding="utf-8") as f:
                 st.session_state.analises_preditivas = json.load(f)
+            st.session_state.horizonte_auditoria = horizonte or (
+                st.session_state.analises_preditivas[0].get("horizonte_auditoria")
+                if st.session_state.analises_preditivas else None
+            )
+            if st.session_state.analises_preditivas:
+                st.session_state.id_execucao_analitica = st.session_state.analises_preditivas[0].get("id_execucao_analitica")
+            break
         except Exception:
-            pass
+            continue
 
 # ─── Barra Lateral (Sidebar) para o Disparo ──────────────────────────────────
 with st.container(border=True):
     st.subheader("Atualizar diagnóstico")
-    st.caption("Esta ação lê o Data Warehouse, recalcula os indicadores e pede um novo parecer à IA. Ela não muda preços, anúncios ou campanhas.")
-    st.info("Use o botão abaixo apenas quando quiser renovar a base e as recomendações. Os controles de leitura ficam logo a seguir.")
-    
-    if st.button("⚡ Executar Auditoria Profunda", type="primary", use_container_width=True):
-        with st.status("Iniciando Conselho de IA...", expanded=True) as status_boot:
-            st.write("📡 Acordando servidores (RunPod)...")
-            if not acordar_modelo_ia():
-                status_boot.update(label="Falha de Comunicação", state="error", expanded=True)
-                st.stop() 
-            
-            st.write("📊 Lendo Data Warehouse e calculando métricas...")
-            dossie = gerar_dossie_produtos_com_memoria()
-            
-            if not dossie:
-                status_boot.update(label="Sem Produtos Ativos", state="error", expanded=True)
-                st.stop()
-                
-            st.write(f"✅ {len(dossie)} variações enviadas para auditoria...")
-            resultados_ia = processar_em_lotes(dossie)
-            
+    st.caption("A análise de 7 dias é operacional e deve ser usada no dia a dia. A análise de 30 dias é estratégica, mais completa e indicada na primeira execução ou após longo período sem revisão.")
+    botao_7d, botao_30d = st.columns(2)
+    executar_7d = botao_7d.button("Atualizar análise operacional · 7 dias", type="primary", use_container_width=True, help="Envia somente os sinais recentes ao modelo. É o fluxo recomendado para uso recorrente.")
+    executar_30d = botao_30d.button("Executar diagnóstico estratégico · 30 dias", use_container_width=True, help="Envia o dossiê mensal completo. Use na primeira execução e em revisões estratégicas.")
+
+    horizonte_escolhido = "7d" if executar_7d else "30d" if executar_30d else None
+    if horizonte_escolhido:
+        titulo = "análise operacional de 7 dias" if horizonte_escolhido == "7d" else "diagnóstico estratégico de 30 dias"
+        with st.status(f"Iniciando {titulo}...", expanded=True) as status_boot:
+            resultados_ia = executar_analise_7_dias(status_boot) if horizonte_escolhido == "7d" else executar_analise_30_dias(status_boot)
             st.session_state.analises_preditivas = resultados_ia
-            with open(CACHE_AUDITORIA, "w", encoding="utf-8") as f:
-                json.dump(resultados_ia, f, ensure_ascii=False, indent=4)
-                
-            status_boot.update(label="Auditoria Concluída!", state="complete", expanded=False)
+            st.session_state.horizonte_auditoria = horizonte_escolhido
+            status_boot.update(label=f"{titulo.capitalize()} concluído!", state="complete", expanded=False)
         st.rerun()
 
 analises = st.session_state.analises_preditivas
@@ -1342,9 +2508,9 @@ st.markdown("""
 
 # ─── Organização em 4 Abas Ergonômicas ────────────────────────────────────────
 aba_dashboard, aba_atuador, aba_previsao, aba_dossies = st.tabs([
-    "Resumo", 
-    "Alterações recomendadas", 
-    "Cenários e previsões", 
+    "Resumo",
+    "Alterações recomendadas",
+    "Cenários e previsões",
     "Pareceres e método"
 ])
 
@@ -1373,7 +2539,7 @@ with aba_dashboard:
     st.caption(f"Evidência dos {len(df_analises)} SKUs filtrados: {evidencias_resumo.get('Alta', 0)} alta, {evidencias_resumo.get('Moderada', 0)} moderada, {evidencias_resumo.get('Baixa', 0)} baixa. Abandono de carrinho observado: {abandono_loja:.1f}%" if total_carrinhos_visivel else f"Evidência dos {len(df_analises)} SKUs filtrados: {evidencias_resumo.get('Alta', 0)} alta, {evidencias_resumo.get('Moderada', 0)} moderada, {evidencias_resumo.get('Baixa', 0)} baixa.")
     st.divider()
     st.subheader("📊 Panorama Executivo (Últimos 7 dias)")
-    
+
     total_lucro    = sum(a.get("dados_atuais", {}).get("lucro_liquido_real_7d", 0) for a in analises)
     total_vendas   = sum(a.get("dados_atuais", {}).get("vendas_7d_reais", 0) for a in analises)
     total_gasto    = sum(a.get("dados_atuais", {}).get("ADS_gasto_7d", 0) for a in analises)
@@ -1389,12 +2555,12 @@ with aba_dashboard:
         c5.metric("⏳ Autonomia Mínima", f"{dias_min_estoque if dias_min_estoque < 999 else '∞'} dias", delta_color="inverse" if dias_min_estoque < 14 else "normal")
 
     st.divider()
-    
+
     # Médias Macro
     score_urgencia = df_analises.get('score_urgencia', pd.Series([0]))
     taxa_cancel = df_analises.get('taxa_cancelamento_7d_perc', pd.Series([0]))
     lucro_liq = df_analises.get('lucro_liquido_real_7d', pd.Series([0]))
-    
+
     c_m1, c_m2, c_m3 = st.columns(3)
     c_m1.metric("Itens com Urgência Alta", int((score_urgencia >= 40).sum()))
     c_m2.metric("Taxa Média de Cancelamento", f"{taxa_cancel.mean():.1f}%")
@@ -1427,7 +2593,7 @@ with aba_dashboard:
     st.caption("A faixa exploratória não é um intervalo estatístico: ela amplia a incerteza quando o histórico é escasso. Elasticidade só é mostrada quando houve variação material de preço e volume mínimo de dados.")
 
     col_agregacao, col_alertas = st.columns([6, 4])
-    
+
     with col_agregacao:
         st.markdown("### 🧩 Agregações por Categoria")
         if 'categoria' in df_analises.columns:
@@ -1438,7 +2604,7 @@ with aba_dashboard:
                 urgencia=('score_urgencia', 'mean'),
                 cancelamento=('taxa_cancelamento_7d_perc', 'mean')
             ).sort_values(['lucro', 'vendas'], ascending=False)
-            
+
             st.dataframe(agregacao_categoria.reset_index(), use_container_width=True, hide_index=True)
 
     with col_alertas:
@@ -1448,7 +2614,7 @@ with aba_dashboard:
         if alertas_fortes:
             for alerta in alertas_fortes:
                 st.error(f"**{alerta['produto']}**: {alerta['mensagem']}", icon="🔴")
-                
+
         # Alertas operacionais
         alertas_exec = []
         for _, row in df_analises.iterrows():
@@ -1457,7 +2623,7 @@ with aba_dashboard:
                 alertas_exec.append(("Queda de conversão", nome, "Conversão baixa com gasto relevante em ads."))
             if row.get('taxa_cancelamento_7d_perc', 0) > 10:
                 alertas_exec.append(("Alto cancelamento", nome, "Taxa acima de 10% no período recente."))
-                
+
         if alertas_exec:
             for alerta in alertas_exec[:8]:
                 st.warning(f"**{alerta[1]}**\n\n{alerta[0]}: {alerta[2]}", icon="⚠️")
@@ -1471,12 +2637,12 @@ with aba_atuador:
     st.subheader("Alterações recomendadas")
     st.markdown('<div class="ia-note"><span class="ia-label">Fluxo de confirmação</span><br><b>1. Compare</b> o estado atual com o proposto. &nbsp; <b>2. Leia</b> a força da evidência e a consequência. &nbsp; <b>3. Confirme</b> somente quando a alteração estiver clara. Nenhum botão é executado sem clique explícito.</div>', unsafe_allow_html=True)
     st.info("Fluxo recomendado: analise a recomendação, confira a variação do preço alvo e aprove a ação em 1-clique.")
-    
+
     produtos_agrupados = {}
     for analise in analises:
         dados = analise.get("dados_atuais", {})
         if not dados: continue
-        
+
         iid = dados["item_id"]
         if iid not in produtos_agrupados:
             produtos_agrupados[iid] = {
@@ -1486,7 +2652,7 @@ with aba_atuador:
                 "acoes_pendentes": 0,
                 "variacoes": []
             }
-        
+
         produtos_agrupados[iid]["score_max"] = max(produtos_agrupados[iid]["score_max"], analise.get("score_urgencia", 0))
         if analise.get("tipo_acao") != "MANTER":
             produtos_agrupados[iid]["acoes_pendentes"] += 1
@@ -1498,30 +2664,30 @@ with aba_atuador:
     for iid, p in produtos_agrupados.items():
         if p["acoes_pendentes"] == 0:
             continue # Oculta produtos perfeitos para manter o foco visual
-        
+
         sem_acoes = False
         score = p["score_max"]
         badge = "🔴 Urgente" if score >= 40 else "🟡 Atenção" if score >= 20 else "🟢 Ok"
-        
+
         with st.expander(f"⚡ {p['nome_produto']} | {p['acoes_pendentes']} SKUs exigem ação | {badge}", expanded=(score >= 40)):
             var_base = p["variacoes"][0]
-            
+
             with st.container(border=True):
                 st.markdown(f"**🎯 Motivo da Intervenção:** {var_base.get('recomendacao_executiva', '')}")
                 st.caption(f"**Projeção IA:** {var_base.get('analise_de_consequencias', '')}")
-            
+
             st.markdown("#### Grade de Ações")
             for analise_var in p["variacoes"]:
                 acao_var = analise_var.get("tipo_acao")
                 if acao_var == "MANTER": continue
-                
+
                 dados_var = analise_var.get("dados_atuais", {})
                 preco_atual = float(dados_var.get("preco_atual") or 0)
                 novo_preco = float(analise_var.get("novo_preco_sugerido") or preco_atual)
                 modo_execucao, detalhe_execucao = classificar_modo_execucao(acao_var)
                 confianca, leitura_evidencia, _ = classificar_confianca_evidencia(dados_var)
                 efeito_acao, orientacao_acao = explicar_acao(acao_var)
-                
+
                 with st.container(border=True):
                     st.markdown(f"### {rotulo_acao(acao_var)} · {dados_var.get('nome_variacao', 'SKU')}")
                     st.caption(f"O que muda: {efeito_acao} {orientacao_acao}")
@@ -1545,9 +2711,22 @@ with aba_atuador:
                         st.markdown("**Antes de decidir**")
                         st.caption(f"Evidência: **{confianca}** — {leitura_evidencia}")
                         st.caption("A projeção é uma hipótese. Confira a justificativa e a consequência abaixo antes de confirmar.")
+                    with st.expander("Plano por horizonte: 7 dias e 30 dias"):
+                        plano_7d, plano_30d = st.columns(2)
+                        with plano_7d:
+                            st.markdown("**Curto prazo · 7 dias**")
+                            for passo in analise_var.get("plano_curto_prazo_7d", []):
+                                st.write(f"• {passo}")
+                            st.caption(f"Cenário: {int(analise_var.get('previsao_vendas_7d', 0) or 0)} un. | R$ {float(analise_var.get('previsao_lucro_7d', 0) or 0):.2f}")
+                        with plano_30d:
+                            st.markdown("**Longo prazo · 30 dias**")
+                            for passo in analise_var.get("plano_longo_prazo_30d", []):
+                                st.write(f"• {passo}")
+                            st.caption(f"Cenário: {int(analise_var.get('previsao_vendas_30d', 0) or 0)} un. | R$ {float(analise_var.get('previsao_lucro_30d', 0) or 0):.2f}")
+                        st.info("O plano de 30 dias é estratégico e não dispara nenhuma alteração automática.")
                     st.divider()
                     col_info, col_btn = st.columns([6, 4], vertical_alignment="center")
-                    
+
                     with col_info:
                         if confianca == "Baixa":
                             st.warning(f"Evidência baixa — não automatize sem teste controlado. {leitura_evidencia}")
@@ -1557,7 +2736,7 @@ with aba_atuador:
                         st.caption(f"**Ação Definida:** {acao_var}")
                         if modo_execucao == "RECOMENDAR":
                             st.info("📌 Alteração Manual Necessária no Seller Center", icon="ℹ️")
-                    
+
                     with col_btn:
                         valido, motivo = validar_sugestao_ia(dados_var, analise_var)
                         if confianca == "Baixa" and modo_execucao == "EXECUTAR":
@@ -1575,7 +2754,7 @@ with aba_atuador:
                                         st.toast(f"Sucesso: {msg}", icon="✅")
                                     else:
                                         st.error(msg)
-                                        
+
     if sem_acoes:
         st.success("✅ O Conselho determinou que a estratégia atual está perfeita. Nenhuma intervenção de API é necessária hoje.")
 
@@ -1586,7 +2765,7 @@ with aba_previsao:
     st.info("Previsões de 7 dias são cenários operacionais, não previsões estatísticas calibradas. Quando a evidência for baixa, use-as para priorizar investigação ou um teste pequeno — nunca como base única para alterar preço ou orçamento.")
     st.subheader("🧠 Elasticidade e Projeção de Demanda (7d)")
     st.caption("Visão preditiva do impacto do preço no volume de vendas baseado em dados históricos.")
-    
+
     tabela_exec = []
     for a in analises:
         dados = a.get("dados_atuais", {})
@@ -1598,20 +2777,24 @@ with aba_previsao:
             "Elasticidade": a.get("elasticidade_preco_volume", dados.get("elasticidade_preco_volume", 0)),
             "Previsão Vendas (7d)": a.get("previsao_vendas_7d", dados.get("previsao_vendas_7d", 0)),
             "Previsão Lucro (7d)": a.get("previsao_lucro_7d", dados.get("previsao_lucro_7d", 0)),
+            "Previsão Vendas (30d)": a.get("previsao_vendas_30d", dados.get("previsao_vendas_30d", 0)),
+            "Previsão Lucro (30d)": a.get("previsao_lucro_30d", dados.get("previsao_lucro_30d", 0)),
             "Evidência": classificar_confianca_evidencia(dados)[0],
             "Vendas observadas (30d)": dados.get("vendas_30d_macro", 0),
             "Cluster": a.get("cluster_mercado", dados.get("cluster_mercado", "Estável")),
         })
-        
+
     if tabela_exec:
-        df_pred = pd.DataFrame(tabela_exec).sort_values(["Previsão Lucro (7d)", "Previsão Vendas (7d)"], ascending=False)
+        df_pred = pd.DataFrame(tabela_exec).sort_values(["Previsão Lucro (30d)", "Previsão Lucro (7d)"], ascending=False)
         st.dataframe(
-            df_pred, 
-            use_container_width=True, 
+            df_pred,
+            use_container_width=True,
             hide_index=True,
             column_config={
                 "Previsão Vendas (7d)": st.column_config.NumberColumn(format="%d un."),
-                "Previsão Lucro (7d)": st.column_config.NumberColumn(format="R$ %.2f")
+                "Previsão Lucro (7d)": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Previsão Vendas (30d)": st.column_config.NumberColumn(format="%d un."),
+                "Previsão Lucro (30d)": st.column_config.NumberColumn(format="R$ %.2f")
             }
         )
 
@@ -1632,7 +2815,7 @@ with aba_dossies:
         """)
     st.markdown("### 🎯 Ranking de Potencial de Margem")
     st.caption("Fórmula: Lucro / Gasto Ads + Fator Volume - Fator Cancelamento")
-    
+
     ranking = df_analises.copy()
     ranking['potencial_margem'] = (
         ranking.get('lucro_liquido_real_7d', 0) / (ranking.get('ADS_gasto_7d', 0) + 1)
@@ -1640,11 +2823,11 @@ with aba_dossies:
         - ranking.get('taxa_cancelamento_7d_perc', 0) * 0.5
     )
     ranking_top = ranking.sort_values('potencial_margem', ascending=False).head(15)
-    
+
     if not ranking_top.empty:
         st.dataframe(
-            ranking_top[['nome_produto', 'nome_variacao', 'vendas_7d_reais', 'lucro_liquido_real_7d', 'ADS_gasto_7d', 'potencial_margem']], 
-            use_container_width=True, 
+            ranking_top[['nome_produto', 'nome_variacao', 'vendas_7d_reais', 'lucro_liquido_real_7d', 'ADS_gasto_7d', 'potencial_margem']],
+            use_container_width=True,
             hide_index=True,
             column_config={
                 "nome_produto": "Produto",
@@ -1658,13 +2841,13 @@ with aba_dossies:
 
     st.divider()
     st.markdown("### 📖 Dossiês e Pareceres de Diretoria")
-    st.caption("Acesse a defesa argumentativa do Conselho C-Level (CFO, CMO, COO) gerada no RunPod para cada produto.")
-    
+    st.caption("Acesse a defesa argumentativa do Conselho C-Level (CFO, CMO, COO) gerada pela IA para cada produto.")
+
     for iid, p in produtos_agrupados.items():
         var_base = p["variacoes"][0]
         with st.expander(f"Ler Parecer: {p['nome_produto']}"):
             st.markdown(f"**Recomendação Executiva:** {var_base.get('recomendacao_executiva', 'N/A')}")
-            
+
             c1, c2, c3 = st.columns(3)
             with c1: st.info(f"**💰 Parecer CFO (Finanças):**\n\n{var_base.get('relatorio_cfo_financas', 'N/A')}")
             with c2: st.success(f"**🎯 Parecer CMO (Marketing):**\n\n{var_base.get('relatorio_cmo_marketing', 'N/A')}")

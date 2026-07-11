@@ -7,6 +7,7 @@ import os
 import re
 import sys
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -73,6 +74,28 @@ def limpar_valor(val):
     val_str = str(val).replace('R$', '').replace('.', '').replace(',', '.').replace('%', '').strip()
     try: return float(val_str)
     except: return 0.0
+
+
+def limpar_valor_opcional(val):
+    """Preserva ausência de dado como NULL; zero continua significando zero medido."""
+    if pd.isna(val) or str(val).strip() in {'', '-'}:
+        return None
+    return limpar_valor(val)
+
+
+def distribuir_inteiro(total: int | None, dias: int, indice: int) -> int | None:
+    """Distribui um total agregado sem perder unidades por arredondamento."""
+    if total is None:
+        return None
+    quociente, resto = divmod(int(total), dias)
+    return quociente + (1 if indice < resto else 0)
+
+
+def distribuir_monetario(valor: float, dias: int, indice: int) -> Decimal:
+    """Distribui em centavos e preserva exatamente o total financeiro do período."""
+    centavos = int((Decimal(str(valor)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)) * 100)
+    quociente, resto = divmod(centavos, dias)
+    return Decimal(quociente + (1 if indice < resto else 0)) / Decimal(100)
 
 def carregar_dataframe_limpo(uploaded_file):
     """Filtro inteligente para pular o cabeçalho 'sujo' e avisos da Shopee"""
@@ -164,155 +187,124 @@ def processar_arquivo_global(arquivo_global):
         return 0, f"Erro ao processar arquivo global: {e}"
 
 
-def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data_fim):
+def processar_trafego_organico(arquivo_trafego, data_inicio, data_fim):
     dias_no_periodo = (data_fim - data_inicio).days + 1
     if dias_no_periodo <= 0: return 0, "A Data Final deve ser maior ou igual à Inicial."
+
+    if not arquivo_trafego:
+        return 0, "Nenhum arquivo de tráfego fornecido."
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT item_id, LOWER(nome_atual) FROM dim_produtos")
             produtos_db = cur.fetchall()
             
-    linhas_trafego, linhas_ads = [], []
-    
+    # AGORA USAMOS UM DICIONÁRIO PARA EVITAR O CARDINALITY VIOLATION
+    dict_trafego = {} 
     dict_metricas = {}
 
     def add_metrica(item, data, nome, valor, fonte):
         chave = (item, data, nome, fonte)
         dict_metricas[chave] = dict_metricas.get(chave, 0.0) + float(valor)
 
-    # 1. PLANILHA DE PERFORMANCE ORGÂNICA
-    if arquivo_trafego:
-        try:
-            df_t = carregar_dataframe_limpo(arquivo_trafego)
+    try:
+        df_t = carregar_dataframe_limpo(arquivo_trafego)
+        
+        # Identificadores e Topo de Funil
+        col_id = next((c for c in df_t.columns if 'id do item' in c or 'id do produto' in c), None)
+        col_imp_org = next((c for c in df_t.columns if 'impress' in c), None)
+        col_cli_org = next((c for c in df_t.columns if 'clique' in c or 'click' in c), None)
+        
+        # Meio/Fundo de Funil
+        col_visitas = next((c for c in df_t.columns if 'visitante' in c or 'visita' in c), None)
+        col_carrinho = next((c for c in df_t.columns if 'carrinho' in c), None)
+        col_rejeicao = next((c for c in df_t.columns if 'rejeição' in c or 'bounce' in c), None)
+        
+        for _, row in df_t.iterrows():
+            if col_id and pd.notna(row[col_id]) and "dados atuais" not in str(row[col_id]).lower():
+                try: item_id = int(limpar_valor(row[col_id]))
+                except: continue
+            else:
+                continue
             
-            col_id = next((c for c in df_t.columns if 'id do item' in c or 'id do produto' in c), None)
-            col_visitas = next((c for c in df_t.columns if 'visitante' in c or 'visita' in c), None)
-            col_carrinho = next((c for c in df_t.columns if 'carrinho' in c), None)
-            col_rejeicao = next((c for c in df_t.columns if 'rejeição' in c or 'bounce' in c), None)
+            if not any(item_id == pid for pid, _ in produtos_db):
+                continue 
             
-            for _, row in df_t.iterrows():
-                if col_id and pd.notna(row[col_id]) and "dados atuais" not in str(row[col_id]).lower():
-                    try:
-                        item_id = int(limpar_valor(row[col_id]))
-                    except:
-                        continue
+            # Extração Segura das Métricas
+            imp_raw = limpar_valor_opcional(row[col_imp_org]) if col_imp_org else None
+            cli_raw = limpar_valor_opcional(row[col_cli_org]) if col_cli_org else None
+            imp_org = int(imp_raw) if imp_raw is not None else None
+            cli_org = int(cli_raw) if cli_raw is not None else None
+            visitas = int(limpar_valor(row[col_visitas])) if col_visitas else 0
+            carrinho = int(limpar_valor(row[col_carrinho])) if col_carrinho else 0
+            rejeicao = limpar_valor(row[col_rejeicao]) if col_rejeicao else 0.0
+            
+            for d in range(dias_no_periodo):
+                dia_registro = data_inicio + timedelta(days=d)
+                
+                # Distribuição proporcional para arquivos que englobam vários dias
+                valor_imp = distribuir_inteiro(imp_org, dias_no_periodo, d)
+                valor_cli = distribuir_inteiro(cli_org, dias_no_periodo, d)
+                valor_visitas = distribuir_inteiro(visitas, dias_no_periodo, d)
+                valor_carrinho = distribuir_inteiro(carrinho, dias_no_periodo, d)
+                # Taxa é uma média do período; dividi-la por dias distorce o indicador.
+                valor_rejeicao = rejeicao
+                
+                # DEDUPLICAÇÃO INTELIGENTE (Resolve o CardinalityViolation)
+                chave_trafego = (item_id, dia_registro.date())
+                if chave_trafego not in dict_trafego:
+                    # Estrutura: [imp, cliques, visitas, rejeicao, carrinho, count_para_media]
+                    dict_trafego[chave_trafego] = [valor_imp, valor_cli, valor_visitas, valor_rejeicao, valor_carrinho, 1]
                 else:
+                    if valor_imp is not None:
+                        dict_trafego[chave_trafego][0] = (dict_trafego[chave_trafego][0] or 0) + valor_imp
+                    if valor_cli is not None:
+                        dict_trafego[chave_trafego][1] = (dict_trafego[chave_trafego][1] or 0) + valor_cli
+                    dict_trafego[chave_trafego][2] += valor_visitas
+                    dict_trafego[chave_trafego][3] += valor_rejeicao
+                    dict_trafego[chave_trafego][4] += valor_carrinho
+                    dict_trafego[chave_trafego][5] += 1
+
+            for col in df_t.columns:
+                if col in {col_id, col_imp_org, col_cli_org, col_visitas, col_carrinho, col_rejeicao}:
                     continue
-                
-                if not any(item_id == pid for pid, _ in produtos_db):
-                    continue 
-                
-                visitas = int(limpar_valor(row[col_visitas])) if col_visitas else 0
-                carrinho = int(limpar_valor(row[col_carrinho])) if col_carrinho else 0
-                rejeicao = limpar_valor(row[col_rejeicao]) if col_rejeicao else 0.0
-                
-                for d in range(dias_no_periodo):
-                    dia_registro = data_inicio + timedelta(days=d)
-                    valor_visitas = int(visitas/dias_no_periodo)
-                    valor_carrinho = int(carrinho/dias_no_periodo)
-                    valor_rejeicao = rejeicao / dias_no_periodo if dias_no_periodo > 0 else rejeicao
-                    
-                    linhas_trafego.append((item_id, dia_registro.date(), valor_visitas, valor_rejeicao, valor_carrinho))
-
-                    add_metrica(item_id, dia_registro.date(), 'visitas_importadas', valor_visitas, arquivo_trafego.name)
-                    add_metrica(item_id, dia_registro.date(), 'carrinhos_importados', valor_carrinho, arquivo_trafego.name)
-                    add_metrica(item_id, dia_registro.date(), 'rejeicao_importada', valor_rejeicao, arquivo_trafego.name)
-
-                for col in df_t.columns:
-                    if col in {col_id, col_visitas, col_carrinho, col_rejeicao}:
-                        continue
-                    if any(k in col.lower() for k in ['venda','receita','gmv','pedido','ticket','avg','reemb','cancel','devol','margem','custo','gasto','ads','despesa','cpc','ctr','conversao','preco','price','stock','estoque','roas','taxa']):
-                        valor = limpar_valor(row[col]) if pd.notna(row[col]) and str(row[col]).strip() not in {'-', ''} else 0.0
-                        if valor == 0:
-                            continue
-                        for d in range(dias_no_periodo):
-                            dia_registro = data_inicio + timedelta(days=d)
-                            add_metrica(item_id, dia_registro.date(), normalizar_nome_metric(col), valor / dias_no_periodo, arquivo_trafego.name)
-        except Exception as e:
-            return 0, f"Erro ao ler Tráfego Orgânico: {e}"
-
-    # 2. PLANILHA DE SHOPEE ADS
-    if arquivo_ads:
-        try:
-            df_a = carregar_dataframe_limpo(arquivo_ads)
-            
-            col_id_ads = next((c for c in df_a.columns if 'id do produto' in c), None)
-            col_nome = next((c for c in df_a.columns if 'nome' in c or 'produto' in c or 'anúncio' in c), None)
-            col_kw = next((c for c in df_a.columns if 'palavra' in c or 'keyword' in c), None)
-            col_imp = next((c for c in df_a.columns if 'impress' in c), None)
-            col_cli = next((c for c in df_a.columns if 'clique' in c or 'click' in c), None)
-            col_custo = next((c for c in df_a.columns if 'despesa' in c or 'custo' in c or 'gasto' in c), None)
-            col_gmv = next((c for c in df_a.columns if 'vgm' in c or 'vendas' in c), None)
-            
-            for _, row in df_a.iterrows():
-                item_id = None
-                
-                if col_id_ads and pd.notna(row[col_id_ads]) and str(row[col_id_ads]).strip() != '-':
-                    try: item_id = int(limpar_valor(row[col_id_ads]))
-                    except: pass
-                
-                if not item_id and col_nome:
-                    nome_csv = str(row[col_nome]).lower().strip()
-                    for pid, pnome in produtos_db:
-                        if pnome in nome_csv or nome_csv in pnome:
-                            item_id = pid; break
+                if any(k in col.lower() for k in ['venda','receita','gmv','pedido','ticket','avg','reemb','cancel','devol','margem','custo','gasto','ads','despesa','cpc','ctr','conversao','preco','price','stock','estoque','roas','taxa']):
+                    valor = limpar_valor(row[col]) if pd.notna(row[col]) and str(row[col]).strip() not in {'-', ''} else 0.0
+                    if valor == 0: continue
+                    for d in range(dias_no_periodo):
+                        dia_registro = data_inicio + timedelta(days=d)
+                        add_metrica(item_id, dia_registro.date(), normalizar_nome_metric(col), valor / dias_no_periodo, arquivo_trafego.name)
                         
-                if not item_id: continue
-                
-                kw = str(row[col_kw]) if col_kw and pd.notna(row[col_kw]) and str(row[col_kw]).strip() != '-' else "Ampla/Shop"
-                imp = int(limpar_valor(row[col_imp])) if col_imp else 0
-                cli = int(limpar_valor(row[col_cli])) if col_cli else 0
-                custo = limpar_valor(row[col_custo]) if col_custo else 0.0
-                gmv = limpar_valor(row[col_gmv]) if col_gmv else 0.0
-                
-                for d in range(dias_no_periodo):
-                    dia_registro = data_inicio + timedelta(days=d)
-                    linhas_ads.append((item_id, kw, dia_registro.date(), int(imp/dias_no_periodo), int(cli/dias_no_periodo), custo/dias_no_periodo, gmv/dias_no_periodo))
+    except Exception as e:
+        return 0, f"Erro ao ler Tráfego Orgânico: {e}"
 
-                for col in df_a.columns:
-                    if col in {col_id_ads, col_nome, col_kw}:
-                        continue
-                    if any(k in col.lower() for k in ['venda','receita','gmv','pedido','ticket','avg','reemb','cancel','devol','margem','custo','gasto','ads','despesa','cpc','ctr','conversao','preco','price','stock','estoque','roas','taxa','impress','clique']):
-                        valor = limpar_valor(row[col]) if pd.notna(row[col]) and str(row[col]).strip() not in {'-', ''} else 0.0
-                        if valor == 0:
-                            continue
-                        for d in range(dias_no_periodo):
-                            dia_registro = data_inicio + timedelta(days=d)
-                            add_metrica(item_id, dia_registro.date(), normalizar_nome_metric(col), valor / dias_no_periodo, arquivo_ads.name)
-        except Exception as e:
-            return 0, f"Erro ao ler Arquivo de Ads: {e}"
+    # CONVERSÃO FINAL DO DICIONÁRIO PARA A LISTA DO POSTGRES
+    linhas_trafego = [
+        (k[0], k[1], v[0], v[1], v[2], round(v[3] / v[5], 2), v[4], "AGREGADA_PERIODO")
+        for k, v in dict_trafego.items()
+    ]
 
     metricas_importadas = [
         (chave[0], chave[1], chave[2], valor, chave[3])
         for chave, valor in dict_metricas.items()
     ]
 
-    total_linhas = len(linhas_trafego) + len(linhas_ads)
+    total_linhas = len(linhas_trafego)
     if total_linhas > 0:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # INSERÇÃO PROTEGIDA - Sem uso de DELETE para garantir a manutenção de dados históricos de arquivos parciais
                 if linhas_trafego:
                     psycopg2.extras.execute_values(cur, """
-                        INSERT INTO fato_trafego_diario (item_id, data, visitantes_unicos, taxa_rejeicao, adicoes_carrinho) 
+                        INSERT INTO fato_trafego_diario (item_id, data, impressoes, cliques, visitantes_unicos, taxa_rejeicao, adicoes_carrinho, granularidade_origem)
                         VALUES %s
                         ON CONFLICT (item_id, data) DO UPDATE SET
+                            impressoes = COALESCE(EXCLUDED.impressoes, fato_trafego_diario.impressoes),
+                            cliques = COALESCE(EXCLUDED.cliques, fato_trafego_diario.cliques),
                             visitantes_unicos = EXCLUDED.visitantes_unicos,
                             taxa_rejeicao = EXCLUDED.taxa_rejeicao,
-                            adicoes_carrinho = EXCLUDED.adicoes_carrinho;
+                            adicoes_carrinho = EXCLUDED.adicoes_carrinho,
+                            granularidade_origem = EXCLUDED.granularidade_origem;
                     """, linhas_trafego)
-                
-                if linhas_ads:
-                    psycopg2.extras.execute_values(cur, """
-                        INSERT INTO fato_ads_palavras_chave (item_id, keyword, data, impressoes, cliques, custo_total, gmv_gerado) 
-                        VALUES %s
-                        ON CONFLICT (item_id, keyword, data) DO UPDATE SET
-                            impressoes = EXCLUDED.impressoes,
-                            cliques = EXCLUDED.cliques,
-                            custo_total = EXCLUDED.custo_total,
-                            gmv_gerado = EXCLUDED.gmv_gerado;
-                    """, linhas_ads)
 
                 if metricas_importadas:
                     psycopg2.extras.execute_values(cur, """
@@ -325,6 +317,127 @@ def processar_arquivos_marketing(arquivo_trafego, arquivo_ads, data_inicio, data
             
     return total_linhas, "Sucesso"
 
+
+def processar_relatorio_ads_avancado(arquivo_ads, data_inicio, data_fim):
+    if not arquivo_ads:
+        return 0, "Nenhum arquivo de Ads fornecido."
+
+    dias_no_periodo = (data_fim - data_inicio).days + 1
+    if dias_no_periodo <= 0:
+        return 0, "Data inválida."
+
+    try:
+        df = carregar_dataframe_limpo(arquivo_ads)
+        if df.empty:
+            return 0, "Arquivo vazio ou cabeçalho não reconhecido."
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT item_id, LOWER(nome_atual) FROM dim_produtos")
+                produtos_db = cur.fetchall()
+
+        linhas_insercao = []
+        
+        # Mapeamento dinâmico de colunas baseado nas opções do seu PDF (Página 2)
+        cols = {c.lower().strip(): c for c in df.columns}
+        
+        # Identificadores
+        col_id = cols.get('id do produto') or cols.get('id do item')
+        col_nome = cols.get('nome do anúncio') or cols.get('nome do produto') or cols.get('produto')
+        
+        # Métricas Core
+        col_imp = next((cols[c] for c in cols if 'impress' in c), None)
+        col_cli = next((cols[c] for c in cols if 'clique' in c or 'click' in c), None)
+        col_inv = next((cols[c] for c in cols if 'investimento' in c or 'despesa' in c or 'custo' in c), None)
+        col_gmv = next((
+            cols[c] for c in cols
+            if (('vendas' in c and 'diretas' not in c and 'cupom' not in c) or 'gmv' in c or 'vgm' in c)
+        ), None)
+        
+        # Métricas Ricas (Adicionadas conforme o PDF)
+        col_cart = next((cols[c] for c in cols if 'carrinho' in c and 'taxa' not in c), None)
+        col_conv = next((cols[c] for c in cols if 'conversões' in c and 'custo' not in c and 'taxa' not in c), None)
+        col_itens = next((cols[c] for c in cols if 'itens vendidos' in c), None)
+        col_roas = next((cols[c] for c in cols if 'roas' in c and 'alvo' not in c and 'direto' not in c), None)
+        col_acos = next((cols[c] for c in cols if 'acos' in c and 'direto' not in c), None)
+
+        for _, row in df.iterrows():
+            item_id = None
+            nome_anuncio_raw = str(row[col_nome]) if col_nome else ""
+            
+            # Tenta pegar por ID numérico primeiro
+            if col_id and pd.notna(row[col_id]) and str(row[col_id]).strip() != '-':
+                try: item_id = int(limpar_valor(row[col_id]))
+                except: pass
+            
+            # Fallback: Tenta mapear pelo nome do produto
+            if not item_id and col_nome:
+                nome_csv_lower = nome_anuncio_raw.lower().strip()
+                for pid, pnome in produtos_db:
+                    if pnome in nome_csv_lower or nome_csv_lower in pnome:
+                        item_id = pid
+                        break
+                        
+            if not item_id:
+                continue # Pula se não conseguiu atrelar a um produto do seu BD
+
+            # Classificação Inteligente: É GMV Max ou Padrão?
+            tipo_campanha = 'PADRAO'
+            if 'gmv max' in nome_anuncio_raw.lower():
+                tipo_campanha = 'GMV_MAX'
+
+            # Extração Segura de Valores
+            imp_raw = limpar_valor_opcional(row[col_imp]) if col_imp else None
+            cli_raw = limpar_valor_opcional(row[col_cli]) if col_cli else None
+            imp = int(imp_raw) if imp_raw is not None else None
+            cli = int(cli_raw) if cli_raw is not None else None
+            inv = limpar_valor(row[col_inv]) if col_inv else 0.0
+            gmv = limpar_valor(row[col_gmv]) if col_gmv else 0.0
+            cart = int(limpar_valor(row[col_cart])) if col_cart else 0
+            conv = int(limpar_valor(row[col_conv])) if col_conv else 0
+            itens = int(limpar_valor(row[col_itens])) if col_itens else 0
+            roas = limpar_valor(row[col_roas]) if col_roas else 0.0
+            acos = limpar_valor(row[col_acos]) if col_acos else 0.0
+
+            # Distribuição ao longo dos dias (caso o lojista baixe agrupado)
+            # Nota: O ideal é o lojista baixar dia a dia, mas essa lógica previne distorções
+            for d in range(dias_no_periodo):
+                dia_registro = data_inicio + timedelta(days=d)
+                linhas_insercao.append((
+                    item_id, dia_registro.date(), tipo_campanha, nome_anuncio_raw[:250],
+                    distribuir_inteiro(imp, dias_no_periodo, d),
+                    distribuir_inteiro(cli, dias_no_periodo, d),
+                    distribuir_monetario(inv, dias_no_periodo, d), distribuir_monetario(gmv, dias_no_periodo, d),
+                    distribuir_inteiro(cart, dias_no_periodo, d), distribuir_inteiro(conv, dias_no_periodo, d), distribuir_inteiro(itens, dias_no_periodo, d),
+                    roas, acos, "AGREGADA_PERIODO"
+                ))
+
+        if linhas_insercao:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    psycopg2.extras.execute_values(cur, """
+                        INSERT INTO fato_ads_performance_produto 
+                        (item_id, data_registro, tipo_campanha, nome_anuncio, impressoes, cliques, investimento, vendas_gmv, adicoes_carrinho, conversoes, itens_vendidos, roas, acos, granularidade_origem)
+                        VALUES %s
+                        ON CONFLICT (item_id, data_registro, tipo_campanha) DO UPDATE SET
+                            impressoes = COALESCE(EXCLUDED.impressoes, fato_ads_performance_produto.impressoes),
+                            cliques = COALESCE(EXCLUDED.cliques, fato_ads_performance_produto.cliques),
+                            investimento = EXCLUDED.investimento,
+                            vendas_gmv = EXCLUDED.vendas_gmv,
+                            adicoes_carrinho = EXCLUDED.adicoes_carrinho,
+                            conversoes = EXCLUDED.conversoes,
+                            itens_vendidos = EXCLUDED.itens_vendidos,
+                            roas = EXCLUDED.roas,
+                            acos = EXCLUDED.acos,
+                            granularidade_origem = EXCLUDED.granularidade_origem;
+                    """, linhas_insercao)
+                conn.commit()
+
+        return len(linhas_insercao), "Sucesso"
+        
+    except Exception as e:
+        return 0, f"Erro crítico na análise do arquivo de Ads: {e}"
+
 # ==============================================================================
 # INTERFACE COM ABAS (TABS) E LINKS RÁPIDOS
 # ==============================================================================
@@ -335,52 +448,58 @@ O fluxo é compatível com CSVs e XLSX, e os arquivos são processados de forma 
 """)
 
 # Exibe o status atual do banco
-col_a, col_b = st.columns(2)
+col_a, col_b, col_c = st.columns(3)
 ultima_sync_pedidos = obter_ultima_sincronizacao('PEDIDOS')
-ultima_sync_trafego = obter_ultima_sincronizacao('TRAFEGO_ADS')
-with col_a: st.info(f"📦 Última extração API (Pedidos): **{ultima_sync_pedidos.strftime('%d/%m/%Y %H:%M') if ultima_sync_pedidos else 'Nunca'}**")
-with col_b: st.info(f"📈 Última extração CSV (Marketing): **{ultima_sync_trafego.strftime('%d/%m/%Y') if ultima_sync_trafego else 'Nunca'}**")
+ultima_sync_org = obter_ultima_sincronizacao('TRAFEGO_ORG')
+ultima_sync_ads = obter_ultima_sincronizacao('ADS_AVANCADO')
+
+with col_a: st.info(f"📦 Pedidos (API): **{ultima_sync_pedidos.strftime('%d/%m %H:%M') if ultima_sync_pedidos else 'Nunca'}**")
+with col_b: st.info(f"🌿 Tráfego Orgânico: **{ultima_sync_org.strftime('%d/%m/%Y') if ultima_sync_org else 'Nunca'}**")
+with col_c: st.info(f"🎯 Shopee Ads: **{ultima_sync_ads.strftime('%d/%m/%Y') if ultima_sync_ads else 'Nunca'}**")
 
 st.divider()
 
 # Criação das Abas
 arquivo_global = None
-aba_principal, aba_global = st.tabs(["⚙️ Motor Principal (API + Produtos)", "📈 Visão Geral da Loja (Dashboard Global)"])
+aba_principal, aba_ads, aba_global = st.tabs([
+    "⚙️ Operação & Orgânico (API)", 
+    "📢 Shopee Ads Avançado", 
+    "📈 Visão Geral da Loja"
+])
 
 with aba_principal:
-    st.markdown("### Atualização de Marketing (Itens Específicos)")
+    st.markdown("### 📦 Operação Diária & Performance Orgânica")
     st.markdown("""
-    O Cérebro IA cruza os custos de Ads, tráfego orgânico, vendas e estoque para otimizar a lucratividade.  
-    Você pode importar arquivos CSV/XLSX de tráfego orgânico, Ads e performance, desde que contenham o identificador do item/produto.
+    Nesta aba, sincronizamos os pedidos da API e importamos a planilha padrão de **Performance do Produto**. 
+    O sistema foca em capturar suas **Visitas, Adições ao Carrinho e Taxa de Rejeição** para entender a saúde orgânica da loja.
     """)
-    st.info("📌 Arquivos esperados: CSV/XLSX com coluna de item_id ou nome do produto e métricas de tráfego/ads. O sistema tenta reconhecer automaticamente os nomes das colunas mais comuns.")
+    
+    st.info("""
+    🛡️ **Segurança de Dados (Idempotência):** Você pode reenviar planilhas com datas repetidas ou sobrepostas. O sistema é inteligente: ele apenas atualiza os registros existentes com as informações mais recentes.
+    """)
 
     hoje = datetime.now()
-    data_sugerida_inicio = ultima_sync_trafego if ultima_sync_trafego else (hoje - timedelta(days=30))
+    data_sugerida_inicio = ultima_sync_org if ultima_sync_org else (hoje - timedelta(days=30))
     
-    periodo_selecionado = st.date_input("📅 Qual foi o período selecionado nos painéis da Shopee?", 
+    periodo_selecionado = st.date_input("📅 Qual foi o período selecionado para exportar a planilha na Shopee?", 
                                         value=(data_sugerida_inicio.date(), hoje.date()), 
                                         max_value=hoje.date())
 
-    col_trafego, col_ads = st.columns(2)
-    with col_trafego:
-        st.markdown("**1. Orgânico (Performance de produtos / tráfego)")
-        st.link_button("🔗 Ir para Business Insights", "https://seller.shopee.com.br/datacenter/product/performance", use_container_width=True)
-        st.caption("Use a aba de performance do produto e exporte os dados de visitas, carrinho e rejeição.")
-        arquivo_trafego = st.file_uploader("📂 Arraste o CSV/XLSX de Performance Orgânica", type=["csv", "xlsx"], key="upload_trafego")
-        
-    with col_ads:
-        st.markdown("**2. Pago (Ads e palavras-chave)**")
-        st.link_button("🔗 Ir para Shopee Ads", "https://seller.shopee.com.br/portal/marketing/pas/index", use_container_width=True)
-        st.caption("Use os dados de campanha, palavra-chave, impressões, cliques, custo e GMV.")
-        arquivo_ads = st.file_uploader("📂 Arraste o CSV/XLSX de Ads", type=["csv", "xlsx"], key="upload_ads")
-
-    if not arquivo_trafego and not arquivo_ads:
-        st.warning("⚠️ Insira pelo menos uma das planilhas para atualizar as métricas do seu negócio. O processamento é opcional para o fluxo de API, mas melhora bastante a análise da IA.")
+    st.markdown("#### 📥 Como exportar a planilha de Performance correta:")
+    st.markdown("""
+    1. Acesse o painel pelo botão abaixo. Ele abrirá diretamente a aba **Informações Gerenciais > Produto > Performance do Produto**.
+    2. No filtro de calendário (Período dos Dados) no topo, selecione o mesmo período que você escolheu acima.
+    3. Na seção "Desempenho do Produto" (lista com os itens), clique no botão azul **Exportar**.
+    4. Suba o arquivo Excel/CSV gerado aqui.
+    """)
+    
+    st.link_button("🔗 1. Abrir Business Insights > Desempenho do Produto", "https://seller.shopee.com.br/datacenter/product/performance", use_container_width=True)
+    
+    arquivo_trafego = st.file_uploader("📂 2. Arraste o arquivo padrão de Performance do Produto aqui", type=["csv", "xlsx"], key="upload_trafego")
 
     datas_validas = isinstance(periodo_selecionado, tuple) and len(periodo_selecionado) == 2
 
-    if st.button("🚀 INICIAR SINCRONIZAÇÃO COMPLETA", type="primary", use_container_width=True, disabled=not (arquivo_trafego or arquivo_ads) or not datas_validas):
+    if st.button("🚀 INICIAR SINCRONIZAÇÃO COMPLETA (API + Planilha)", type="primary", use_container_width=True, disabled=not datas_validas):
         
         agora = datetime.now()
         dt_inicio_csv = datetime.combine(periodo_selecionado[0], datetime.min.time())
@@ -394,7 +513,6 @@ with aba_principal:
                 status.update(label="Falha na API de catálogo.", state="error"); st.stop()
 
         with st.status("2. Conectando API: Pedidos e Lucro (Escrow)...", expanded=True) as status:
-            # CORREÇÃO: Lookback Window (Sobreposição) de 4 dias para capturar alterações de status em pedidos antigos (ex: Cancelamentos tardios)
             if ultima_sync_pedidos:
                 dt_inicio_pedidos = ultima_sync_pedidos - timedelta(days=4) 
             else:
@@ -411,7 +529,6 @@ with aba_principal:
                     res_ped = sincronizar_pedidos(inicio_bloco, fim_bloco)
                     if res_ped["status"] == "sucesso":
                         total_pedidos += res_ped["registros"]
-                        # Registra o sucesso usando a data original de 'agora' para não quebrar a lógica de auditoria do sys_controle_sync
                         if i == len(blocos) - 1:
                              registrar_sincronizacao('PEDIDOS', ultima_sync_pedidos or dt_inicio_pedidos, agora, 'SUCESSO', total_pedidos)
                     else:
@@ -421,45 +538,94 @@ with aba_principal:
                     
                 status.update(label=f"Motor Financeiro atualizado! (Registros consolidados)", state="complete")
 
-        with st.status(f"3. Processando Data Warehouse ({dt_inicio_csv.strftime('%d/%m')} a {dt_fim_csv.strftime('%d/%m')})...", expanded=True) as status:
-            linhas, msg = processar_arquivos_marketing(arquivo_trafego, arquivo_ads, dt_inicio_csv, dt_fim_csv)
-            
-            if msg == "Sucesso":
-                registrar_sincronizacao('TRAFEGO_ADS', dt_inicio_csv, dt_fim_csv, 'SUCESSO', linhas)
-                status.update(label=f"Métricas Inteligentes Consolidadas! ({linhas} registros amarrados)", state="complete")
-            else:
-                status.update(label=f"Falha no CSV: {msg}", state="error"); st.stop()
-
-        if arquivo_global is not None:
-            with st.status("4. Importando visão geral da loja...", expanded=True) as status_global:
-                linhas_global, msg_global = processar_arquivo_global(arquivo_global)
-                if msg_global == "Sucesso":
-                    status_global.update(label=f"Visão geral importada! ({linhas_global} métricas registradas)", state="complete")
+        if arquivo_trafego:
+            with st.status(f"3. Processando Tráfego Orgânico ({dt_inicio_csv.strftime('%d/%m')} a {dt_fim_csv.strftime('%d/%m')})...", expanded=True) as status:
+                linhas, msg = processar_trafego_organico(arquivo_trafego, dt_inicio_csv, dt_fim_csv)
+                
+                if msg == "Sucesso":
+                    registrar_sincronizacao('TRAFEGO_ORG', dt_inicio_csv, dt_fim_csv, 'SUCESSO', linhas)
+                    status.update(label=f"Tráfego Consolidado! ({linhas} registros processados e normalizados)", state="complete")
                 else:
-                    status_global.update(label=f"Falha na visão geral: {msg_global}", state="warning")
-                
+                    status.update(label=f"Falha no CSV: {msg}", state="error"); st.stop()
+
         st.balloons()
-        st.success("🎉 Processo Finalizado! O Cérebro IA já pode analisar ROAS, conversão, estoque, preço e performance de cada variação com mais contexto.")
-        
-with aba_global:
-    st.markdown("### Saúde Geral da Loja (Visão Macros)")
+        st.success("🎉 Sincronização API finalizada! Sua base operacional e financeira está atualizada.")
+
+
+with aba_ads:
+    st.markdown("### 🎯 Inteligência de Shopee Ads (GMV Max & Padrão)")
     st.markdown("""
-    Importe o arquivo de 'Produto Pago' para alimentar o Cérebro IA com a visão macro da loja.
-    O sistema processará o arquivo e atualizará as métricas globais no Data Warehouse.
+    Esta sessão alimenta o Data Warehouse exclusivamente com dados de campanhas pagas. O motor identifica automaticamente a diferença entre campanhas de **Inteligência Artificial (GMV Max)** e campanhas tradicionais por Palavra-Chave.
     """)
-    st.link_button("🔗 Ir para Visão Geral", "https://seller.shopee.com.br/datacenter/dashboard", use_container_width=True)
     
-    arquivo_global = st.file_uploader("📂 Arraste a planilha 'Produto Pago' (CSV/XLSX)", type=["csv", "xlsx"], key="upload_global")
+    st.info("🛡️ **Idempotente:** Pode exportar os últimos 30 dias todos os dias. O banco de dados apenas atualizará as linhas que sofreram alteração de ontem para hoje, sem duplicidade.")
     
-    # --- BOTÃO E FEEDBACK ADICIONADOS ---
+    st.markdown("#### 📥 Passo a Passo para Exportação Perfeita:")
+    st.markdown("""
+    1. Abra a Central do Vendedor e vá em **Central de Marketing** > **Shopee Ads**.
+    2. Role a página até encontrar a tabela **Todos os Anúncios de Produtos**.
+    3. Selecione o período desejado no calendário (ex: Últimos 30 dias).
+    4. ⚠️ **Atenção:** Clique no botão de métricas (Diagnóstico) e marque **TODAS** as caixas disponíveis (Investimento, Vendas, ROAS, Conversões, Adição ao carrinho, ACOS, etc).
+    5. Clique em **Exportar dados** e selecione a primeira opção: **"Dados Gerais de Anúncios"**. Suba o arquivo gerado aqui.
+    """)
+    
+    st.link_button("🔗 1. Abrir Painel do Shopee Ads", "https://seller.shopee.com.br/portal/marketing/pas/index", use_container_width=True)
+    
+    col_data_ads, col_upload_ads = st.columns([1, 2])
+    with col_data_ads:
+        hoje = datetime.now()
+        data_sugerida_ads = ultima_sync_ads if ultima_sync_ads else (hoje - timedelta(days=7))
+        periodo_ads = st.date_input("📅 Qual o período selecionado no Shopee Ads?", 
+                                     value=(data_sugerida_ads.date(), hoje.date()), 
+                                     max_value=hoje.date(),
+                                     key="data_input_ads")
+                                     
+    with col_upload_ads:
+        arquivo_ads_avancado = st.file_uploader("📂 2. Arraste o arquivo consolidado de Shopee Ads", type=["csv", "xlsx"], key="upload_ads_avancado")
+
+    datas_ads_validas = isinstance(periodo_ads, tuple) and len(periodo_ads) == 2
+
+    if st.button("🧠 PROCESSAR INTELIGÊNCIA DE ADS", type="primary", use_container_width=True, disabled=not arquivo_ads_avancado or not datas_ads_validas):
+        dt_inicio_ads = datetime.combine(periodo_ads[0], datetime.min.time())
+        dt_fim_ads = datetime.combine(periodo_ads[1], datetime.max.time())
+        
+        with st.status(f"Mapeando campanhas e dividindo métricas ({dt_inicio_ads.strftime('%d/%m')} a {dt_fim_ads.strftime('%d/%m')})...", expanded=True) as status_ads:
+            linhas_ads, msg_ads = processar_relatorio_ads_avancado(arquivo_ads_avancado, dt_inicio_ads, dt_fim_ads)
+            
+            if msg_ads == "Sucesso":
+                registrar_sincronizacao('ADS_AVANCADO', dt_inicio_ads, dt_fim_ads, 'SUCESSO', linhas_ads)
+                status_ads.update(label=f"Análise Concluída! Foram injetados ou atualizados {linhas_ads} registros de inteligência.", state="complete")
+                st.balloons()
+            else:
+                status_ads.update(label=f"Falha ao ler o formato: {msg_ads}", state="error")
+
+with aba_global:
+    st.markdown("### 📈 Saúde Geral da Loja (Dashboard Macro)")
+    st.markdown("""
+    Esta sessão captura as métricas totais da sua loja para comparar o faturamento geral com os custos e o tráfego total.
+    """)
+    st.info("🛡️ **Idempotente:** Se subir os mesmos dias, o Data Warehouse entende e apenas subscreve com os dados mais consolidados.")
+
+    st.markdown("#### 📥 Como extrair a Visão Geral:")
+    st.markdown("""
+    1. Entre em **Informações Gerenciais** usando o botão abaixo.
+    2. No menu lateral, clique em **Painel**.
+    3. Logo abaixo das abas, garanta que você está na aba primária chamada **Visão Geral** (Overview).
+    4. Selecione o período no calendário e clique em **Exportar**.
+    """)
+
+    st.link_button("🔗 1. Abrir Painel de Visão Geral", "https://seller.shopee.com.br/datacenter/dashboard", use_container_width=True)
+    
+    arquivo_global = st.file_uploader("📂 2. Arraste a planilha de Visão Geral exportada", type=["csv", "xlsx"], key="upload_global")
+    
     if arquivo_global:
-        st.info("💡 Arquivo pronto para processamento.")
+        st.info("💡 Arquivo carregado na memória, pronto para injeção.")
         if st.button("🚀 PROCESSAR VISÃO GERAL DA LOJA", type="primary", use_container_width=True):
-            with st.status("Processando métricas globais...", expanded=True) as status_global:
+            with st.status("Consolidando métricas globais e alimentando o DW...", expanded=True) as status_global:
                 linhas_global, msg_global = processar_arquivo_global(arquivo_global)
                 
                 if msg_global == "Sucesso":
-                    status_global.update(label=f"Visão geral importada! ({linhas_global} métricas registradas)", state="complete")
+                    status_global.update(label=f"Visão geral importada com sucesso! ({linhas_global} métricas registradas/atualizadas)", state="complete")
                     st.balloons()
                 else:
-                    status_global.update(label=f"Falha na visão geral: {msg_global}", state="error")
+                    status_global.update(label=f"Falha na importação da visão geral: {msg_global}", state="error")

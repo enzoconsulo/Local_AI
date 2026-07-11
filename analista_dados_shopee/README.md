@@ -42,7 +42,7 @@ O fluxo principal é este:
 - PostgreSQL via Docker Compose
 - Chaves da Shopee Open API v2
 - Chave da Groq para o chat rápido
-- Chave da RunPod para o Cérebro IA pesado
+- Chave da OpenAI para o Cérebro IA
 
 ---
 
@@ -69,9 +69,11 @@ SHOPEE_SHOP_ID=seu_shop_id
 SHOPEE_REFRESH_TOKEN=seu_token_de_acesso
 
 GROQ_API_KEY=sua_chave_groq
-RUNPOD_API_KEY=sua_chave_runpod
-ENDPOINT_ID_RUNPOD_DADOS=id_do_endpoint
-ENDPOINT_ID_RUNPOD_vLLM=id_do_endpoint_opcional
+OPENAI_API_KEY=sua_chave_openai
+OPENAI_MODEL_7D=gpt-5.4
+OPENAI_MODEL_30D=gpt-5.5
+OPENAI_REASONING_7D=low
+OPENAI_REASONING_30D=medium
 ```
 
 ### 2) Subir o banco
@@ -236,7 +238,7 @@ analista_dados_shopee/
 ## ✅ Checklist de configuração
 
 - Docker rodando e porta do Postgres livre.
-- Arquivo CHAVES_DADOS.env preenchido com as chaves da Shopee, Groq e RunPod.
+- Arquivo CHAVES_DADOS.env preenchido com as chaves da Shopee, Groq e OpenAI.
 - Dependências instaladas com pip install -r requirements.txt.
 - Banco validado com python test_db.py.
 - Arquivos importados com colunas claras e período consistente.
@@ -315,8 +317,8 @@ Esse script cria o CHAVES_DADOS.env a partir do exemplo, sobe o Docker, instala 
 - DB_HOST / DB_PORT
 - SHOPEE_PARTNER_ID / SHOPEE_PARTNER_KEY / SHOPEE_SHOP_ID / SHOPEE_REFRESH_TOKEN
 - GROQ_API_KEY
-- RUNPOD_API_KEY
-- ENDPOINT_ID_RUNPOD_DADOS
+- OPENAI_API_KEY
+- OPENAI_MODEL_7D / OPENAI_MODEL_30D
 
 ## 📥 Como importar arquivos CSV/XLSX
 
@@ -341,9 +343,10 @@ Desenvolvido para transformar dados de e-commerce em decisões inteligentes e au
 | `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD` | ⬜ só se for usar o pgAdmin | Login do painel visual em `localhost:5050`. |
 | `SHOPEE_PARTNER_ID/KEY`, `SHOPEE_SHOP_ID`, `SHOPEE_REFRESH_TOKEN` | ✅ para sincronizar | Credenciais da Shopee Open API v2, usadas em `utils/shopee_core.py`. |
 | `GROQ_API_KEY` | ✅ | Chave do Groq, usada pelo `chat-rapido`. |
-| `RUNPOD_API_KEY` | ✅ para o Cérebro IA | Chave da RunPod. |
-| `ENDPOINT_ID_RUNPOD_DADOS` | ✅ para o Cérebro IA | ID do endpoint Qwen 2.5 32B usado pela página 3. |
-| `ENDPOINT_ID_RUNPOD_vLLM` | ⬜ opcional | Reservado para outro modelo/app que compartilhe o mesmo `llm.py`; não é usado pelas páginas deste projeto. |
+| `OPENAI_API_KEY` | ✅ para o Cérebro IA | Chave da OpenAI usada diretamente pela página 3. |
+| `OPENAI_MODEL_7D` | ✅ | Modelo econômico e rápido para análise operacional; padrão `gpt-5.4`. |
+| `OPENAI_MODEL_30D` | ✅ | Modelo de maior profundidade para análise estratégica; padrão `gpt-5.5`. |
+| `OPENAI_REASONING_7D` / `OPENAI_REASONING_30D` | ⬜ | Esforço de raciocínio (`low`, `medium` ou `high`) para controlar custo e profundidade. |
 
 ---
 
@@ -354,37 +357,19 @@ Revisando os arquivos do projeto, encontrei os pontos abaixo que vale corrigir o
 1. **Docker Compose não lê variáveis de `CHAVES_DADOS.env` para o próprio `docker-compose.yml`.**
    O `env_file:` dentro de cada serviço só injeta variáveis **dentro do container** — mas o `${DB_PORT}`, `${TZ}`, `${POSTGRES_USER}` e `${POSTGRES_DB}` usados em `ports:`, `environment:` e `healthcheck:` são substituídos pelo *próprio Compose*, que por padrão só lê um arquivo chamado exatamente `.env`. Como o projeto usa `CHAVES_DADOS.env`, essas substituições ficam vazias.
    **Solução:** sempre rodar `docker compose --env-file CHAVES_DADOS.env <comando>` (já aplicado no Guia Rápido acima).
-2. **`data_app.py` procura o `llm.py` uma pasta acima do que deveria.**
-   `data_app.py` calcula `ROOT_DIR = CURRENT_DIR.parent`, assumindo que ele mesmo vive uma pasta abaixo da raiz. Mas `test_db.py`, as páginas em `pages/` e os scripts em `utils/`/`workers/` todos assumem uma estrutura **plana**, com `data_app.py`, `llm.py` e `CHAVES_DADOS.env` na mesma pasta raiz.
-   **Solução:** mantenha `data_app.py` e `llm.py` na mesma pasta (estrutura sugerida na árvore acima) e troque, em `data_app.py`:
+2. **A chave da OpenAI precisa estar disponível para novas análises.**
+   A aplicação não inicia proxy local nem GPU. Configure `OPENAI_API_KEY` no `CHAVES_DADOS.env`; quando o cache semântico não tiver um resultado compatível, o Cérebro chamará a API diretamente.
 
-```python
-ROOT_DIR = CURRENT_DIR.parent
-```
-
-por:
-
-```python
-ROOT_DIR = CURRENT_DIR
-```
-
-3. **O arquivo `llm.py` ainda não existe — só um rascunho pendente de mesclagem.**
-   O arquivo `mesclar_esse_arquivo_com_o_llmpy.txt` (o próprio nome já diz: "mesclar esse arquivo com o llm.py") é a base para o roteador de IA, mas antes de salvá-lo como `llm.py` na raiz, ajuste duas coisas para alinhar com o restante do projeto:
-
-* Ele lê um arquivo chamado **`CHAVES.env`** — troque para **`CHAVES_DADOS.env`**.
-* Ele exige as variáveis **`GROQ`** e **`RUNPOD_KEY`** — troque para **`GROQ_API_KEY`** e **`RUNPOD_API_KEY`**, que são os nomes usados em `CHAVES_DADOS.env` e em todo o resto do código.
-* O arquivo `to_add_MAIN_CHAVES.txt` é só um lembrete avulso (`ENDPOINT_ID_RUNPOD_DADOS=...`) — essa variável já está no modelo de `CHAVES_DADOS.env` acima, então esse `.txt` pode ser apagado.
-
-4. **Falta a dependência `tabulate` no `requirements.txt`.**
+3. **Falta a dependência `tabulate` no `requirements.txt`.**
    A página de Chat (`4_💬_Chat_Assistente.py`) usa `df_resultado.to_markdown()`, que exige o pacote `tabulate` — ele não está listado em `requirements.txt` e a página vai quebrar na primeira pergunta que retornar uma tabela.
    **Solução:** adicione `tabulate` ao `requirements.txt` (ou instale manualmente, como já indicado no Passo 2).
-5. **Contagem de tabelas do `test_db.py` estava desatualizada.**
+4. **Contagem de tabelas do `test_db.py` estava desatualizada.**
    O README anterior dizia "13 tabelas". Depois das ==migra==tions `02` (que cria `fato_promocoes_ativas`) e `03` (que cria a view `vw_saude_produto`), o total correto é **14 tabelas + 1 view = 15 itens**, já corrigido no Guia Rápido acima.
-6. **Nome do modelo Groq no README anterior estava errado.**
+5. **Nome do modelo Groq no README anterior estava errado.**
    O README antigo chamava o modelo leve de `chat-leve` — o nome real configurado e usado pelo código (em `4_💬_Chat_Assistente.py` e no roteador) é **`chat-rapido`**, já corrigido acima.
-7. **`uf_destino` pode não estar recebendo a sigla do estado.**
+6. **`uf_destino` pode não estar recebendo a sigla do estado.**
    Em `sync_pedidos.py`, `uf_destino` é preenchido com `order.get("region", "BR")`. O campo `region` da Shopee normalmente devolve o **código do país** (`BR`), não a sigla do estado (`SP`, `RJ`...). Se quiser granularidade por estado, verifique no payload de `get_order_detail` se existe um campo como `recipient_address.state` e ajuste a extração.
-8. **`DATABASE_URL`, `LOG_LEVEL` e `STREAMLIT_SERVER_PORT` no `CHAVES_DADOS.env` não são lidos por nenhum script atualmente.** Não fazem mal nenhum mantidos ali, só não têm efeito — `STREAMLIT_SERVER_PORT`, em especial, só funcionaria se fosse exportada no terminal antes do `streamlit run`, e não apenas guardada no `.env`.
+7. **`DATABASE_URL`, `LOG_LEVEL` e `STREAMLIT_SERVER_PORT` no `CHAVES_DADOS.env` não são lidos por nenhum script atualmente.** Não fazem mal nenhum mantidos ali, só não têm efeito — `STREAMLIT_SERVER_PORT`, em especial, só funcionaria se fosse exportada no terminal antes do `streamlit run`, e não apenas guardada no `.env`.
 
 ---
 
@@ -393,7 +378,7 @@ ROOT_DIR = CURRENT_DIR
 | Sintoma                                                       | Causa provável                                                                                                                                                            |
 | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `docker compose ps` nunca fica `healthy`                  | Porta`DB_PORT` já em uso por outro Postgres local — troque para `5433` ou outra porta livre.                                                                         |
-| `Falha no Boot da IA (Timeout)` no Streamlit                | `llm.py` não existe ainda na raiz, ou as chaves do Groq/RunPod estão erradas/vazias — veja os itens 2 e 3 acima.                                                      |
+| `OPENAI_API_KEY não foi configurada` no Cérebro             | Adicione uma chave válida da OpenAI ao `CHAVES_DADOS.env` e reinicie o Streamlit.                                                                                         |
 | Erro`ModuleNotFoundError: tabulate` no Chat                 | Falta instalar o pacote — veja o item 4 acima.                                                                                                                            |
 | `Falha ao conectar no PostgreSQL` nas páginas do Streamlit | Confirme que o Docker está rodando (`docker compose ps`) e que `DB_PORT`/`DB_HOST` no `CHAVES_DADOS.env` batem com o que está exposto no `docker-compose.yml`. |
 
