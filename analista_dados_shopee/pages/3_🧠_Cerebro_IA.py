@@ -18,6 +18,7 @@ import requests
 from loguru import logger
 from datetime import datetime
 from requests.adapters import HTTPAdapter
+from utils.padronizar_texto import padronizar_texto
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
@@ -29,6 +30,7 @@ from utils.shopee_core import (
     atualizar_preco_shopee,
     criar_promocao_shopee,
     criar_combo_shopee,
+    verificar_status_promocao,
 )
 from utils.db_pool import get_connection
 
@@ -627,9 +629,11 @@ def gerar_dossie_produtos_com_memoria():
             "TRAFEGO_taxa_conversao_30d_perc": taxa_conversao_30d,
             "taxa_abandono_carrinho_30d_perc": taxa_abandono_30d,
             "ADS_gasto_7d":   round(gasto_ads, 2),
+            "ADS_gasto_7d_total_anuncio": float(r["gasto_ads_7d"] or 0),
             "COBERTURA_dias_ads_7d": int(r["dias_ads_7d"] or 0),
             "ADS_roas_atual": roas_atual,
             "ADS_gasto_30d": round(gasto_ads_30d, 2),
+            "ADS_gasto_30d_total_anuncio": float(r["gasto_ads_30d"] or 0),
             "COBERTURA_dias_ads_30d": int(r["dias_ads_30d"] or 0),
             "ADS_retorno_liquido_30d": retorno_ads_30d,
             "PEDIDOS_7d": pedidos_7d,
@@ -2390,18 +2394,34 @@ st.markdown("Auditoria profunda de **Finanças, Marketing e Fábrica** com predi
 if "analises_preditivas" not in st.session_state:
     st.session_state.analises_preditivas = []
     st.session_state.horizonte_auditoria = None
-    for cache, horizonte in ((CACHE_AUDITORIA_7D, "7d"), (CACHE_AUDITORIA_30D, "30d"), (CACHE_AUDITORIA, None)):
-        if not cache.exists():
-            continue
+    
+    # 1. Definimos os caches e seus horizontes
+    caches_disponiveis = [
+        (CACHE_AUDITORIA_7D, "7d"),
+        (CACHE_AUDITORIA_30D, "30d"),
+        (CACHE_AUDITORIA, None)
+    ]
+    
+    # 2. Filtramos apenas os que existem fisicamente no disco
+    caches_existentes = [c for c in caches_disponiveis if c[0].exists()]
+    
+    # 3. Ordenamos do mais recente (modificado há menos tempo) para o mais antigo
+    caches_ordenados = sorted(caches_existentes, key=lambda x: os.path.getmtime(x[0]), reverse=True)
+
+    for cache, horizonte in caches_ordenados:
         try:
             with open(cache, "r", encoding="utf-8") as f:
                 st.session_state.analises_preditivas = json.load(f)
+            
             st.session_state.horizonte_auditoria = horizonte or (
                 st.session_state.analises_preditivas[0].get("horizonte_auditoria")
                 if st.session_state.analises_preditivas else None
             )
+            
             if st.session_state.analises_preditivas:
                 st.session_state.id_execucao_analitica = st.session_state.analises_preditivas[0].get("id_execucao_analitica")
+            
+            # Interrompe no primeiro (que é o mais recente)
             break
         except Exception:
             continue
@@ -2519,40 +2539,60 @@ aba_dashboard, aba_atuador, aba_previsao, aba_dossies = st.tabs([
 # ==============================================================================
 with aba_dashboard:
     st.markdown('<div class="ia-note"><span class="ia-label">Leitura responsável</span><br>Fatos observados (7 dias) são exibidos com contexto de 30 dias. A IA formula hipóteses de ação; a classificação de evidência indica quando executar, testar em pequena escala ou somente monitorar.</div>', unsafe_allow_html=True)
-    total_lucro_visivel = _serie_numerica(df_analises, 'lucro_liquido_real_7d').sum()
-    total_vendas_visivel = _serie_numerica(df_analises, 'vendas_7d_reais').sum()
-    total_gasto_visivel = _serie_numerica(df_analises, 'ADS_gasto_7d').sum()
-    total_visitas_visivel = _serie_numerica(df_analises, 'visitas_7d').sum()
-    total_carrinhos_visivel = _serie_numerica(df_analises, 'carrinhos_7d').sum()
-    total_pedidos_visivel = _serie_numerica(df_analises, 'PEDIDOS_7d').sum()
-    total_cancelamentos_visivel = _serie_numerica(df_analises, 'cancelamentos_7d').sum()
-    conversao_loja = (total_vendas_visivel / total_visitas_visivel * 100) if total_visitas_visivel else 0
-    abandono_loja = ((total_carrinhos_visivel - total_vendas_visivel) / total_carrinhos_visivel * 100) if total_carrinhos_visivel else 0
-    cancelamento_loja = (total_cancelamentos_visivel / total_pedidos_visivel * 100) if total_pedidos_visivel else 0
-    retorno_ads = (total_lucro_visivel / total_gasto_visivel) if total_gasto_visivel else None
-    evidencias_resumo = df_analises['confianca'].value_counts()
+    
+    # 1. Recuperação dos Dados Globais (Sem sofrer cortes dos filtros do ecrã)
+    analises_globais = st.session_state.analises_preditivas
+    df_globais = pd.DataFrame(analises_globais)
+    if 'dados_atuais' in df_globais.columns:
+        dados_globais_expandidos = df_globais['dados_atuais'].apply(lambda x: pd.Series(x if isinstance(x, dict) else {}))
+        df_globais = pd.concat([df_globais.drop(columns=['dados_atuais']), dados_globais_expandidos], axis=1)
+        df_globais = df_globais.loc[:, ~df_globais.columns.duplicated(keep='last')]
+        
+    # 2. Cálculos GLOBAIS da Loja (Remove duplicados de variação para somar Ads do anúncio pai corretamente)
+    if 'item_id' in df_globais.columns and 'ADS_gasto_7d_total_anuncio' in df_globais.columns:
+        df_unicos_por_anuncio = df_globais.drop_duplicates(subset=['item_id'])
+        total_gasto_loja = _serie_numerica(df_unicos_por_anuncio, 'ADS_gasto_7d_total_anuncio').sum()
+    else:
+        total_gasto_loja = _serie_numerica(df_globais, 'ADS_gasto_7d').sum()
+
+    total_lucro_loja = _serie_numerica(df_globais, 'lucro_liquido_real_7d').sum()
+    total_vendas_loja = _serie_numerica(df_globais, 'vendas_7d_reais').sum()
+    total_visitas_loja = _serie_numerica(df_globais, 'visitas_7d').sum()
+    total_carrinhos_loja = _serie_numerica(df_globais, 'carrinhos_7d').sum()
+    total_pedidos_loja = _serie_numerica(df_globais, 'PEDIDOS_7d').sum()
+    total_cancelamentos_loja = _serie_numerica(df_globais, 'cancelamentos_7d').sum()
+    
+    conversao_loja = (total_vendas_loja / total_visitas_loja * 100) if total_visitas_loja else 0
+    abandono_loja = ((total_carrinhos_loja - total_vendas_loja) / total_carrinhos_loja * 100) if total_carrinhos_loja else 0
+    cancelamento_loja = (total_cancelamentos_loja / total_pedidos_loja * 100) if total_pedidos_loja else 0
+    
+    st.subheader("🌐 Visão Global da Loja (Últimos 7 dias)")
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Resultado operacional", f"R$ {total_lucro_visivel:,.2f}", help="Receita líquida registrada menos custo de fabricação e ads; não é lucro contábil completo.")
-    k2.metric("Conversão ponderada", f"{conversao_loja:.2f}%" if total_visitas_visivel else "Sem dado", help="Unidades vendidas ÷ visitas. Evita a distorção de fazer média simples entre SKUs.")
-    k3.metric("Retorno operacional / ads", "Sem ads" if retorno_ads is None else f"R$ {retorno_ads:.2f}", help="Resultado operacional dividido pelo gasto em ads. Não equivale a ROAS de receita bruta.")
-    k4.metric("Cancelamento ponderado", f"{cancelamento_loja:.1f}%" if total_pedidos_visivel else "Sem dado")
-    st.caption(f"Evidência dos {len(df_analises)} SKUs filtrados: {evidencias_resumo.get('Alta', 0)} alta, {evidencias_resumo.get('Moderada', 0)} moderada, {evidencias_resumo.get('Baixa', 0)} baixa. Abandono de carrinho observado: {abandono_loja:.1f}%" if total_carrinhos_visivel else f"Evidência dos {len(df_analises)} SKUs filtrados: {evidencias_resumo.get('Alta', 0)} alta, {evidencias_resumo.get('Moderada', 0)} moderada, {evidencias_resumo.get('Baixa', 0)} baixa.")
+    k1.metric("Resultado Operacional (Loja)", f"R$ {total_lucro_loja:,.2f}", help="Soma do resultado de todos os SKUs processados na auditoria, não apenas os visíveis.")
+    k2.metric("Conversão Global", f"{conversao_loja:.2f}%" if total_visitas_loja else "Sem dado")
+    k3.metric("Gasto Total em Ads", f"R$ {total_gasto_loja:,.2f}", help="Soma bruta do gasto dos anúncios originais na Shopee, corrigindo rateios fracionados por SKU.")
+    k4.metric("Cancelamento Global", f"{cancelamento_loja:.1f}%" if total_pedidos_loja else "Sem dado")
+    
     st.divider()
-    st.subheader("📊 Panorama Executivo (Últimos 7 dias)")
-
-    total_lucro    = sum(a.get("dados_atuais", {}).get("lucro_liquido_real_7d", 0) for a in analises)
-    total_vendas   = sum(a.get("dados_atuais", {}).get("vendas_7d_reais", 0) for a in analises)
-    total_gasto    = sum(a.get("dados_atuais", {}).get("ADS_gasto_7d", 0) for a in analises)
-    produtos_criticos = sum(1 for a in analises if a.get("score_urgencia", 0) >= 40)
-    dias_min_estoque  = min((a.get("dias_estoque", 999) for a in analises if a.get("dias_estoque", 999) < 999), default=999)
-
+    
+    # 3. Cálculos do Recorte Filtrado (Os SKUs que estão a ser exibidos neste momento)
+    st.subheader("🎯 Recorte Operacional (Métricas dos SKUs filtrados)")
+    lucro_visivel = _serie_numerica(df_analises, 'lucro_liquido_real_7d').sum()
+    vendas_visiveis = _serie_numerica(df_analises, 'vendas_7d_reais').sum()
+    gasto_visivel = _serie_numerica(df_analises, 'ADS_gasto_7d').sum()
+    produtos_criticos = sum(1 for a in analises_globais if a.get("score_urgencia", 0) >= 40)
+    dias_min_estoque  = min((a.get("dias_estoque", 999) for a in analises_globais if a.get("dias_estoque", 999) < 999), default=999)
+    
     with st.container(border=True):
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("💰 Lucro Líquido", f"R$ {total_lucro:,.2f}")
-        c2.metric("📦 Vendas Totais", f"{total_vendas} un.")
-        c3.metric("📣 Gasto em Ads", f"R$ {total_gasto:,.2f}")
-        c4.metric("🚨 Produtos Críticos", f"{produtos_criticos}", delta=f"de {len(analises)} avaliados", delta_color="inverse")
+        c1.metric("💰 Lucro (Filtro)", f"R$ {lucro_visivel:,.2f}")
+        c2.metric("📦 Vendas (Filtro)", f"{int(vendas_visiveis)} un.")
+        c3.metric("📣 Ads Rateado (Filtro)", f"R$ {gasto_visivel:,.2f}", help="Fração dos custos correspondente APENAS aos SKUs exibidos no momento sob ação.")
+        c4.metric("🚨 Críticos (Global)", f"{produtos_criticos}", delta=f"de {len(analises_globais)} avaliados", delta_color="inverse")
         c5.metric("⏳ Autonomia Mínima", f"{dias_min_estoque if dias_min_estoque < 999 else '∞'} dias", delta_color="inverse" if dias_min_estoque < 14 else "normal")
+    
+    evidencias_resumo = df_analises['confianca'].value_counts()
+    st.caption(f"Evidência dos {len(df_analises)} SKUs filtrados: {evidencias_resumo.get('Alta', 0)} alta, {evidencias_resumo.get('Moderada', 0)} moderada, {evidencias_resumo.get('Baixa', 0)} baixa. Abandono de carrinho observado (global): {abandono_loja:.1f}%")
 
     st.divider()
 
@@ -2633,6 +2673,18 @@ with aba_dashboard:
 # ==============================================================================
 # ABA 2: ATUADOR (O Painel de Aprovação Fino e Elegante)
 # ==============================================================================
+
+def salvar_cache_auditoria():
+    destino = CACHE_AUDITORIA_7D if st.session_state.get("horizonte_auditoria", "7d") == "7d" else CACHE_AUDITORIA_30D
+    try:
+        with open(destino, "w", encoding="utf-8") as f:
+            json.dump(st.session_state.analises_preditivas, f, ensure_ascii=False, indent=4)
+        with open(CACHE_AUDITORIA, "w", encoding="utf-8") as f:
+            json.dump(st.session_state.analises_preditivas, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        logger.error(f"Falha ao persistir cache de auditoria: {e}")
+
+
 with aba_atuador:
     st.subheader("Alterações recomendadas")
     st.markdown('<div class="ia-note"><span class="ia-label">Fluxo de confirmação</span><br><b>1. Compare</b> o estado atual com o proposto. &nbsp; <b>2. Leia</b> a força da evidência e a consequência. &nbsp; <b>3. Confirme</b> somente quando a alteração estiver clara. Nenhum botão é executado sem clique explícito.</div>', unsafe_allow_html=True)
@@ -2669,12 +2721,19 @@ with aba_atuador:
         score = p["score_max"]
         badge = "🔴 Urgente" if score >= 40 else "🟡 Atenção" if score >= 20 else "🟢 Ok"
 
-        with st.expander(f"⚡ {p['nome_produto']} | {p['acoes_pendentes']} SKUs exigem ação | {badge}", expanded=(score >= 40)):
+        # 1. Limpeza do Nome do Produto no Cabeçalho
+        nome_produto_limpo = padronizar_texto(p['nome_produto'])
+
+        with st.expander(f"⚡ {nome_produto_limpo} | {p['acoes_pendentes']} SKUs exigem ação | {badge}", expanded=(score >= 40)):
             var_base = p["variacoes"][0]
 
             with st.container(border=True):
-                st.markdown(f"**🎯 Motivo da Intervenção:** {var_base.get('recomendacao_executiva', '')}")
-                st.caption(f"**Projeção IA:** {var_base.get('analise_de_consequencias', '')}")
+                # 2. Limpeza dos Pareceres da IA
+                motivo_limpo = padronizar_texto(var_base.get('recomendacao_executiva', ''))
+                consequencia_limpa = padronizar_texto(var_base.get('analise_de_consequencias', ''))
+                
+                st.markdown(f"**🎯 Motivo da Intervenção:** {motivo_limpo}")
+                st.caption(f"**Projeção IA:** {consequencia_limpa}")
 
             st.markdown("#### Grade de Ações")
             for analise_var in p["variacoes"]:
@@ -2687,16 +2746,22 @@ with aba_atuador:
                 modo_execucao, detalhe_execucao = classificar_modo_execucao(acao_var)
                 confianca, leitura_evidencia, _ = classificar_confianca_evidencia(dados_var)
                 efeito_acao, orientacao_acao = explicar_acao(acao_var)
+                
+                # 3. Limpeza do Nome da Variação e Evidência
+                nome_variacao_limpo = padronizar_texto(dados_var.get('nome_variacao', 'SKU'))
+                evidencia_limpa = padronizar_texto(leitura_evidencia)
 
                 with st.container(border=True):
-                    st.markdown(f"### {rotulo_acao(acao_var)} · {dados_var.get('nome_variacao', 'SKU')}")
+                    st.markdown(f"### {rotulo_acao(acao_var)} · {nome_variacao_limpo}")
                     st.caption(f"O que muda: {efeito_acao} {orientacao_acao}")
                     atual, proposto, decisao = st.columns(3, vertical_alignment="top")
+                    
                     with atual:
                         st.markdown("**Hoje**")
                         st.metric("Preço atual", f"R$ {preco_atual:.2f}")
                         st.caption(f"Vendas observadas: {int(dados_var.get('vendas_7d_reais', 0) or 0)} un. em 7 dias")
                         st.caption(f"Resultado operacional: R$ {float(dados_var.get('lucro_liquido_real_7d', 0) or 0):.2f}")
+                    
                     with proposto:
                         st.markdown("**Após a ação**")
                         if acao_var in {"AUMENTAR_PRECO", "REDUZIR_PRECO", "CRIAR_PROMOCAO"}:
@@ -2707,53 +2772,144 @@ with aba_atuador:
                         faixa_min, faixa_max = intervalo_demanda_exploratorio(dados_var, float(analise_var.get('previsao_vendas_7d', 0) or 0))
                         st.caption(f"Demanda exploratória: {faixa_min}–{faixa_max} un. / 7 dias")
                         st.caption(f"Resultado projetado: R$ {float(analise_var.get('previsao_lucro_7d', 0) or 0):.2f}")
+                    
                     with decisao:
                         st.markdown("**Antes de decidir**")
-                        st.caption(f"Evidência: **{confianca}** — {leitura_evidencia}")
+                        st.caption(f"Evidência: **{confianca}** — {evidencia_limpa}")
                         st.caption("A projeção é uma hipótese. Confira a justificativa e a consequência abaixo antes de confirmar.")
+                    
                     with st.expander("Plano por horizonte: 7 dias e 30 dias"):
                         plano_7d, plano_30d = st.columns(2)
                         with plano_7d:
                             st.markdown("**Curto prazo · 7 dias**")
+                            # 4. Limpeza dos Passos do Plano
                             for passo in analise_var.get("plano_curto_prazo_7d", []):
-                                st.write(f"• {passo}")
+                                st.write(f"• {padronizar_texto(passo)}")
                             st.caption(f"Cenário: {int(analise_var.get('previsao_vendas_7d', 0) or 0)} un. | R$ {float(analise_var.get('previsao_lucro_7d', 0) or 0):.2f}")
+                        
                         with plano_30d:
                             st.markdown("**Longo prazo · 30 dias**")
+                            # 4. Limpeza dos Passos do Plano
                             for passo in analise_var.get("plano_longo_prazo_30d", []):
-                                st.write(f"• {passo}")
+                                st.write(f"• {padronizar_texto(passo)}")
                             st.caption(f"Cenário: {int(analise_var.get('previsao_vendas_30d', 0) or 0)} un. | R$ {float(analise_var.get('previsao_lucro_30d', 0) or 0):.2f}")
                         st.info("O plano de 30 dias é estratégico e não dispara nenhuma alteração automática.")
+                    
                     st.divider()
                     col_info, col_btn = st.columns([6, 4], vertical_alignment="center")
 
                     with col_info:
                         if confianca == "Baixa":
-                            st.warning(f"Evidência baixa — não automatize sem teste controlado. {leitura_evidencia}")
+                            st.warning(f"Evidência baixa — não automatize sem teste controlado. {evidencia_limpa}")
                         else:
-                            st.caption(f"Evidência {confianca.lower()}: {leitura_evidencia}")
-                        st.markdown(f"**SKU:** `{dados_var.get('nome_variacao', 'N/A')}`")
+                            st.caption(f"Evidência {confianca.lower()}: {evidencia_limpa}")
+                        st.markdown(f"**SKU:** `{nome_variacao_limpo}`")
                         st.caption(f"**Ação Definida:** {acao_var}")
                         if modo_execucao == "RECOMENDAR":
                             st.info("📌 Alteração Manual Necessária no Seller Center", icon="ℹ️")
 
                     with col_btn:
-                        valido, motivo = validar_sugestao_ia(dados_var, analise_var)
-                        if confianca == "Baixa" and modo_execucao == "EXECUTAR":
-                            valido = False
-                            motivo = "Base histórica insuficiente para execução automática. Valide a hipótese manualmente ou reúna mais dados."
-                        if not valido:
-                            st.error(f"Bloqueado: {motivo}")
-                        elif modo_execucao == "EXECUTAR":
-                            st.caption("Confirmar envia esta alteração para a Shopee. Ela fica registrada no histórico de ações.")
-                            txt_btn = "Confirmar promoção" if acao_var == "CRIAR_PROMOCAO" else "Confirmar criação do combo" if acao_var == "CRIAR_COMBO" else "Confirmar alteração de preço"
-                            if st.button(txt_btn, key=f"exec_{dados_var['model_id']}", use_container_width=True, type="primary"):
-                                with st.spinner("Conectando API Shopee..."):
-                                    sucesso, msg = processar_acao_api(acao_var, dados_var, analise_var, novo_preco)
-                                    if sucesso:
-                                        st.toast(f"Sucesso: {msg}", icon="✅")
+                        # 1. VERIFICAÇÃO DE ESTADO LOCAL (Resistente ao F5)
+                        status_local = analise_var.get("status_api_execucao")
+
+                        if status_local == "SUCESSO":
+                            st.success("✅ Confirmado ativo na Shopee", icon="🟢")
+                            col_done, col_reverify = st.columns([3, 1])
+                            with col_done:
+                                st.button("Ação Concluída", key=f"done_{dados_var['model_id']}", disabled=True, use_container_width=True)
+                            reverify_key = f"reverify_open_{dados_var['model_id']}"
+
+                            with col_reverify:
+                                if st.button("🔄", key=f"reverify_{dados_var['model_id']}", help="Reverificar na Shopee", use_container_width=True):
+                                    st.session_state[reverify_key] = True
+                                    st.rerun()
+
+                            if st.session_state.get(reverify_key, False):
+                                discount_id = analise_var.get("discount_id_shopee")
+
+                                if not discount_id:
+                                    # Item marcado SUCESSO por execução antiga, sem discount_id salvo — não dá pra auto-checar
+                                    st.warning("Este item foi marcado como concluído antes da verificação automática existir. "
+                                                "Confira manualmente no Seller Center. Se não estiver lá, use 'Liberar mesmo assim' abaixo.")
+                                    if st.button("Liberar para nova tentativa", key=f"forcerelease_{dados_var['model_id']}"):
+                                        analise_var["status_api_execucao"] = None
+                                        st.session_state[reverify_key] = False
+                                        salvar_cache_auditoria()
+                                        st.rerun()
+                                else:
+                                    status_api, detalhe = verificar_status_promocao(discount_id)
+                                    if status_api in ("ongoing", "upcoming"):
+                                        st.toast(f"Confirmado: {detalhe}", icon="✅")
+                                    elif status_api == "rejeitado":
+                                        analise_var["status_api_execucao"] = None
+                                        analise_var.pop("discount_id_shopee", None)
+                                        salvar_cache_auditoria()
+                                        st.toast("Não estava realmente ativo — liberado para nova tentativa.", icon="🔓")
                                     else:
-                                        st.error(msg)
+                                        st.toast(f"Status ainda incerto ({status_api}). Tente de novo em instantes.", icon="❓")
+                                    st.session_state[reverify_key] = False
+                                    st.rerun()
+
+                        elif status_local == "PENDENTE_VERIFICACAO":
+                            st.warning("⏳ Enviado à Shopee, aguardando confirmação real", icon="🟡")
+                            if st.button("Verificar status real", key=f"check_{dados_var['model_id']}", use_container_width=True):
+                                discount_id = analise_var.get("discount_id_shopee")
+                                status_api, detalhe = verificar_status_promocao(discount_id)
+
+                                if status_api in ("ongoing", "upcoming"):
+                                    analise_var["status_api_execucao"] = "SUCESSO"
+                                elif status_api == "rejeitado":
+                                    analise_var["status_api_execucao"] = "FALHOU"
+                                # se vier "desconhecido", mantém PENDENTE_VERIFICACAO pra tentar de novo depois
+
+                                salvar_cache_auditoria()
+
+                                st.toast(f"Status: {status_api} — {detalhe}", icon="🔎")
+                                st.rerun()
+
+                        elif status_local == "FALHOU":
+                            st.error("❌ A Shopee rejeitou esta promoção", icon="🔴")
+                            if st.button("Tentar novamente", key=f"retry_{dados_var['model_id']}", use_container_width=True):
+                                analise_var["status_api_execucao"] = None
+                                st.rerun()
+
+                        else:
+                            # 3. FLUXO NORMAL DE VALIDAÇÃO E EXECUÇÃO
+                            valido, motivo = validar_sugestao_ia(dados_var, analise_var)
+                            if confianca == "Baixa" and modo_execucao == "EXECUTAR":
+                                valido = False
+                                motivo = "Base histórica insuficiente para execução automática. Valide a hipótese manualmente ou reúna mais dados."
+                            
+                            if not valido:
+                                st.error(f"Bloqueado: {motivo}")
+                            
+                            elif modo_execucao == "EXECUTAR":
+                                st.caption("Confirmar envia esta alteração para a Shopee. Ela fica registrada no histórico de ações.")
+                                txt_btn = "Confirmar promoção" if acao_var == "CRIAR_PROMOCAO" else "Confirmar criação do combo" if acao_var == "CRIAR_COMBO" else "Confirmar alteração de preço"
+                                
+                                if st.button(txt_btn, key=f"exec_{dados_var['model_id']}", use_container_width=True, type="primary"):
+                                    with st.spinner("Sincronizando com a Shopee em tempo real..."):
+                                        
+                                        # 4. DISPARO DA API
+                                        sucesso, msg = processar_acao_api(acao_var, dados_var, analise_var, novo_preco)
+                                        
+                                        if sucesso:
+                                            # 5. MUTAÇÃO DO ESTADO NA MEMÓRIA RAM
+                                            if acao_var in ("CRIAR_PROMOCAO", "CRIAR_COMBO"):
+                                                # Assíncrono na Shopee — fica pendente até verificarmos de fato
+                                                analise_var["status_api_execucao"] = "PENDENTE_VERIFICACAO"
+                                                analise_var["discount_id_shopee"] = msg
+                                            else:
+                                                # Alteração de preço é síncrona — a Shopee confirma na hora
+                                                analise_var["status_api_execucao"] = "SUCESSO"
+
+                                            # 6. PERSISTÊNCIA FÍSICA NO DISCO (A prova de Refresh/F5)
+                                            salvar_cache_auditoria()
+
+                                            st.toast(f"Sincronização confirmada: {msg}", icon="✅")
+                                            st.rerun() 
+                                        else:
+                                            st.error(f"Falha na validação com a Shopee: {msg}")
 
     if sem_acoes:
         st.success("✅ O Conselho determinou que a estratégia atual está perfeita. Nenhuma intervenção de API é necessária hoje.")

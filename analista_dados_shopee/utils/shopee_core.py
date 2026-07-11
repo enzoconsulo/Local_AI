@@ -165,33 +165,28 @@ def atualizar_preco_shopee(item_id, model_id, novo_preco):
     return False, "Falha de Comunicação com a Shopee."
 
 def criar_promocao_shopee(item_id, model_id, preco_promocional, horas_duracao=24):
-    """
-    Cria uma campanha de Desconto Flash (Etiqueta Amarela) e notifica os clientes.
-    """
     path_add_discount = "/api/v2/discount/add_discount"
     path_add_item = "/api/v2/discount/add_discount_item"
-    
-    # 1. Configurar a cronologia (Começa daqui a 30 minutos e dura X horas)
-    start_time = int(time.time()) + 1800 
+
+    start_time = int(time.time()) + 1800
     end_time = start_time + (int(horas_duracao) * 3600)
-    nome_promocao = f"Flash_IA_{int(time.time())}" 
-    
+    nome_promocao = f"Flash_IA_{int(time.time())}"
+
     payload_discount = {
         "discount_name": nome_promocao,
         "start_time": start_time,
         "end_time": end_time
     }
-    
+
     logger.info(f"Criando Campanha de Desconto: {nome_promocao}")
     resp_campanha = chamar_shopee_api(path_add_discount, method="POST", payload=payload_discount)
-    
+
     if not resp_campanha or "discount_id" not in resp_campanha:
         msg_erro = resp_campanha.get('warning', 'Erro desconhecido') if resp_campanha else 'Sem resposta'
         return False, f"Falha ao criar campanha base: {msg_erro}"
-        
+
     discount_id = resp_campanha["discount_id"]
-    
-    # 2. Injetar o produto dentro desta campanha
+
     payload_item = {
         "discount_id": discount_id,
         "item_list": [
@@ -201,19 +196,61 @@ def criar_promocao_shopee(item_id, model_id, preco_promocional, horas_duracao=24
                     {
                         "model_id": model_id,
                         "model_promotion_price": float(preco_promocional),
-                        "model_promotion_stock": 0 # Na Shopee, 0 = Sem limite (Usa o estoque normal)
+                        "model_promotion_stock": 0
                     }
                 ]
             }
         ]
     }
-    
+
     resp_item = chamar_shopee_api(path_add_item, method="POST", payload=payload_item)
-    
-    if resp_item is not None and not resp_item.get("error"):
-        return True, f"Etiqueta de Promoção gerada! Ficará ativa e visível na loja em ~30 minutos."
-        
-    return False, f"Falha ao vincular o produto à campanha: {resp_item}"
+
+    # LOG CRU — essencial para descobrir o formato real que sua conta recebe
+    logger.debug(f"Resposta bruta add_discount_item: {resp_item}")
+
+    if resp_item is None:
+        return False, "Falha de comunicação ao vincular item à campanha."
+
+    # A Shopee costuma retornar falhas item-a-item aninhadas, não no campo 'error' de topo.
+    # Verificamos todos os nomes de campo plausíveis, já que o formato varia por versão/região.
+    falhas = (
+        resp_item.get("failed_list")
+        or resp_item.get("failed_items")
+        or resp_item.get("warning")
+        or []
+    )
+    if falhas:
+        logger.error(f"Shopee rejeitou o item na campanha: {falhas}")
+        return False, f"Item rejeitado: {falhas}"
+
+    return True, discount_id  # devolvemos o discount_id, não só uma mensagem — precisamos dele pra verificar depois
+
+def verificar_status_promocao(discount_id):
+    """
+    Consulta o estado real da campanha na Shopee.
+    Retorna: ('upcoming' | 'ongoing' | 'expired' | 'rejeitado' | 'desconhecido', detalhe)
+    """
+    path = "/api/v2/discount/get_discount"
+    params = {"discount_id": discount_id}
+
+    resp = chamar_shopee_api(path, params=params, method="GET")
+    logger.debug(f"Resposta bruta get_discount: {resp}")
+
+    if resp is None:
+        return "desconhecido", "Sem resposta da Shopee ao consultar status."
+
+    status = resp.get("status", "desconhecido")
+    itens = resp.get("item_list", [])
+
+    # Confere se o item de fato está presente e ativo dentro da campanha
+    item_encontrado = any(
+        i.get("item_id") for i in itens
+    ) if itens else False
+
+    if not item_encontrado:
+        return "rejeitado", "Campanha existe, mas nenhum item está vinculado a ela."
+
+    return status, f"{len(itens)} item(ns) vinculado(s) à campanha."
 
 def criar_combo_shopee(item_id, percentual_desconto=10, limite_compras=100):
     """
