@@ -72,6 +72,11 @@ OPENAI_MODEL_30D = os.getenv("OPENAI_MODEL_30D", "gpt-5.5").strip()
 OPENAI_REASONING_7D = os.getenv("OPENAI_REASONING_7D", "low").strip().lower()
 OPENAI_REASONING_30D = os.getenv("OPENAI_REASONING_30D", "medium").strip().lower()
 
+# Chat da página 4 (text-to-SQL): tarefas curtas e frequentes — por padrão usa
+# o mesmo modelo barato do horizonte 7d com raciocínio mínimo.
+OPENAI_MODEL_CHAT = (os.getenv("OPENAI_MODEL_CHAT") or "").strip() or OPENAI_MODEL_7D
+OPENAI_REASONING_CHAT = os.getenv("OPENAI_REASONING_CHAT", "low").strip().lower()
+
 # Versão do contrato dado→prompt→saída. Faz parte do fingerprint do cache
 # semântico: mudanças de tratamento de dados ou de prompt invalidam o cache
 # de forma controlada em vez de reutilizarem análises incompatíveis.

@@ -1,205 +1,74 @@
-import streamlit as st
-import psycopg2
-import pandas as pd
-import requests
-import json
-import re
-import os
-import sys
-from datetime import datetime
-from pathlib import Path
-from dotenv import load_dotenv
+"""
+pages/4_💬_Chat_Assistente.py
+=============================
+UI do Assistente de Dados: chat text-to-SQL sobre o Data Warehouse.
 
-# Configuração de Ambiente
+Toda a inteligência mora em cerebro/consultor.py (núcleo sem Streamlit):
+esta página só captura o input, injeta os callbacks visuais e renderiza.
+Migrado do stack Groq/LiteLLM local para a API OpenAI direta, com o schema
+atualizado até a migração 14 (views, materiais/máquinas, semântica de NULL).
+"""
+
+import sys
+from pathlib import Path
+
+import streamlit as st
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
-load_dotenv(ROOT_DIR / "CHAVES_DADOS.env")
+
+from cerebro import consultor
+from cerebro.config import OPENAI_MODEL_CHAT
 
 st.set_page_config(page_title="Assistente IA", page_icon="💬", layout="wide")
 
-# ==============================================================================
-# FUNÇÕES DE BANCO DE DADOS BLINDADAS
-# ==============================================================================
-def get_db_connection():
-    return psycopg2.connect(
-        host=os.getenv("DB_HOST"), port=os.getenv("DB_PORT"),
-        database=os.getenv("POSTGRES_DB"), user=os.getenv("POSTGRES_USER"),
-        password=os.getenv("POSTGRES_PASSWORD")
-    )
+st.title("💬 Assistente de Dados (Text-to-SQL)")
+st.markdown(
+    "Interrogue o seu Data Warehouse em português. O consultor traduz a pergunta em SQL de leitura, "
+    "executa com segurança e devolve a resposta executiva."
+)
 
-def validar_sql_somente_leitura(query: str) -> str:
-    """Impede múltiplas instruções e DML oculto em CTEs antes de consultar o banco."""
-    sem_comentarios = re.sub(r"/\*.*?\*/|--[^\n]*", "", query, flags=re.DOTALL).strip()
-    if not sem_comentarios:
-        raise ValueError("A consulta SQL está vazia.")
-    if sem_comentarios.endswith(";"):
-        sem_comentarios = sem_comentarios[:-1].strip()
-    if ";" in sem_comentarios:
-        raise ValueError("O chat aceita somente uma instrução SQL por vez.")
-    if not re.match(r"^(SELECT|WITH|EXPLAIN)\b", sem_comentarios, flags=re.IGNORECASE):
-        raise ValueError("Por segurança, apenas consultas de leitura são permitidas.")
-    proibidos = r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|COPY|CALL|DO|VACUUM)\b"
-    if re.search(proibidos, sem_comentarios, flags=re.IGNORECASE):
-        raise ValueError("A consulta contém um comando de escrita ou administração proibido.")
-    return sem_comentarios
-
-
-def run_query(query):
-    """Executa apenas uma consulta de leitura, com transação read-only e limite de tempo."""
-    query_segura = validar_sql_somente_leitura(query)
-    try:
-        with get_db_connection() as conn:
-            conn.set_session(readonly=True, autocommit=False)
-            with conn.cursor() as cur:
-                cur.execute("SET LOCAL statement_timeout = '10s'")
-                cur.execute(query_segura)
-                if cur.description:
-                    col_names = [desc[0] for desc in cur.description]
-                    df = pd.DataFrame(cur.fetchall(), columns=col_names)
-                    return df.head(50)
-                else:
-                    return pd.DataFrame()
-    except Exception as e:
-        raise e
-
-def obter_contexto_estrategico_atual():
-    """Lê o Diário de Bordo (log_acoes) para o Groq saber as últimas decisões tomadas."""
-    try:
-        # Puxamos as últimas 10 ações tomadas na loja para dar contexto à IA
-        df = run_query("""
-            SELECT p.nome_atual as produto, l.tipo_acao, l.detalhe_acao, l.impacto_projetado as projecao_ia, l.data_aplicacao
-            FROM log_acoes_shopee l
-            JOIN dim_produtos p ON l.item_id = p.item_id
-            WHERE l.status_api = 'SUCESSO'
-            ORDER BY l.data_aplicacao DESC
-            LIMIT 10
-        """)
-        if df.empty:
-            return "Nenhuma ação foi aprovada e executada na loja recentemente."
-        # Converte as datas para string para serialização JSON
-        df['data_aplicacao'] = df['data_aplicacao'].astype(str)
-        return df.to_json(orient="records", force_ascii=False)
-    except Exception:
-        return "Erro ao carregar contexto estratégico do Diário de Bordo."
-
-# ==============================================================================
-# MOTOR DO AGENTE IA (Groq Text-to-SQL via LiteLLM)
-# ==============================================================================
-LITELLM_URL = "http://localhost:8000/v1/chat/completions" # Porta 8000 conforme definimos no boot
-
-# Schema operacional e analítico atualizado até as migrações 08 e 09.
-SCHEMA_DO_BANCO = """
-O banco de dados PostgreSQL contém as seguintes tabelas relacionais da loja Shopee:
-1. dim_produtos (item_id BIGINT, nome_atual VARCHAR, category_id BIGINT, status_shopee VARCHAR, data_criacao TIMESTAMP, nota_media_estrelas DECIMAL, likes_count INTEGER, dias_pre_encomenda INTEGER)
-2. dim_variacoes (model_id BIGINT, item_id BIGINT, nome_variacao VARCHAR, sku_variacao VARCHAR, preco_venda_atual DECIMAL, estoque_shopee INTEGER)
-3. map_engenharia_produto (model_id BIGINT, id_material INTEGER, id_maquina INTEGER, peso_gramas DECIMAL, tempo_impressao_minutos INTEGER, custo_embalagem DECIMAL, taxa_perda_percentual DECIMAL)
-4. fato_pedidos_venda (order_sn VARCHAR, data_hora_criacao TIMESTAMP, uf_destino CHAR, status_pedido VARCHAR, motivo_cancelamento_devolucao VARCHAR)
-5. fato_itens_pedido (order_sn VARCHAR, model_id BIGINT, quantidade INTEGER, preco_praticado DECIMAL)
-6. fato_repasse_escrow (order_sn VARCHAR, comissao_shopee DECIMAL, taxa_servico DECIMAL, taxa_transacao DECIMAL, custo_frete_reverso DECIMAL, lucro_liquido_absoluto DECIMAL)
-7. fato_trafego_diario (item_id BIGINT, data DATE, impressoes INTEGER NULL, cliques INTEGER NULL, visitantes_unicos INTEGER, taxa_rejeicao DECIMAL, adicoes_carrinho INTEGER, granularidade_origem VARCHAR)
-8. fato_ads_performance_produto (item_id BIGINT, data_registro DATE, tipo_campanha VARCHAR, impressoes INTEGER NULL, cliques INTEGER NULL, investimento DECIMAL, vendas_gmv DECIMAL, adicoes_carrinho INTEGER, conversoes INTEGER, itens_vendidos INTEGER, roas DECIMAL, acos DECIMAL, granularidade_origem VARCHAR)
-9. fato_ads_palavras_chave (fonte legada: item_id BIGINT, keyword VARCHAR, data DATE, impressoes INTEGER, cliques INTEGER, custo_total DECIMAL, gmv_gerado DECIMAL)
-10. log_acoes_shopee (id_log SERIAL, item_id BIGINT, model_id BIGINT, tipo_acao VARCHAR, detalhe_acao TEXT, impacto_projetado JSONB, data_aplicacao TIMESTAMP, status_api VARCHAR, id_execucao_origem UUID)
-11. ia_execucoes_analiticas (id_execucao UUID, criado_em TIMESTAMPTZ, horizonte_dias SMALLINT, cobertura_dados JSONB, resumo_executivo JSONB, status VARCHAR)
-12. ia_snapshots_variacao (id_execucao UUID, item_id BIGINT, model_id BIGINT, metricas_observadas JSONB, previsoes JSONB, recomendacao JSONB)
-13. ia_avaliacoes_acoes (id_log BIGINT, model_id BIGINT, baseline JSONB, previsto JSONB, observado JSONB, comparacao JSONB, status VARCHAR)
-
-CHAVES ESTRANGEIRAS CRUCIAIS:
-- fato_itens_pedido.order_sn -> fato_pedidos_venda.order_sn
-- fato_repasse_escrow.order_sn -> fato_pedidos_venda.order_sn
-- fato_itens_pedido.model_id -> dim_variacoes.model_id
-- dim_variacoes.item_id -> dim_produtos.item_id
-"""
-
-def criar_prompt_sistema():
-    estrategias_atuais = obter_contexto_estrategico_atual()
-    data_hoje = datetime.now().strftime("%Y-%m-%d")
-    
-    return f"""Você é o Consultor Analítico de E-commerce Sênior da Fazenda de Impressão 3D.
-Sua função é conversar com o dono da loja de forma direta, clara e orientada a lucro.
-
-INFORMAÇÃO TEMPORAL: A data de hoje é {data_hoje}. Use isto como referência para consultas como 'neste mês' ou 'últimos 7 dias' (CURRENT_DATE - INTERVAL '7 days').
-
-AÇÕES EXECUTADAS RECENTEMENTE NA LOJA (Para o seu contexto):
-{estrategias_atuais}
-
-REGRAS DE FUNCIONAMENTO (Padrão ReAct):
-1. Se a resposta puder ser dada baseada nas AÇÕES EXECUTADAS acima ou conhecimento geral, apenas responda com texto analítico.
-2. Se o usuário pedir cálculos de lucro, cruzamentos, métricas de tráfego, estrelas ou dados históricos, você DEVE escrever uma query SQL para extrair o dado do PostgreSQL.
-3. Se você decidir gerar um SQL, ENVOLVA O COMANDO ESTANQUE ENTRE AS TAGS ```sql e ```. 
-4. O sistema irá executar o SQL e devolver-lhe os números (em formato de tabela) para você formular a resposta final.
-5. Em SQLs, limite SEMPRE a resposta a um máximo de 50 linhas (LIMIT 50). Use aliases amigáveis para as colunas.
-6. ATENÇÃO FINANCEIRA: O Lucro Líquido Real de uma venda é calculado subtraindo o custo de fabricação (em map_engenharia_produto) e as taxas (fato_repasse_escrow) do preco_praticado (fato_itens_pedido).
-
-SCHEMA DO BANCO DE DADOS:
-{SCHEMA_DO_BANCO}
-"""
-
-def enviar_para_llm(mensagens):
-    """Envia o histórico para o Groq via Proxy LiteLLM."""
-    payload = {
-        "model": "chat-rapido", # O modelo Groq (Llama 3.3) configurado no boot_ia
-        "messages": mensagens[-10:], # Envia apenas as últimas 10 mensagens para não estourar o limite de tokens do LLM
-        "temperature": 0.1
-    }
-    try:
-        res = requests.post(LITELLM_URL, json=payload, timeout=60)
-        res.raise_for_status()
-        return res.json()['choices'][0]['message']['content']
-    except requests.exceptions.ConnectionError:
-        return "❌ Erro: Não foi possível conectar ao LiteLLM na porta 8000. Verifique se o Motor Híbrido está rodando."
-    except Exception as e:
-        return f"❌ Erro de processamento na IA: {str(e)}"
-
-def extrair_sql(texto):
-    """Procura por código SQL embutido na resposta, com limpeza robusta."""
-    match = re.search(r'```sql\s*(.*?)\s*```', texto, re.IGNORECASE | re.DOTALL)
-    if match: 
-        return match.group(1).strip()
-    return None
-
-# ==============================================================================
-# INTERFACE DO CHAT E BOTÕES RÁPIDOS
-# ==============================================================================
-st.title("💬 Assistente de Dados (Groq Text-to-SQL)")
-st.markdown("Interrogue o seu Data Warehouse. O LLM traduz as suas perguntas para consultas avançadas em milissegundos.")
-
-# --- SEÇÃO DE ANÁLISES RÁPIDAS (QUICK ACTIONS) ---
-st.write("⚡ **Análises Prontas (Clique para interrogar a IA):**")
+# ─── Análises rápidas ─────────────────────────────────────────────────────────
+st.write("⚡ **Análises Prontas (clique para interrogar a IA):**")
 col1, col2, col3, col4 = st.columns(4)
 
 prompt_acionado = None
-
 if col1.button("💸 Resumo de Lucratividade", use_container_width=True):
-    prompt_acionado = "Qual foi o meu faturamento bruto e o lucro líquido absoluto nos últimos 7 dias?"
+    prompt_acionado = "Qual foi o meu faturamento bruto e o lucro líquido absoluto (escrow) nos últimos 7 dias?"
 if col2.button("🩸 Sangramento de Ads", use_container_width=True):
-    prompt_acionado = "Quais são as 5 palavras-chave de Ads que mais consumiram orçamento nos últimos 7 dias, e qual foi o GMV gerado por elas?"
+    prompt_acionado = (
+        "Quais são os 5 produtos que mais consumiram investimento em Ads nos últimos 7 dias, "
+        "e qual foi o GMV e o ROAS de cada um? Considere item_id 0 como a campanha global da loja."
+    )
 if col3.button("⭐ Vitrine e Reputação", use_container_width=True):
-    prompt_acionado = "Faça um ranking dos 5 produtos com mais likes (favoritos), mostrando também a nota média de estrelas de cada um."
+    prompt_acionado = "Faça um ranking dos 5 produtos com mais likes (favoritos), mostrando também a nota média de estrelas."
 if col4.button("🧠 Últimas Ações da IA", use_container_width=True):
-    prompt_acionado = "Resuma rapidamente as últimas ações e alterações de preço que nós aprovamos na loja recentemente, e quais foram as projeções de impacto."
+    prompt_acionado = "Resuma as últimas ações que aprovamos na loja e as projeções de impacto de cada uma."
 
 st.divider()
 
-# --- MOTOR DE ESTADO DO CHAT ---
+# ─── Estado do chat ───────────────────────────────────────────────────────────
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = [{"role": "system", "content": criar_prompt_sistema()}]
-    st.session_state.chat_history.append({
-        "role": "assistant", 
-        "content": "Olá, Mestre! Já carreguei as nossas últimas decisões e a estrutura do banco. O que deseja analisar hoje?"
-    })
+    st.session_state.chat_history = [
+        {"role": "system", "content": consultor.construir_prompt_sistema()},
+        {
+            "role": "assistant",
+            "content": "Olá! Já carreguei o schema do Data Warehouse e as últimas decisões da loja. O que deseja analisar?",
+        },
+    ]
+if "telemetria_chat" not in st.session_state:
+    st.session_state.telemetria_chat = {"chamadas": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
-# Renderiza o chat
+# Renderiza o histórico visível (sistema e mensagens internas ficam ocultos)
 for msg in st.session_state.chat_history:
-    if msg["role"] not in ["system", "tool_result"]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    if msg["role"] == "system" or msg.get("oculta"):
+        continue
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-# --- CAPTURA DE INPUT (Botão ou Digitação) ---
-user_input = st.chat_input("Ex: Qual variação de cor vendeu mais no mês passado?")
-
-# Resolve qual prompt usar
-input_final = prompt_acionado if prompt_acionado else user_input
+# ─── Captura de input (botão ou digitação) ────────────────────────────────────
+user_input = st.chat_input("Ex: Qual variação vendeu mais nos últimos 30 dias?")
+input_final = prompt_acionado or user_input
 
 if input_final:
     st.session_state.chat_history.append({"role": "user", "content": input_final})
@@ -207,39 +76,33 @@ if input_final:
         st.markdown(input_final)
 
     with st.chat_message("assistant"):
-        placeholder = st.empty()
-        
-        with st.spinner("🧠 Consultor IA Analisando Dados..."):
-            resposta_ia = enviar_para_llm(st.session_state.chat_history)
-            
-            codigo_sql = extrair_sql(resposta_ia)
-            
-            if codigo_sql:
-                with st.status("⚙️ Executando Consulta Automática no PostgreSQL...", expanded=False):
-                    st.code(codigo_sql, language="sql")
-                    try:
-                        df_resultado = run_query(codigo_sql)
-                        if df_resultado.empty:
-                            resultado_tabela = "A consulta retornou zero linhas. Não há dados para esse filtro."
-                        else:
-                            resultado_tabela = df_resultado.to_markdown(index=False)
-                    except Exception as erro_bd:
-                        resultado_tabela = f"Erro na execução do SQL: {str(erro_bd)}"
-                        st.error(resultado_tabela)
-                        
-                    st.write("Dados recuperados da memória da loja!")
+        def ao_evento(tipo, dado):
+            if tipo == "sql":
+                with st.expander("⚙️ Consulta executada no PostgreSQL", expanded=False):
+                    st.code(dado, language="sql")
+            elif tipo == "tabela":
+                if hasattr(dado, "empty") and not dado.empty:
+                    with st.expander("📊 Dados recuperados", expanded=False):
+                        st.dataframe(dado, use_container_width=True)
+            elif tipo == "erro_sql":
+                st.warning(f"A consulta foi rejeitada e será corrigida automaticamente: {dado}")
 
-                # Injeta a resposta do SQL no histórico "por baixo dos panos"
-                st.session_state.chat_history.append({"role": "assistant", "content": resposta_ia})
-                
-                instrucao_sistema = f"Resultado do PostgreSQL:\n{resultado_tabela}\nFormule a resposta final ao usuário de forma clara e executiva, omitindo que você usou SQL."
-                st.session_state.chat_history.append({"role": "user", "content": instrucao_sistema}) 
-                
-                with st.spinner("✍️ Formulando Resposta Executiva..."):
-                    resposta_final = enviar_para_llm(st.session_state.chat_history)
-                    placeholder.markdown(resposta_final)
-                    st.session_state.chat_history.append({"role": "assistant", "content": resposta_final})
-            
-            else:
-                placeholder.markdown(resposta_ia)
-                st.session_state.chat_history.append({"role": "assistant", "content": resposta_ia})
+        with st.spinner("🧠 Consultor IA analisando os dados..."):
+            novas_mensagens = consultor.executar_turno(
+                st.session_state.chat_history,
+                ao_evento=ao_evento,
+                telemetria=st.session_state.telemetria_chat,
+            )
+
+        st.session_state.chat_history.extend(novas_mensagens)
+        visiveis = [m for m in novas_mensagens if not m.get("oculta")]
+        if visiveis:
+            st.markdown(visiveis[-1]["content"])
+
+# ─── Rodapé de transparência de custo ─────────────────────────────────────────
+telemetria = st.session_state.telemetria_chat
+if telemetria["chamadas"]:
+    st.caption(
+        f"💰 Sessão: {telemetria['chamadas']} chamada(s) ao modelo {OPENAI_MODEL_CHAT} · "
+        f"{telemetria['prompt_tokens']:,} tokens de entrada · {telemetria['completion_tokens']:,} de saída."
+    )
