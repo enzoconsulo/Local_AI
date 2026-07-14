@@ -5,6 +5,9 @@ estudio_shopee\peças_brutas\*
 *.log
 *.txt
 !requirements.txt
+# Exports reais da loja (dados privados; nunca versionar)
+*.csv
+*.xlsx
 *.png
 *.venv
 **/__pycache__/
