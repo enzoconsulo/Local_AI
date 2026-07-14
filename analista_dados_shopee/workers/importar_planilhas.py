@@ -25,7 +25,7 @@ Correções validadas contra exports REAIS de jul/2026:
 import hashlib
 import io
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
@@ -201,6 +201,12 @@ def granularidade_do_periodo(dias_no_periodo: int) -> str:
     return "DIARIA" if dias_no_periodo == 1 else "AGREGADA_PERIODO"
 
 
+def _como_date(valor):
+    """Aceita date OU datetime (a página Streamlit passa datetime; CLI/testes
+    passam date) e devolve sempre date."""
+    return valor.date() if isinstance(valor, datetime) else valor
+
+
 def carregar_dataframe_limpo(uploaded_file):
     """Filtro inteligente para pular o cabeçalho 'sujo' e avisos da Shopee."""
     if uploaded_file.name.endswith('.csv'):
@@ -215,7 +221,10 @@ def carregar_dataframe_limpo(uploaded_file):
                 break
         df = pd.read_csv(io.StringIO("\n".join(linhas[idx_cabecalho:])))
     else:
-        df = pd.read_excel(uploaded_file)
+        # Lê dos bytes para honrar o contrato .name/.getvalue() (UploadedFile
+        # do Streamlit OU ArquivoLocal); passar o objeto direto ao read_excel
+        # só funcionava com o UploadedFile e ainda dependia do seek(0).
+        df = pd.read_excel(io.BytesIO(uploaded_file.getvalue()))
         idx_cabecalho = 0
         for i in range(min(15, len(df))):
             valores = str(df.iloc[i].values).lower()
@@ -244,6 +253,14 @@ def _nome_arquivo_normalizado(nome: str) -> str:
 # PROCESSADOR: VISÃO GERAL DA LOJA (métricas macro, datas reais por linha)
 # ==============================================================================
 
+# Colunas não-aditivas (taxas, médias, índices): nunca podem ser somadas entre
+# linhas nem rateadas por dia — o valor do período é repetido/médiado.
+_METRICAS_DE_TAXA = (
+    'taxa', 'rate', 'ctr', 'roas', 'convers', 'rejei', 'perc',
+    'medi', 'médi', 'por pedido', 'cpc', 'ticket', 'avg', 'índice', 'indice',
+)
+
+
 def processar_arquivo_global(arquivo_global):
     if not arquivo_global:
         return 0, "Nenhum arquivo de visão geral recebido.", None, None
@@ -257,15 +274,19 @@ def processar_arquivo_global(arquivo_global):
         if not col_data:
             return 0, "Não foi possível identificar uma coluna de data no arquivo.", None, None
 
-        metricas = []
+        # Acumula por (dia, métrica): exports horários (productoverview de 1 dia
+        # tem 24 linhas por data) somam contagens e tiram MÉDIA das taxas — o
+        # upsert linha a linha antigo guardava só a última hora do dia.
+        acumulado = {}  # (date, metric) -> [soma, contagem, é_taxa]
         for col in df.columns:
             if col == col_data:
                 continue
             nome_col = col.lower()
-            if not any(k in nome_col for k in ['venda', 'receita', 'gmv', 'lucro', 'margem', 'custo', 'ads', 'visita', 'conversao', 'rejei', 'cancel', 'pedido', 'estoque', 'preco', 'price', 'roas', 'taxa']):
+            if not any(k in nome_col for k in ['venda', 'receita', 'gmv', 'lucro', 'margem', 'custo', 'ads', 'visita', 'conversao', 'rejei', 'cancel', 'pedido', 'estoque', 'preco', 'price', 'roas', 'taxa', 'clique', 'impress', 'visualiza', 'curtida', 'comprador', 'unidade']):
                 continue
 
             nome_metric = normalizar_nome_metric(col)
+            e_taxa = any(k in nome_col for k in _METRICAS_DE_TAXA)
             for _, row in df.iterrows():
                 try:
                     data_val = pd.to_datetime(row[col_data], errors='coerce', dayfirst=True)
@@ -275,7 +296,16 @@ def processar_arquivo_global(arquivo_global):
                     continue
 
                 valor = limpar_valor(row[col]) if pd.notna(row[col]) and str(row[col]).strip() not in {'-', ''} else 0.0
-                metricas.append((data_val.date(), nome_metric, float(valor), arquivo_global.name))
+                chave = (data_val.date(), nome_metric)
+                if chave not in acumulado:
+                    acumulado[chave] = [0.0, 0, e_taxa]
+                acumulado[chave][0] += float(valor)
+                acumulado[chave][1] += 1
+
+        metricas = [
+            (data, metric, round(soma / contagem, 4) if e_taxa and contagem else soma, arquivo_global.name)
+            for (data, metric), (soma, contagem, e_taxa) in acumulado.items()
+        ]
 
         if not metricas:
             return 0, "Não foram encontradas métricas reconhecíveis para armazenar.", None, None
@@ -300,6 +330,7 @@ def processar_arquivo_global(arquivo_global):
 # ==============================================================================
 
 def processar_trafego_organico(arquivo_trafego, data_inicio, data_fim):
+    data_inicio, data_fim = _como_date(data_inicio), _como_date(data_fim)
     dias_no_periodo = (data_fim - data_inicio).days + 1
     if dias_no_periodo <= 0:
         return 0, "A Data Final deve ser maior ou igual à Inicial."
@@ -326,15 +357,32 @@ def processar_trafego_organico(arquivo_trafego, data_inicio, data_fim):
 
         # Identificadores e Topo de Funil
         col_id = next((c for c in df_t.columns if 'id do item' in c or 'id do produto' in c), None)
+        col_id_variacao = next((c for c in df_t.columns if 'id da variação' in c or 'id da variacao' in c), None)
         col_imp_org = next((c for c in df_t.columns if 'impress' in c), None)
         col_cli_org = next((c for c in df_t.columns if 'clique' in c or 'click' in c), None)
 
         # Meio/Fundo de Funil
         col_visitas = next((c for c in df_t.columns if 'visitante' in c or 'visita' in c), None)
-        col_carrinho = next((c for c in df_t.columns if 'carrinho' in c), None)
+        # No parentskudetail real existem 3 colunas com 'carrinho': "Visitantes
+        # do Produto (Adicionar ao Carrinho)", "Unidades (adicionar ao carrinho)"
+        # e "Taxa de Conversão (adicionar ao carrinho)". Adições ao carrinho são
+        # as UNIDADES adicionadas — visitantes e taxa não podem ser confundidos.
+        col_carrinho = (
+            next((c for c in df_t.columns if 'carrinho' in c and ('unidade' in c or 'add to cart' in c)), None)
+            or next((c for c in df_t.columns if 'carrinho' in c and 'taxa' not in c and 'visitante' not in c), None)
+        )
         col_rejeicao = next((c for c in df_t.columns if 'rejeição' in c or 'bounce' in c), None)
 
         for _, row in df_t.iterrows():
+            # O export real (parentskudetail) traz linhas do produto-PAI e de
+            # cada variação. Tráfego é medido no anúncio (só o pai tem valor) e
+            # as vendas aparecem NOS DOIS níveis: somar tudo dobraria as vendas
+            # importadas e diluiria a taxa de rejeição. Só a linha-pai entra.
+            if col_id_variacao is not None:
+                id_variacao = str(row.get(col_id_variacao, '-')).strip()
+                if id_variacao not in {'-', '', 'nan'}:
+                    continue
+
             if col_id and pd.notna(row[col_id]) and "dados atuais" not in str(row[col_id]).lower():
                 try:
                     item_id = int(limpar_valor(row[col_id]))
@@ -363,7 +411,7 @@ def processar_trafego_organico(arquivo_trafego, data_inicio, data_fim):
                 valor_carrinho = distribuir_inteiro(carrinho, dias_no_periodo, d)
                 valor_rejeicao = rejeicao
 
-                chave_trafego = (item_id, dia_registro.date())
+                chave_trafego = (item_id, dia_registro)
                 if chave_trafego not in dict_trafego:
                     dict_trafego[chave_trafego] = [valor_imp, valor_cli, valor_visitas, valor_rejeicao, valor_carrinho, 1]
                 else:
@@ -379,13 +427,18 @@ def processar_trafego_organico(arquivo_trafego, data_inicio, data_fim):
             for col in df_t.columns:
                 if col in {col_id, col_imp_org, col_cli_org, col_visitas, col_carrinho, col_rejeicao}:
                     continue
-                if any(k in col.lower() for k in ['venda', 'receita', 'gmv', 'pedido', 'ticket', 'avg', 'reemb', 'cancel', 'devol', 'margem', 'custo', 'gasto', 'ads', 'despesa', 'cpc', 'ctr', 'conversao', 'preco', 'price', 'stock', 'estoque', 'roas', 'taxa']):
+                if any(k in col.lower() for k in ['venda', 'receita', 'gmv', 'pedido', 'pago', 'ticket', 'avg', 'reemb', 'cancel', 'devol', 'margem', 'custo', 'gasto', 'ads', 'despesa', 'cpc', 'ctr', 'conversao', 'preco', 'price', 'stock', 'estoque', 'roas', 'taxa']):
                     valor = limpar_valor(row[col]) if pd.notna(row[col]) and str(row[col]).strip() not in {'-', ''} else 0.0
                     if valor == 0:
                         continue
+                    # Taxas/médias (CTR, conversão, vendas por pedido, média de
+                    # dias) não são aditivas: ratear por dia produziria números
+                    # sem sentido (ex.: conversão de 4,77% virando 0,16%/dia).
+                    # O valor do período é repetido em cada dia da janela.
+                    e_taxa = any(k in col.lower() for k in _METRICAS_DE_TAXA)
                     for d in range(dias_no_periodo):
                         dia_registro = data_inicio + timedelta(days=d)
-                        add_metrica(item_id, dia_registro.date(), normalizar_nome_metric(col), valor / dias_no_periodo, arquivo_trafego.name)
+                        add_metrica(item_id, dia_registro, normalizar_nome_metric(col), valor if e_taxa else valor / dias_no_periodo, arquivo_trafego.name)
 
     except Exception as e:
         return 0, f"Erro ao ler Tráfego Orgânico: {e}"
@@ -450,6 +503,7 @@ def processar_relatorio_ads_avancado(arquivos_ads, data_inicio, data_fim):
     if not isinstance(arquivos_ads, list):
         arquivos_ads = [arquivos_ads]
 
+    data_inicio, data_fim = _como_date(data_inicio), _como_date(data_fim)
     dias_no_periodo = (data_fim - data_inicio).days + 1
     if dias_no_periodo <= 0:
         return 0, "Data inválida."
@@ -629,7 +683,7 @@ def processar_relatorio_ads_avancado(arquivos_ads, data_inicio, data_fim):
         for d in range(dias_no_periodo):
             dia_registro = data_inicio + timedelta(days=d)
             linhas_insercao.append((
-                item_id, dia_registro.date(), tipo_campanha, nome_final,
+                item_id, dia_registro, tipo_campanha, nome_final,
                 distribuir_inteiro(m["imp"], dias_no_periodo, d),
                 distribuir_inteiro(m["cli"], dias_no_periodo, d),
                 distribuir_monetario(m["inv"], dias_no_periodo, d),

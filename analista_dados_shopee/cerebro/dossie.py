@@ -229,10 +229,21 @@ variacoes_por_item AS (
     GROUP BY v.item_id
 ),
 metricas_importadas_7d AS (
+    -- Nomes reais do parentskudetail: vendas em BRL existem em DOIS estágios
+    -- (pedido realizado e pedido pago) — somar ambos dobraria; usamos o PAGO.
+    -- O padrão antigo '%pedido%' somava dinheiro + contagens + taxas de
+    -- conversão num número só; unidades (pago) é a medida honesta de vendas.
     SELECT
         item_id,
-        SUM(CASE WHEN metric_name ILIKE 'venda%' OR metric_name ILIKE '%pedido%' OR metric_name ILIKE 'gmv%' OR metric_name ILIKE 'receita%' THEN metric_value ELSE 0 END) AS vendas_importadas_7d,
-        SUM(CASE WHEN metric_name ILIKE 'receita%' OR metric_name ILIKE 'gmv%' THEN metric_value ELSE 0 END) AS receita_importada_7d,
+        SUM(CASE WHEN metric_name ILIKE 'unidade%'
+                  AND metric_name NOT ILIKE '%carrinho%'
+                  AND metric_name NOT ILIKE '%realizado%'
+             THEN metric_value ELSE 0 END) AS vendas_importadas_7d,
+        SUM(CASE WHEN metric_name ILIKE 'receita%' OR metric_name ILIKE 'gmv%'
+                  OR (metric_name ILIKE 'venda%brl'
+                      AND metric_name NOT ILIKE '%por_pedido%'
+                      AND metric_name NOT ILIKE '%realizado%')
+             THEN metric_value ELSE 0 END) AS receita_importada_7d,
         SUM(CASE WHEN metric_name ILIKE 'cancel%' THEN metric_value ELSE 0 END) AS cancelamentos_importados_7d,
         SUM(CASE WHEN metric_name ILIKE 'devol%' THEN metric_value ELSE 0 END) AS devolucoes_importadas_7d,
         SUM(CASE WHEN metric_name ILIKE 'reemb%' THEN metric_value ELSE 0 END) AS reembolsos_importados_7d,
@@ -243,9 +254,20 @@ metricas_importadas_7d AS (
     GROUP BY item_id
 ),
 macro_loja_7d AS (
+    -- Padrões alinhados aos nomes REAIS do export shop-stats, que grava CINCO
+    -- métricas começando com 'vendas': vendas_brl, vendas_sem_os_descontos_da_
+    -- shopee, vendas_por_pedido (ticket médio), vendas_canceladas e vendas_
+    -- devolvidas_reembolsadas. Só vendas_brl é receita — somar todas mais que
+    -- dobraria o número.
     SELECT
-        SUM(CASE WHEN metric_name ILIKE 'receita%' OR metric_name ILIKE 'gmv%' THEN metric_value ELSE 0 END) AS receita_macro_7d,
-        AVG(CASE WHEN metric_name ILIKE 'convers%' THEN metric_value ELSE NULL END) AS conversao_macro_7d,
+        SUM(CASE WHEN metric_name ILIKE 'receita%' OR metric_name ILIKE 'gmv%'
+                  OR (metric_name ILIKE 'venda%'
+                      AND metric_name NOT ILIKE '%cancelad%'
+                      AND metric_name NOT ILIKE '%devolvid%'
+                      AND metric_name NOT ILIKE '%descont%'
+                      AND metric_name NOT ILIKE '%por_pedido%')
+             THEN metric_value ELSE 0 END) AS receita_macro_7d,
+        AVG(CASE WHEN metric_name ILIKE '%convers%' AND metric_name NOT ILIKE '%carrinho%' THEN metric_value ELSE NULL END) AS conversao_macro_7d,
         AVG(CASE WHEN metric_name ILIKE 'roas%' THEN metric_value ELSE NULL END) AS roas_macro_7d,
         SUM(CASE WHEN metric_name ILIKE 'visita%' THEN metric_value ELSE 0 END) AS visitas_macro_7d,
         SUM(CASE WHEN metric_name ILIKE '%estoque%' OR metric_name ILIKE '%stock%' THEN metric_value ELSE 0 END) AS estoque_macro_7d
