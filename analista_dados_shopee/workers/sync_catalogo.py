@@ -1,7 +1,5 @@
 import sys
 import time
-import psycopg2
-import os
 from datetime import date
 from psycopg2.extras import execute_values
 from loguru import logger
@@ -14,28 +12,37 @@ load_dotenv(ROOT_DIR / "CHAVES_DADOS.env")
 
 # Corrigido o caminho do import para refletir a estrutura local correta
 from utils.shopee_core import chamar_shopee_api
+from utils.db_pool import get_connection
 
 def obter_lista_itens():
+    """Lista os anúncios NORMAL. Retorna (item_ids, listagem_completa):
+    listagem_completa=False quando a paginação foi interrompida por falha de
+    API — nesse caso a lista NÃO pode ser usada para marcar produtos como
+    fora do ar (marcaria produtos vivos por engano)."""
     logger.info("Buscando lista de anúncios ativos na Shopee...")
     path = "/api/v2/product/get_item_list"
     offset = 0
     page_size = 50
     item_ids = []
-    
+    listagem_completa = True
+
     while True:
         params = {"offset": offset, "page_size": page_size, "item_status": "NORMAL"}
         response = chamar_shopee_api(path, params)
-        if not response: break
-            
+        if response is None:
+            listagem_completa = False
+            logger.warning("Paginação do catálogo interrompida por falha de API; a lista pode estar incompleta.")
+            break
+
         itens_pagina = response.get("item", [])
         if not itens_pagina: break
-            
+
         item_ids.extend([item["item_id"] for item in itens_pagina])
         if not response.get("has_next_page"): break
         offset += page_size
-        
+
     logger.success(f"Foram encontrados {len(item_ids)} anúncios raiz.")
-    return item_ids
+    return item_ids, listagem_completa
 
 def obter_detalhes_e_variacoes(item_ids):
     logger.info("Buscando detalhes e variações (Models) de cada anúncio...")
@@ -120,63 +127,82 @@ def garantir_tabela_historico_variacoes(conn):
 def salvar_no_banco(produtos, variacoes):
     logger.info("Iniciando sincronização com o PostgreSQL (Catálogo)...")
     try:
-        conn = psycopg2.connect(
-            host=os.getenv("DB_HOST"), port=os.getenv("DB_PORT"),
-            database=os.getenv("POSTGRES_DB"), user=os.getenv("POSTGRES_USER"),
-            password=os.getenv("POSTGRES_PASSWORD")
-        )
-        cur = conn.cursor()
-        garantir_tabela_historico_variacoes(conn)
-        
-        # ATUALIZADO MIGRATION 02: Inserindo as métricas extras do Produto
-        query_produtos = """
-            INSERT INTO dim_produtos (item_id, nome_atual, category_id, status_shopee, data_criacao, nota_media_estrelas, likes_count, dias_pre_encomenda)
-            VALUES %s ON CONFLICT (item_id) DO UPDATE SET
-                nome_atual = EXCLUDED.nome_atual, category_id = EXCLUDED.category_id, 
-                status_shopee = EXCLUDED.status_shopee, nota_media_estrelas = EXCLUDED.nota_media_estrelas,
-                likes_count = EXCLUDED.likes_count, dias_pre_encomenda = EXCLUDED.dias_pre_encomenda;
-        """
-        valores_produtos = [(p['item_id'], p['nome_atual'], p['category_id'], p['status_shopee'], p['data_criacao'], p['nota_media_estrelas'], p['likes_count'], p['dias_pre_encomenda']) for p in produtos]
-        execute_values(cur, query_produtos, valores_produtos)
-        
-        # ATUALIZADO MIGRATION 02: Inserindo o estoque_shopee na variação
-        query_variacoes = """
-            INSERT INTO dim_variacoes (model_id, item_id, nome_variacao, sku_variacao, preco_venda_atual, estoque_shopee)
-            VALUES %s ON CONFLICT (model_id) DO UPDATE SET
-                nome_variacao = EXCLUDED.nome_variacao, sku_variacao = EXCLUDED.sku_variacao, 
-                preco_venda_atual = EXCLUDED.preco_venda_atual, estoque_shopee = EXCLUDED.estoque_shopee;
-        """
-        valores_variacoes = [(v['model_id'], v['item_id'], v['nome_variacao'], v['sku_variacao'], v['preco_venda_atual'], v['estoque_shopee']) for v in variacoes]
-        execute_values(cur, query_variacoes, valores_variacoes)
+        with get_connection() as conn:
+            garantir_tabela_historico_variacoes(conn)
+            cur = conn.cursor()
 
-        query_historico = """
-            INSERT INTO fato_historico_variacoes (model_id, data_registro, preco_venda_atual, estoque_shopee)
-            VALUES %s
-            ON CONFLICT (model_id, data_registro) DO UPDATE SET
-                preco_venda_atual = EXCLUDED.preco_venda_atual,
-                estoque_shopee = EXCLUDED.estoque_shopee;
-        """
-        valores_historico = [(v['model_id'], date.today(), v['preco_venda_atual'], v['estoque_shopee']) for v in variacoes]
-        if valores_historico:
-            execute_values(cur, query_historico, valores_historico)
-        
-        conn.commit()
-        cur.close()
-        conn.close()
+            # ATUALIZADO MIGRATION 02: Inserindo as métricas extras do Produto
+            query_produtos = """
+                INSERT INTO dim_produtos (item_id, nome_atual, category_id, status_shopee, data_criacao, nota_media_estrelas, likes_count, dias_pre_encomenda)
+                VALUES %s ON CONFLICT (item_id) DO UPDATE SET
+                    nome_atual = EXCLUDED.nome_atual, category_id = EXCLUDED.category_id,
+                    status_shopee = EXCLUDED.status_shopee, nota_media_estrelas = EXCLUDED.nota_media_estrelas,
+                    likes_count = EXCLUDED.likes_count, dias_pre_encomenda = EXCLUDED.dias_pre_encomenda;
+            """
+            valores_produtos = [(p['item_id'], p['nome_atual'], p['category_id'], p['status_shopee'], p['data_criacao'], p['nota_media_estrelas'], p['likes_count'], p['dias_pre_encomenda']) for p in produtos]
+            execute_values(cur, query_produtos, valores_produtos)
+
+            # ATUALIZADO MIGRATION 02: Inserindo o estoque_shopee na variação
+            query_variacoes = """
+                INSERT INTO dim_variacoes (model_id, item_id, nome_variacao, sku_variacao, preco_venda_atual, estoque_shopee)
+                VALUES %s ON CONFLICT (model_id) DO UPDATE SET
+                    nome_variacao = EXCLUDED.nome_variacao, sku_variacao = EXCLUDED.sku_variacao,
+                    preco_venda_atual = EXCLUDED.preco_venda_atual, estoque_shopee = EXCLUDED.estoque_shopee;
+            """
+            valores_variacoes = [(v['model_id'], v['item_id'], v['nome_variacao'], v['sku_variacao'], v['preco_venda_atual'], v['estoque_shopee']) for v in variacoes]
+            execute_values(cur, query_variacoes, valores_variacoes)
+
+            query_historico = """
+                INSERT INTO fato_historico_variacoes (model_id, data_registro, preco_venda_atual, estoque_shopee)
+                VALUES %s
+                ON CONFLICT (model_id, data_registro) DO UPDATE SET
+                    preco_venda_atual = EXCLUDED.preco_venda_atual,
+                    estoque_shopee = EXCLUDED.estoque_shopee;
+            """
+            valores_historico = [(v['model_id'], date.today(), v['preco_venda_atual'], v['estoque_shopee']) for v in variacoes]
+            if valores_historico:
+                execute_values(cur, query_historico, valores_historico)
+            cur.close()
+
         logger.success(f"Catálogo salvo: {len(produtos)} Produtos e {len(variacoes)} Variações.")
         return True
     except Exception as e:
         logger.error(f"Falha ao gravar catálogo: {e}")
         return False
 
+def marcar_produtos_fora_do_ar(item_ids_ativos):
+    """Produtos que sumiram da listagem NORMAL (excluídos/despublicados na
+    Shopee) saem do radar do Cérebro IA. Sem isto, um SKU morto continuaria
+    'NORMAL' no banco e seria auditado (e custaria tokens) para sempre.
+    Só deve ser chamada com a listagem paginada até o fim."""
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE dim_produtos
+                    SET status_shopee = 'NAO_LISTADO'
+                    WHERE status_shopee = 'NORMAL'
+                      AND item_id <> 0
+                      AND NOT (item_id = ANY(%s));
+                """, (list(item_ids_ativos),))
+                return cur.rowcount
+    except Exception as e:
+        logger.warning(f"Não foi possível marcar produtos fora do ar: {e}")
+        return 0
+
+
 # ==============================================================================
 # FUNÇÃO EXPORTADA PARA O STREAMLIT
 # ==============================================================================
 def sincronizar_catalogo():
     """Função principal a ser chamada pelo botão de sincronização."""
-    lista_ids = obter_lista_itens()
+    lista_ids, listagem_completa = obter_lista_itens()
     if lista_ids:
         produtos_extraidos, variacoes_extraidas = obter_detalhes_e_variacoes(lista_ids)
         sucesso = salvar_no_banco(produtos_extraidos, variacoes_extraidas)
+        if sucesso and listagem_completa:
+            desativados = marcar_produtos_fora_do_ar(lista_ids)
+            if desativados:
+                logger.info(f"{desativados} produto(s) saíram da listagem NORMAL e foram marcados como NAO_LISTADO.")
         return {"status": "sucesso" if sucesso else "erro", "produtos": len(produtos_extraidos)}
     return {"status": "erro", "produtos": 0}

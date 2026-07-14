@@ -82,57 +82,94 @@ def gerar_assinatura(path, access_token):
 # ==============================================================================
 # COMUNICADOR CENTRAL
 # ==============================================================================
-def chamar_shopee_api(path, params=None, method="GET", payload=None):
-    """
-    Motor centralizado de chamadas para a Shopee API v2.
-    Suporta GET (leitura de catálogo/pedidos) e POST (atuação da IA).
-    """
-    if params is None: params = {}
-    
-    # 1. Pega o Token temporário (seja do cache ou gerando um novo)
-    access_token = obter_access_token()
-    if not access_token:
-        return None
-        
-    # 2. Gera a assinatura de segurança usando o Token correto
-    timestamp, sign = gerar_assinatura(path, access_token)
-    
-    # 3. Adiciona as credenciais injetadas na URL
-    params.update({
-        "partner_id": PARTNER_ID,
-        "timestamp": timestamp,
-        "access_token": access_token,
-        "shop_id": SHOP_ID,
-        "sign": sign
-    })
-    
-    url = f"{BASE_URL}{path}"
-    
+
+# Sessão compartilhada: reaproveita a conexão TLS entre as centenas de chamadas
+# sequenciais de um backfill (escrow chama a API 1 vez por pedido).
+_HTTP_SESSION = requests.Session()
+
+
+def _espera_retry(response, tentativa):
+    """Backoff exponencial limitado, respeitando o Retry-After quando enviado."""
     try:
-        if method.upper() == "GET":
-            response = requests.get(url, params=params, timeout=30)
-        elif method.upper() == "POST":
-            response = requests.post(url, params=params, json=payload, timeout=30)
-        else:
-            logger.error(f"Método HTTP não suportado: {method}")
+        sugerido = int(response.headers.get("Retry-After", "") or 0)
+    except (TypeError, ValueError):
+        sugerido = 0
+    return min(15, max(sugerido, 2 ** tentativa))
+
+
+def chamar_shopee_api(path, params=None, method="GET", payload=None, max_tentativas=3):
+    """
+    Motor centralizado de chamadas para a Shopee API v2, com retry disciplinado:
+
+      - GET (leitura) é idempotente: repete em 429, 5xx, timeout e falha de rede.
+      - POST (atuação: preço/promoção/combo) só repete em 429 — nunca após
+        timeout ou 5xx, para não aplicar a mesma ação duas vezes na loja.
+
+    A assinatura é regenerada a cada tentativa: o timestamp faz parte dela e
+    uma retentativa com assinatura velha seria rejeitada.
+    """
+    metodo = method.upper()
+    if metodo not in {"GET", "POST"}:
+        logger.error(f"Método HTTP não suportado: {method}")
+        return None
+
+    url = f"{BASE_URL}{path}"
+
+    for tentativa in range(1, max_tentativas + 1):
+        access_token = obter_access_token()
+        if not access_token:
+            return None
+
+        timestamp, sign = gerar_assinatura(path, access_token)
+        params_completos = dict(params or {})
+        params_completos.update({
+            "partner_id": PARTNER_ID,
+            "timestamp": timestamp,
+            "access_token": access_token,
+            "shop_id": SHOP_ID,
+            "sign": sign
+        })
+
+        try:
+            if metodo == "GET":
+                response = _HTTP_SESSION.get(url, params=params_completos, timeout=(10, 30))
+            else:
+                response = _HTTP_SESSION.post(url, params=params_completos, json=payload, timeout=(10, 30))
+        except requests.exceptions.RequestException as e:
+            if metodo == "GET" and tentativa < max_tentativas:
+                espera = min(8, 2 ** tentativa)
+                logger.warning(f"Falha de rede em {path} (tentativa {tentativa}/{max_tentativas}); nova tentativa em {espera}s: {e}")
+                time.sleep(espera)
+                continue
+            logger.error(f"Falha de Rede ao tentar {metodo} em {path}: {e}")
             return None
 
         # 🤫 SILENCIADOR DE 404 (Ignora bloqueios de Tráfego e Ads)
         if response.status_code == 404 and ("/api/v2/insight" in path or "/api/v2/ads" in path):
             return None
 
-        response.raise_for_status()
-        data = response.json()
-        
+        # 429 é seguro repetir sempre (a Shopee não processou); 5xx só em GET.
+        deve_repetir = response.status_code == 429 or (response.status_code >= 500 and metodo == "GET")
+        if deve_repetir and tentativa < max_tentativas:
+            espera = _espera_retry(response, tentativa)
+            logger.warning(f"Shopee respondeu {response.status_code} em {path} (tentativa {tentativa}/{max_tentativas}); aguardando {espera}s.")
+            time.sleep(espera)
+            continue
+
+        try:
+            response.raise_for_status()
+            data = response.json()
+        except (requests.exceptions.RequestException, ValueError) as e:
+            logger.error(f"Resposta inválida da Shopee em {metodo} {path}: {e}")
+            return None
+
         if data.get("error"):
             logger.error(f"Shopee API Erro ({path}): {data.get('error')} - {data.get('message')}")
             return None
-            
+
         return data.get("response", {})
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Falha de Rede ao tentar {method} em {path}: {e}")
-        return None
+
+    return None
     
 # ==============================================================================
 # FUNÇÕES ATUADORAS (Usadas pelo Cérebro IA para manipular a loja)

@@ -1,0 +1,11 @@
+# Dependências do Analista de Dados Shopee (app Streamlit + pacote cerebro/)
+# litellm[proxy] foi removido: era do stack antigo (RunPod/LiteLLM local);
+# o Cérebro IA usa a API OpenAI direta via requests e a página 4 usa requests.
+streamlit
+psycopg2-binary
+python-dotenv
+pandas
+openpyxl
+loguru
+requests
+tabulate

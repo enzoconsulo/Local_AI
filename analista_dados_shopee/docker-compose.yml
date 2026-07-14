@@ -6,12 +6,16 @@ services:
     container_name: cofre_shopee
     restart: always
     env_file:
-      - ./CHAVES_DADOS.env # <--- ATUALIZADO AQUI
+      - ./CHAVES_DADOS.env
+    # IMPORTANTE: nada de ${VAR} aqui fora — a interpolação ${} do compose lê o
+    # shell/.env do HOST, não o env_file. Com ${TZ} vazio, o init do Postgres
+    # quebrava ("invalid value for parameter TimeZone") e o schema não era
+    # criado. TZ/PGTZ chegam pelo env_file; o healthcheck usa $$ para expandir
+    # DENTRO do container, onde as variáveis existem.
     environment:
-      - TZ=${TZ}
-      - PGTZ=${TZ}
+      - PGTZ=America/Sao_Paulo
     ports:
-      - "${DB_PORT}:5432"
+      - "5433:5432"   # porta padrão do projeto (DB_PORT=5433 no CHAVES_DADOS.env)
     shm_size: 256mb
     volumes:
       - shopee_db_data:/var/lib/postgresql/data
@@ -19,7 +23,7 @@ services:
     networks:
       - shopee_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -29,9 +33,7 @@ services:
     container_name: painel_shopee
     restart: always
     env_file:
-      - ./CHAVES_DADOS.env # <--- ATUALIZADO AQUI
-    environment:
-      - TZ=${TZ}
+      - ./CHAVES_DADOS.env
     ports:
       - "5050:80"
     volumes:

@@ -4,6 +4,7 @@ estudio_shopee\fotos_prontas\*
 estudio_shopee\peças_brutas\*
 *.log
 *.txt
+!requirements.txt
 *.png
 *.venv
 **/__pycache__/
