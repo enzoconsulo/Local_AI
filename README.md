@@ -13,85 +13,34 @@ Este projeto é uma solução completa de **Data Warehouse e Conselho de Adminis
 
 ---
 
-## ▶️ Execução local a partir da pasta raiz
+## ▶️ Como rodar (1 comando — primeira vez e rotina)
 
-Use estes comandos no diretório base do projeto: [README.md](README.md)
+Pré-requisitos: **Docker Desktop** aberto e **Python 3.10+** instalado.
 
-### 1) Primeira vez
-
-No PowerShell, a partir da pasta raiz do projeto:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-Verifique se os arquivos abaixo existem:
-- [CHAVES.env](CHAVES.env) com as chaves de GROQ e RunPod
-- [analista_dados_shopee/CHAVES_DADOS.env](analista_dados_shopee/CHAVES_DADOS.env) com as credenciais da Shopee e do PostgreSQL
-
-Se o arquivo de dados da Shopee não existir, ele será criado automaticamente ao executar o script abaixo:
+No PowerShell, na pasta raiz do projeto:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\run_local.ps1
 ```
 
-Este script faz tudo para você:
-- cria o ambiente virtual, se necessário
-- instala as dependências
-- sobe o PostgreSQL e o pgAdmin com Docker
-- valida a conexão com o banco
-- inicia o motor de IA
+O script detecta sozinho o cenário:
 
-### 2) Próximas vezes
+- **Primeira vez** — cria o `analista_dados_shopee/CHAVES_DADOS.env` a partir do
+  exemplo e abre para você preencher (Shopee, OpenAI, senha do banco); rode o
+  script de novo depois de salvar e ele faz o resto: venv, dependências, banco
+  no Docker, todas as migrações e abre a aplicação.
+- **Rotina** — sobe o Docker se preciso, pula instalações (só reinstala se o
+  `requirements.txt` mudou) e abre a aplicação em segundos.
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-powershell -ExecutionPolicy Bypass -File .\run_local.ps1
-```
+A aplicação abre em **http://localhost:8501**. Instruções completas, páginas e
+solução de problemas: [analista_dados_shopee/README.md](analista_dados_shopee/README.md).
 
-### 3) Rodar os módulos separadamente
-
-Em terminais diferentes:
-
-```powershell
-python llm.py
-```
-
-```powershell
-streamlit run analista_dados_shopee/data_app.py
-```
-
-Para o módulo de imagens:
+Para o módulo de imagens (opcional, separado):
 
 ```powershell
 cd estudio_shopee
 streamlit run app.py
 ```
-
----
-
-## 🧱 Requisitos
-
-- Docker Desktop instalado e rodando
-- Python 3.10+
-- Acesso às chaves da Shopee Open API
-- Chaves de GROQ e RunPod preenchidas em [CHAVES.env](CHAVES.env)
-- Arquivo [analista_dados_shopee/CHAVES_DADOS.env](analista_dados_shopee/CHAVES_DADOS.env) preenchido corretamente
-
----
-
-## ✅ Validação rápida
-
-Depois de subir tudo, rode:
-
-```powershell
-python analista_dados_shopee/test_db.py
-```
-
-Se a conexão estiver boa, o sistema já está preparado para a análise e sincronização.
 
 ---
 

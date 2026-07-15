@@ -17,7 +17,7 @@ if st.session_state.motor_ia_pronto:
     * **🏭 Engenharia de Fábrica:** Atualize os custos do seu filamento, energia e taxas de perda/refugo.
     * **🔄 Sincronização:** Extraia os dados cruciais da Shopee (Catálogo, Pedidos, Comportamento e Ads).
     * **🧠 Cérebro IA:** Analise a loja via OpenAI, com previsões determinísticas, cache e checkpoint local.
-    * **💬 Assistente de Dados:** Interrogue e converse livremente com os seus dados usando o modelo Groq de 70B.
+    * **💬 Assistente de Dados:** Interrogue e converse livremente com os seus dados (text-to-SQL seguro via OpenAI).
     * **💰 Lucro Real:** Mapeie filamento + peso por produto em 2 passos e veja o lucro líquido real de cada um (foto incluída).
     """)
     
