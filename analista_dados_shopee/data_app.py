@@ -13,10 +13,12 @@ if st.session_state.motor_ia_pronto:
     Bem-vindo ao **Centro de Comando Empresarial** da sua fazenda de impressão 3D.
     
     **Navegue pelo menu lateral para operar a loja:**
+    * **📊 Visão Central:** Todos os KPIs, funil, saúde da conta, boost grátis e o plano de ação — análise 100% local (zero custo de IA).
     * **🏭 Engenharia de Fábrica:** Atualize os custos do seu filamento, energia e taxas de perda/refugo.
     * **🔄 Sincronização:** Extraia os dados cruciais da Shopee (Catálogo, Pedidos, Comportamento e Ads).
     * **🧠 Cérebro IA:** Analise a loja via OpenAI, com previsões determinísticas, cache e checkpoint local.
     * **💬 Assistente de Dados:** Interrogue e converse livremente com os seus dados usando o modelo Groq de 70B.
+    * **💰 Lucro Real:** Mapeie filamento + peso por produto em 2 passos e veja o lucro líquido real de cada um (foto incluída).
     """)
     
     st.divider()

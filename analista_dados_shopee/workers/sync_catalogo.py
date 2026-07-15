@@ -65,7 +65,12 @@ def obter_detalhes_e_variacoes(item_ids):
                 estrelas = item.get("item_rating", {}).get("rating_star", 0.0)
                 likes = item.get("likes", 0)
                 dias_preparo = item.get("days_to_ship", 3)
-                
+
+                # MIGRATION 15: capa do anúncio (1ª imagem) — a mesma foto
+                # identifica o produto (e todas as suas variações) na UI.
+                lista_imagens = (item.get("image") or {}).get("image_url_list") or []
+                imagem_url = lista_imagens[0] if lista_imagens else None
+
                 produtos.append({
                     "item_id": item["item_id"],
                     "nome_atual": item["item_name"],
@@ -74,7 +79,8 @@ def obter_detalhes_e_variacoes(item_ids):
                     "data_criacao": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(item["create_time"])),
                     "nota_media_estrelas": estrelas,
                     "likes_count": likes,
-                    "dias_pre_encomenda": dias_preparo
+                    "dias_pre_encomenda": dias_preparo,
+                    "imagem_url": imagem_url
                 })
         
         for i_id in lote:
@@ -133,13 +139,14 @@ def salvar_no_banco(produtos, variacoes):
 
             # ATUALIZADO MIGRATION 02: Inserindo as métricas extras do Produto
             query_produtos = """
-                INSERT INTO dim_produtos (item_id, nome_atual, category_id, status_shopee, data_criacao, nota_media_estrelas, likes_count, dias_pre_encomenda)
+                INSERT INTO dim_produtos (item_id, nome_atual, category_id, status_shopee, data_criacao, nota_media_estrelas, likes_count, dias_pre_encomenda, imagem_url)
                 VALUES %s ON CONFLICT (item_id) DO UPDATE SET
                     nome_atual = EXCLUDED.nome_atual, category_id = EXCLUDED.category_id,
                     status_shopee = EXCLUDED.status_shopee, nota_media_estrelas = EXCLUDED.nota_media_estrelas,
-                    likes_count = EXCLUDED.likes_count, dias_pre_encomenda = EXCLUDED.dias_pre_encomenda;
+                    likes_count = EXCLUDED.likes_count, dias_pre_encomenda = EXCLUDED.dias_pre_encomenda,
+                    imagem_url = COALESCE(EXCLUDED.imagem_url, dim_produtos.imagem_url);
             """
-            valores_produtos = [(p['item_id'], p['nome_atual'], p['category_id'], p['status_shopee'], p['data_criacao'], p['nota_media_estrelas'], p['likes_count'], p['dias_pre_encomenda']) for p in produtos]
+            valores_produtos = [(p['item_id'], p['nome_atual'], p['category_id'], p['status_shopee'], p['data_criacao'], p['nota_media_estrelas'], p['likes_count'], p['dias_pre_encomenda'], p.get('imagem_url')) for p in produtos]
             execute_values(cur, query_produtos, valores_produtos)
 
             # ATUALIZADO MIGRATION 02: Inserindo o estoque_shopee na variação

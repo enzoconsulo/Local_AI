@@ -71,6 +71,7 @@ SONDAGENS = {
     ),
     "13_migration_indice_janelas_vendas.sql": _sonda_objeto("idx_pedidos_data_date"),
     "14_migration_indices_apoio_janelas.sql": _sonda_objeto("idx_historico_variacoes_data", "idx_metricas_importadas_data"),
+    "15_migration_imagem_produto.sql": _sonda_coluna("dim_produtos", "imagem_url"),
 }
 
 

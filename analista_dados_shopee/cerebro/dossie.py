@@ -385,13 +385,16 @@ SELECT
     COALESCE(macro.visitas_macro_7d, 0)  AS visitas_macro_7d,
     COALESCE(macro.estoque_macro_7d, 0)  AS estoque_macro_7d,
 
+    -- COALESCE em máquina/tempo: o mapeamento enxuto (só filamento + peso, da
+    -- página de Lucro) não cadastra máquina — sem o COALESCE, o NULL da
+    -- energia anulava o custo do material inteiro.
     (
         (
             (CASE WHEN mat.unidade_medida = 'kg'
                   THEN (eng.peso_gramas / 1000.0)
                   ELSE eng.peso_gramas END
              * mat.custo_por_unidade)
-            + (eng.tempo_impressao_minutos * maq.custo_energia_hora / 60.0)
+            + (COALESCE(eng.tempo_impressao_minutos, 0) * COALESCE(maq.custo_energia_hora, 0) / 60.0)
             + COALESCE(eng.custo_embalagem, 0)
         ) * (1 + (COALESCE(eng.taxa_perda_percentual, 0) / 100.0))
     )                                    AS custo_fabricacao_com_refugo,
