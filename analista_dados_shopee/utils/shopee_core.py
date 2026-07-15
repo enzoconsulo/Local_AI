@@ -144,8 +144,15 @@ def chamar_shopee_api(path, params=None, method="GET", payload=None, max_tentati
             logger.error(f"Falha de Rede ao tentar {metodo} em {path}: {e}")
             return None
 
-        # 🤫 SILENCIADOR DE 404 (Ignora bloqueios de Tráfego e Ads)
-        if response.status_code == 404 and ("/api/v2/insight" in path or "/api/v2/ads" in path):
+        # 🤫 SILENCIADOR DE MÓDULOS OPCIONAIS — Insight, Ads e Account Health
+        # dependem de permissão marcada no console da Open Platform (apps
+        # "seller in-house" precisam habilitar módulo a módulo; 403/404 = não
+        # habilitado). A ausência vira None e a UI explica como habilitar,
+        # em vez de poluir o log com erro. Flagrado em teste real: account_
+        # health respondeu 403 Forbidden nesta conta.
+        _MODULOS_OPCIONAIS = ("/api/v2/insight", "/api/v2/ads", "/api/v2/account_health")
+        if response.status_code in (403, 404) and any(m in path for m in _MODULOS_OPCIONAIS):
+            logger.warning(f"Módulo opcional sem permissão para este app ({response.status_code}): {path}")
             return None
 
         # 429 é seguro repetir sempre (a Shopee não processou); 5xx só em GET.
@@ -328,8 +335,171 @@ def criar_combo_shopee(item_id, percentual_desconto=10, limite_compras=100):
     }
     
     resp_item = chamar_shopee_api(path_add_item, method="POST", payload=payload_item)
-    
+
     if resp_item is not None and not resp_item.get("error"):
         return True, "Combo 'Leve 2' configurado com sucesso. Ativo em ~30 min."
-        
+
     return False, "Falha ao atrelar item ao Combo."
+
+
+# ==============================================================================
+# SAÚDE DA CONTA (v2.account_health) — o que decide o ALCANCE orgânico da loja
+# ==============================================================================
+
+def obter_saude_conta():
+    """Lê a saúde operacional da loja direto da API oficial.
+
+    Nomes de endpoint VALIDADOS AO VIVO nesta conta (14/07/2026): a família
+    atual usa o prefixo get_ ('get_shop_performance'); os nomes antigos sem
+    get_ respondem 403 e NÃO significam falta de permissão do app.
+
+    Retorna dict com performance, pontos de penalidade, punições ativas,
+    anúncios com problema e pedidos atrasados — ou None se o módulo estiver
+    realmente indisponível.
+    """
+    performance = chamar_shopee_api("/api/v2/account_health/get_shop_performance")
+    if performance is None:
+        return None
+    return {
+        "performance": performance,
+        "pontos": chamar_shopee_api("/api/v2/account_health/get_penalty_point_history") or {},
+        "punicoes_ativas": chamar_shopee_api(
+            "/api/v2/account_health/get_punishment_history", params={"punishment_status": 1}) or {},
+        "listagens_com_problema": chamar_shopee_api(
+            "/api/v2/account_health/get_listings_with_issues", params={"page_no": 1, "page_size": 100}) or {},
+        "pedidos_atrasados": chamar_shopee_api(
+            "/api/v2/account_health/get_late_orders", params={"page_no": 1, "page_size": 100}) or {},
+    }
+
+
+# ==============================================================================
+# BOOST DE PRODUTOS (v2.product.boost_item) — alcance GRÁTIS, 5 itens / 4 horas
+# ==============================================================================
+
+def listar_boost_ativo():
+    """IDs dos itens atualmente impulsionados (a Shopee permite até 5 por vez;
+    cada boost dura 4 horas). Retorna lista de item_ids ou None em falha."""
+    resp = chamar_shopee_api("/api/v2/product/get_boosted_list")
+    if resp is None:
+        return None
+    lista = resp.get("item_id_list") or []
+    # Algumas regiões devolvem [{"item_id": ...}] em vez de [int]
+    return [i.get("item_id", i) if isinstance(i, dict) else int(i) for i in lista]
+
+
+def impulsionar_itens(item_ids):
+    """Impulsiona até 5 itens (aparecem primeiro na aba da loja e ganham
+    prioridade nas recomendações por 4 horas — recurso gratuito da Shopee).
+
+    Retorna (lista_sucesso, lista_falhas[(item_id, motivo)]).
+    """
+    payload = {"item_id_list": [int(i) for i in item_ids[:5]]}
+    logger.info(f"Boost solicitado para itens: {payload['item_id_list']}")
+    resp = chamar_shopee_api("/api/v2/product/boost_item", method="POST", payload=payload)
+    if resp is None:
+        return [], [(i, "Sem resposta da Shopee") for i in payload["item_id_list"]]
+
+    falhas = [
+        (f.get("item_id"), f.get("failed_reason", "motivo não informado"))
+        for f in (resp.get("failure_list") or [])
+    ]
+    sucesso = list(resp.get("success_list") or [])
+    if not sucesso and not falhas:
+        # Formato alternativo: sem listas explícitas, considerar tudo aceito
+        sucesso = payload["item_id_list"]
+    return sucesso, falhas
+
+
+# ==============================================================================
+# VOUCHER DA LOJA (v2.voucher) — incentivo de checkout contra carrinho abandonado
+# ==============================================================================
+
+def _gerar_codigo_voucher() -> str:
+    """Código único de 5 chars (limite da Shopee BR): 'IA' + timestamp base36."""
+    alfabeto = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    n = int(time.time()) % (36 ** 3)
+    sufixo = ""
+    for _ in range(3):
+        n, resto = divmod(n, 36)
+        sufixo = alfabeto[resto] + sufixo
+    return f"IA{sufixo}"
+
+
+def criar_voucher_loja(nome, desconto_reais, min_gasto, usos, dias_duracao=7, codigo=None):
+    """Cria um voucher de valor FIXO para a loja toda (voucher_type=1,
+    reward_type=1 — custo máximo previsível: usos × desconto).
+
+    Começa em ~15 min (a Shopee exige start_time no futuro) e aparece nos
+    canais padrão (página da loja, produto e checkout).
+    Retorna (True, voucher_id) ou (False, motivo).
+    """
+    inicio = int(time.time()) + 900
+    payload = {
+        "voucher_name": str(nome)[:100],
+        "voucher_code": (codigo or _gerar_codigo_voucher())[:5].upper(),
+        "start_time": inicio,
+        "end_time": inicio + int(dias_duracao) * 86400,
+        "voucher_type": 1,      # 1 = loja inteira
+        "reward_type": 1,       # 1 = desconto em valor fixo
+        "usage_quantity": int(usos),
+        "min_basket_price": float(min_gasto),
+        "discount_amount": float(desconto_reais),
+        "display_channel_list": [1],  # 1 = exibir em todos os canais padrão
+    }
+    logger.info(f"Criando voucher {payload['voucher_code']}: R$ {desconto_reais} acima de R$ {min_gasto}, {usos} usos")
+    resp = chamar_shopee_api("/api/v2/voucher/add_voucher", method="POST", payload=payload)
+    if resp and resp.get("voucher_id"):
+        return True, resp["voucher_id"]
+    return False, f"Shopee recusou o voucher: {resp}" if resp else "Sem resposta da Shopee."
+
+
+def listar_vouchers(status="ongoing"):
+    """Vouchers da loja por status ('upcoming'|'ongoing'|'expired'|'all').
+    Retorna lista (possivelmente vazia) ou None em falha de comunicação."""
+    resp = chamar_shopee_api(
+        "/api/v2/voucher/get_voucher_list",
+        params={"status": status, "page_no": 1, "page_size": 25},
+    )
+    if resp is None:
+        return None
+    return resp.get("voucher_list") or []
+
+
+def encerrar_voucher(voucher_id, ja_iniciado=True):
+    """Encerra um voucher em andamento (end_voucher) ou exclui um agendado
+    que ainda não começou (delete_voucher). Retorna (sucesso, msg)."""
+    path = "/api/v2/voucher/end_voucher" if ja_iniciado else "/api/v2/voucher/delete_voucher"
+    resp = chamar_shopee_api(path, method="POST", payload={"voucher_id": int(voucher_id)})
+    if resp is not None and resp.get("voucher_id"):
+        return True, "Voucher encerrado."
+    return False, f"Falha ao encerrar: {resp}" if resp else "Sem resposta da Shopee."
+
+
+# ==============================================================================
+# MÉTRICAS EXTRAS POR ITEM (v2.product.get_item_extra_info)
+# views/curtidas/vendas acumuladas via API — sem depender de planilha
+# ==============================================================================
+
+def obter_info_extra_itens(item_ids):
+    """Busca views, curtidas e vendas acumuladas por item, em lotes de 50.
+
+    Retorna {item_id: {"views": n, "likes": n, "vendas_acumuladas": n,
+    "avaliacoes": n, "estrelas": f}} — apenas itens que a API devolveu.
+    """
+    resultado = {}
+    ids = [int(i) for i in item_ids]
+    for inicio in range(0, len(ids), 50):
+        lote = ids[inicio:inicio + 50]
+        resp = chamar_shopee_api(
+            "/api/v2/product/get_item_extra_info",
+            params={"item_id_list": ",".join(str(i) for i in lote)},
+        )
+        for item in (resp or {}).get("item_list", []) or []:
+            resultado[item.get("item_id")] = {
+                "views": int(item.get("views", 0) or 0),
+                "likes": int(item.get("likes", 0) or 0),
+                "vendas_acumuladas": int(item.get("sale", 0) or 0),
+                "avaliacoes": int(item.get("comment_count", 0) or 0),
+                "estrelas": float(item.get("rating_star", 0) or 0),
+            }
+    return resultado
