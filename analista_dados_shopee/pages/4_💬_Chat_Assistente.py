@@ -22,14 +22,14 @@ from cerebro.config import OPENAI_MODEL_CHAT
 
 st.set_page_config(page_title="Assistente IA", page_icon="💬", layout="wide")
 
-st.title("💬 Assistente de Dados (Text-to-SQL)")
-st.markdown(
-    "Interrogue o seu Data Warehouse em português. O consultor traduz a pergunta em SQL de leitura, "
-    "executa com segurança e devolve a resposta executiva."
-)
+from utils.ui import aplicar_estilo, cabecalho
+aplicar_estilo()
+
+cabecalho("💬", "Assistente de Dados",
+           "Pergunte em português; o consultor traduz para SQL somente-leitura, executa com segurança e responde de forma executiva.")
 
 # ─── Análises rápidas ─────────────────────────────────────────────────────────
-st.write("⚡ **Análises Prontas (clique para interrogar a IA):**")
+st.markdown("**⚡ Análises prontas** — um clique e a pergunta certa já vai para a IA:")
 col1, col2, col3, col4 = st.columns(4)
 
 prompt_acionado = None

@@ -12,6 +12,9 @@ load_dotenv(dotenv_path=ROOT_DIR / "CHAVES_DADOS.env")
 
 st.set_page_config(page_title="Engenharia de Fábrica", page_icon="⚙️", layout="wide")
 
+from utils.ui import aplicar_estilo, cabecalho
+aplicar_estilo()
+
 # ==============================================================================
 # CONEXÃO BLINDADA COM O POSTGRESQL (Abre e fecha a cada requisição)
 # ==============================================================================
@@ -74,34 +77,36 @@ def run_delete(query, params):
 # ==============================================================================
 st.markdown("""
 <style>
+/* Cartões locais desta página, alinhados ao tema claro do design system */
 .eng-card {
-    border: 1px solid rgba(148,163,184,0.25);
+    border: 1px solid rgba(0,0,0,.06);
     border-radius: 14px;
     padding: 14px 16px;
     margin-bottom: 10px;
-    background: rgba(255,255,255,0.02);
+    background: #FFFFFF;
+    box-shadow: 0 1px 2px rgba(0,0,0,.03);
 }
-.eng-card.ok { border-left: 4px solid #22c55e; }
-.eng-card.pending { border-left: 4px solid #f59e0b; }
-.eng-card.danger { border-left: 4px solid #ef4444; }
+.eng-card.ok { border-left: 4px solid #34C759; }
+.eng-card.pending { border-left: 4px solid #FF9500; }
+.eng-card.danger { border-left: 4px solid #FF3B30; }
 .eng-badge {
-    display:inline-block; padding: 2px 10px; border-radius: 999px;
+    display:inline-block; padding: 3px 10px; border-radius: 999px;
     font-size: 0.72rem; font-weight:600; white-space:nowrap;
 }
-.eng-badge.green  { background: rgba(34,197,94,0.15);  color:#22c55e; }
-.eng-badge.orange { background: rgba(245,158,11,0.15); color:#f59e0b; }
-.eng-badge.red    { background: rgba(239,68,68,0.15);  color:#ef4444; }
-.eng-badge.gray   { background: rgba(148,163,184,0.15);color:#94a3b8; }
-.eng-badge.blue   { background: rgba(59,130,246,0.15); color:#3b82f6; }
+.eng-badge.green  { background: #E8F7EC; color:#1E7B34; }
+.eng-badge.orange { background: #FFF3E0; color:#B15C00; }
+.eng-badge.red    { background: #FDECEC; color:#C22B22; }
+.eng-badge.gray   { background: #F0F0F2; color:#55555A; }
+.eng-badge.blue   { background: #E8F1FD; color:#0059B8; }
 .eng-dot {
     display:inline-block; width:14px; height:14px; border-radius:50%;
-    margin-right:6px; vertical-align:middle; border:1px solid rgba(255,255,255,0.3);
+    margin-right:6px; vertical-align:middle; border:1px solid rgba(0,0,0,.15);
 }
 .eng-row { display:flex; justify-content:space-between; align-items:center; }
-.eng-muted { font-size:0.78rem; color:#94a3b8; }
+.eng-muted { font-size:0.78rem; color:#6E6E73; }
 .eng-sticky-summary {
-    border: 1px solid rgba(34,197,94,0.35);
-    background: rgba(34,197,94,0.06);
+    border: 1px solid rgba(52,199,89,.35);
+    background: #F1FAF3;
     border-radius: 14px;
     padding: 12px 16px;
     margin-bottom: 16px;
@@ -137,8 +142,8 @@ def badge(texto: str, cor: str) -> str:
 # ==============================================================================
 # INTERFACE — CABEÇALHO + PAINEL DE STATUS GERAL
 # ==============================================================================
-st.title("⚙️ Engenharia de Fábrica e Insumos")
-st.markdown("Alimente os custos de materiais, energia e perdas (refugo). A IA usará isso para auditar a sua operação de forma cirúrgica.")
+cabecalho("⚙️", "Engenharia de Fábrica e Insumos",
+           "Custos de materiais, energia e perdas (refugo) — a base para a IA auditar a operação de forma cirúrgica.")
 
 df_mat = run_query("""
     SELECT id_material, nome, tipo, custo_por_unidade, unidade_medida, estoque_atual
@@ -589,8 +594,8 @@ with tab_mapeamento:
                     for col_vg, (_, var_vg) in zip(cols_vg, linha_vg.iterrows()):
                         with col_vg:
                             is_sel = (var_vg["model_id"] == model_id_individual)
-                            borda_cor = "border: 2px solid #3b82f6;" if is_sel else ""
-                            fundo_cor = "background: rgba(59,130,246,0.05);" if is_sel else ""
+                            borda_cor = "border: 2px solid #0071E3;" if is_sel else ""
+                            fundo_cor = "background: rgba(0,113,227,0.05);" if is_sel else ""
                             
                             mapeado_vg = bool(var_vg["mapeado"])
                             badge_vg = badge("✅ Mapeado", "green") if mapeado_vg else badge("⬜ Pendente", "orange")
@@ -599,11 +604,11 @@ with tab_mapeamento:
                             nome_maq_vg = df_maq.loc[df_maq['id_maquina'] == var_vg['id_maquina'], 'nome_modelo'].iloc[0] if mapeado_vg and pd.notna(var_vg['id_maquina']) and not df_maq[df_maq['id_maquina'] == var_vg['id_maquina']].empty else "Máquina pendente"
 
                             info_extra = f"""
-                            <span style="color: #64748b;">🧵 {nome_mat_vg}</span><br>
-                            <span style="color: #64748b;">🖨️ {nome_maq_vg}</span><br>
+                            <span style="color: #6E6E73;">🧵 {nome_mat_vg}</span><br>
+                            <span style="color: #6E6E73;">🖨️ {nome_maq_vg}</span><br>
                             ⚖️ {var_vg['peso_gramas']:.0f}g · ⏱️ {int(var_vg['tempo_impressao_minutos'])}min<br>
                             🗑️ {var_vg['taxa_perda_percentual'] or 0:.0f}% refugo · 📦 R$ {var_vg['custo_embalagem'] or 0:.2f}
-                            """ if mapeado_vg else "<span style='color: #ef4444;'>Nenhum dado cadastrado.</span>"
+                            """ if mapeado_vg else "<span style='color: #C22B22;'>Nenhum dado cadastrado.</span>"
                             
                             st.markdown(f"""
                             <div class="eng-card {'ok' if mapeado_vg else 'pending'}" style="{borda_cor} {fundo_cor} padding: 10px; font-size: 0.82rem; margin-bottom: 5px;">

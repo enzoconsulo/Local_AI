@@ -34,6 +34,9 @@ from utils.db_pool import get_connection
 
 st.set_page_config(page_title="Mapeamento de Insumos", page_icon="🧵", layout="wide")
 
+from utils.ui import aplicar_estilo, cabecalho, secao
+aplicar_estilo()
+
 # ==============================================================================
 # SEÇÃO 1 — LEITURA E NORMALIZAÇÃO DO BACKUP
 # ==============================================================================
@@ -300,12 +303,11 @@ def salvar_engenharia(cur, model_id, id_material, id_maquina, peso_gramas,
 # SEÇÃO 4 — INTERFACE
 # ==============================================================================
 
-st.title("🧵 Mapeamento de Insumos (Filamentos & Engenharia)")
+cabecalho("🧵", "Mapeamento de Insumos",
+           "Importe o backup do app de gastos e vincule materiais, máquina e engenharia ao DW automaticamente.")
 st.markdown(
-    "Importe o backup do seu app local de controle de gastos para vincular "
-    "automaticamente **materiais**, **máquina** e **engenharia de produto** "
-    "(peso, tempo de impressão, embalagem) ao Data Warehouse da Shopee. "
-    "Nada é gravado até você revisar e clicar em **Aplicar Mapeamento**."
+    "O fluxo tem 3 passos — **materiais**, **máquina** e **produtos** — e nada é gravado "
+    "até você revisar tudo e clicar em **Aplicar Mapeamento** no final."
 )
 
 arquivo_backup = st.file_uploader("📂 Backup JSON do controle de gastos", type=["json"])
@@ -333,7 +335,7 @@ if df_produtos_dw.empty:
 st.divider()
 
 # ── 1. Materiais ──────────────────────────────────────────────────────────────
-st.subheader("1️⃣ Materiais (Filamentos)")
+secao(1, "Materiais (filamentos)", "Confira se cada material do backup vira um novo cadastro ou se vincula a um já existente.")
 sincronizar_estoque = st.checkbox(
     "🔁 Sincronizar também o estoque atual (sobrescreve o estoque_atual dos materiais já existentes)",
     value=False,
@@ -380,7 +382,7 @@ for i, mat in enumerate(st.session_state.materiais_backup):
 st.divider()
 
 # ── 2. Máquina ────────────────────────────────────────────────────────────────
-st.subheader("2️⃣ Máquina (custo de energia/hora)")
+secao(2, "Máquina (custo de energia/hora)", "O custo por hora detectado no backup é vinculado a uma impressora do DW — ou cria uma nova.")
 opcoes_maquinas_existentes = {"— Criar nova máquina —": None}
 for _, r in df_maquinas_dw.iterrows():
     opcoes_maquinas_existentes[f"{r['nome_modelo']} (R$ {r['custo_energia_hora']:.4f}/h)"] = r["id_maquina"]
@@ -415,7 +417,7 @@ for i, valor in enumerate(st.session_state.maquinas_backup):
 st.divider()
 
 # ── 3. Produtos / Engenharia ────────────────────────────────────────────────
-st.subheader("3️⃣ Produtos → Engenharia (vínculo com item_id / model_id da Shopee)")
+secao(3, "Produtos → Engenharia", "Vínculo de cada produto do backup com o item da Shopee (item_id / model_id).")
 
 LIMIAR_ALTA_CONFIANCA = 0.70   # ✅ mapeia automático, você só revisa
 LIMIAR_MEDIA_CONFIANCA = 0.40  # 🟡 precisa da sua confirmação explícita

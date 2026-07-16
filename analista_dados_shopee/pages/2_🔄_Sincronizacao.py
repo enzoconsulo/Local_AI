@@ -32,6 +32,9 @@ from utils.db_pool import get_connection
 
 st.set_page_config(page_title="Sincronização do DW", page_icon="🔄", layout="wide")
 
+from utils.ui import aplicar_estilo, cabecalho, nota
+aplicar_estilo()
+
 # Processadores de planilhas e controle de sync — extraídos para
 # workers/importar_planilhas.py (testáveis fora do Streamlit e corrigidos
 # contra exports reais de Ads; ver docstring do módulo).
@@ -52,31 +55,27 @@ from workers.importar_planilhas import (
 # ==============================================================================
 # INTERFACE COM ABAS (TABS) E LINKS RÁPIDOS
 # ==============================================================================
-st.title("🔄 Sincronização e Data Warehouse")
-st.markdown("""
-Carregue dados de marketing, tráfego e desempenho da Shopee para enriquecer o Data Warehouse.
-O fluxo é compatível com CSVs e XLSX, e os arquivos são processados de forma consistente para alimentar o Cérebro IA.
-""")
+cabecalho("🔄", "Sincronização e Data Warehouse",
+           "API oficial + planilhas do Seller Center (CSV/XLSX) — tudo processado de forma consistente para alimentar o Cérebro.")
 
-# Exibe o status atual do banco
-col_a, col_b, col_c, col_d = st.columns(4)
+# Última atualização de cada fonte de dado (cartões de métrica do design system)
 ultima_sync_pedidos = obter_ultima_sincronizacao('PEDIDOS')
 ultima_sync_org = obter_ultima_sincronizacao('TRAFEGO_ORG')
 ultima_sync_ads = obter_ultima_sincronizacao('ADS_AVANCADO')
 ultima_sync_global = obter_ultima_sincronizacao('VISAO_GERAL')
 
-with col_a: st.info(f"📦 Pedidos (API): **{ultima_sync_pedidos.strftime('%d/%m %H:%M') if ultima_sync_pedidos else 'Nunca'}**")
-with col_b: st.info(f"🌿 Tráfego Orgânico: **{ultima_sync_org.strftime('%d/%m/%Y') if ultima_sync_org else 'Nunca'}**")
-with col_c: st.info(f"🎯 Shopee Ads: **{ultima_sync_ads.strftime('%d/%m/%Y') if ultima_sync_ads else 'Nunca'}**")
-with col_d: st.info(f"📈 Visão Geral: **{ultima_sync_global.strftime('%d/%m/%Y') if ultima_sync_global else 'Nunca'}**")
+col_a, col_b, col_c, col_d = st.columns(4)
+col_a.metric("📦 Pedidos (API)", ultima_sync_pedidos.strftime('%d/%m %H:%M') if ultima_sync_pedidos else "Nunca")
+col_b.metric("🌿 Tráfego Orgânico", ultima_sync_org.strftime('%d/%m/%Y') if ultima_sync_org else "Nunca")
+col_c.metric("🎯 Shopee Ads", ultima_sync_ads.strftime('%d/%m/%Y') if ultima_sync_ads else "Nunca")
+col_d.metric("📈 Visão Geral", ultima_sync_global.strftime('%d/%m/%Y') if ultima_sync_global else "Nunca")
 
-st.divider()
-
-st.caption(
-    "💡 **Dica de qualidade de dado:** exportações de **1 dia** são gravadas como observação DIÁRIA real; "
-    "períodos maiores são rateados (AGREGADA_PERIODO). Quanto mais dias diários o banco tiver, "
-    "mais precisa (e mais barata) fica a análise do Cérebro IA — a cobertura diária melhora a "
-    "classificação de evidência e aumenta o reaproveitamento do cache semântico."
+st.markdown("")
+nota(
+    "Exportações de <b>1 dia</b> são gravadas como observação DIÁRIA real; períodos maiores são "
+    "rateados (AGREGADA_PERIODO). Quanto mais dias diários o banco tiver, mais precisa (e mais "
+    "barata) fica a análise do Cérebro IA.",
+    titulo="Dica de qualidade de dado",
 )
 
 aba_principal, aba_ads, aba_global = st.tabs([
@@ -90,33 +89,29 @@ aba_principal, aba_ads, aba_global = st.tabs([
 # ------------------------------------------------------------------------------
 with aba_principal:
     st.markdown("### 📦 Operação Diária & Performance Orgânica")
-    st.markdown("""
-    Nesta aba, sincronizamos os pedidos da API e importamos a planilha padrão de **Performance do Produto**.
-    O sistema foca em capturar suas **Visitas, Adições ao Carrinho e Taxa de Rejeição** para entender a saúde orgânica da loja.
-    """)
-
-    st.info("""
-    🛡️ **Segurança de Dados (Idempotência):** Você pode reenviar planilhas com datas repetidas ou sobrepostas. O sistema é inteligente: ele apenas atualiza os registros existentes com as informações mais recentes.
-    """)
+    st.markdown(
+        "Sincroniza os **pedidos pela API** e importa a planilha de **Performance do Produto** "
+        "(visitas, adições ao carrinho e taxa de rejeição) para medir a saúde orgânica da loja."
+    )
+    st.caption("🛡️ Reenviar planilhas com datas repetidas é seguro: o sistema apenas atualiza os registros existentes.")
 
     hoje = datetime.now()
     data_sugerida_inicio = ultima_sync_org if ultima_sync_org else (hoje - timedelta(days=30))
 
-    periodo_selecionado = st.date_input("📅 Qual foi o período selecionado para exportar a planilha na Shopee?",
+    periodo_selecionado = st.date_input("📅 1. Qual período você selecionou ao exportar a planilha na Shopee?",
                                         value=(data_sugerida_inicio.date(), hoje.date()),
                                         max_value=hoje.date())
 
-    st.markdown("#### 📥 Como exportar a planilha de Performance correta:")
-    st.markdown("""
-    1. Acesse o painel pelo botão abaixo. Ele abrirá diretamente a aba **Informações Gerenciais > Produto > Performance do Produto**.
-    2. No filtro de calendário (Período dos Dados) no topo, selecione o mesmo período que você escolheu acima.
-    3. Na seção "Desempenho do Produto" (lista com os itens), clique no botão azul **Exportar**.
-    4. Suba o arquivo Excel/CSV gerado aqui.
-    """)
+    with st.expander("📥 Como exportar a planilha de Performance correta (passo a passo)"):
+        st.markdown("""
+        1. Acesse o painel pelo botão abaixo. Ele abrirá diretamente a aba **Informações Gerenciais > Produto > Performance do Produto**.
+        2. No filtro de calendário (Período dos Dados) no topo, selecione o mesmo período que você escolheu acima.
+        3. Na seção "Desempenho do Produto" (lista com os itens), clique no botão azul **Exportar**.
+        4. Suba o arquivo Excel/CSV gerado aqui.
+        """)
+        st.link_button("🔗 Abrir Business Insights > Desempenho do Produto", "https://seller.shopee.com.br/datacenter/product/performance", use_container_width=True)
 
-    st.link_button("🔗 1. Abrir Business Insights > Desempenho do Produto", "https://seller.shopee.com.br/datacenter/product/performance", use_container_width=True)
-
-    arquivo_trafego = st.file_uploader("📂 2. Arraste o arquivo padrão de Performance do Produto aqui", type=["csv", "xlsx"], key="upload_trafego")
+    arquivo_trafego = st.file_uploader("📂 2. Arraste o arquivo de Performance do Produto aqui", type=["csv", "xlsx"], key="upload_trafego")
 
     datas_validas = isinstance(periodo_selecionado, tuple) and len(periodo_selecionado) == 2
 
@@ -136,7 +131,7 @@ with aba_principal:
                 "O rateio diário dos dias em comum será sobrescrito pelo novo arquivo — prefira períodos consistentes (ex.: sempre semanas fechadas ou sempre 1 dia)."
             )
 
-    if st.button("🚀 INICIAR SINCRONIZAÇÃO COMPLETA (API + Planilha)", type="primary", use_container_width=True, disabled=not datas_validas):
+    if st.button("🚀 3. Iniciar sincronização completa (API + planilha)", type="primary", use_container_width=True, disabled=not datas_validas):
 
         agora = datetime.now()
         dt_inicio_csv = datetime.combine(periodo_selecionado[0], datetime.min.time())
@@ -211,30 +206,28 @@ with aba_principal:
 # ------------------------------------------------------------------------------
 with aba_ads:
     st.markdown("### 🎯 Inteligência de Shopee Ads (GMV Max & Padrão)")
-    st.markdown("""
-    Esta sessão alimenta o Data Warehouse com dados de campanhas pagas. Aceita **múltiplos arquivos simultaneamente**.
-    O sistema extrairá os custos totais da loja (GMV Max Global) e os detalhes de cada produto.
-    """)
+    st.markdown(
+        "Alimenta o Data Warehouse com as campanhas pagas — custos totais da loja (GMV Max Global) "
+        "e detalhes por produto. Aceita **vários arquivos de uma vez**."
+    )
+    st.caption("🛡️ Pode enviar arquivos do mês todo sem medo de duplicar gastos: repetidos são detectados pelo conteúdo.")
 
-    st.info("🛡️ **Idempotente:** Pode enviar arquivos do mês todo sem medo de duplicação de gastos. Arquivos repetidos são detectados pelo conteúdo.")
-
-    st.markdown("#### 📥 Passo a Passo para Exportação Perfeita:")
-    st.markdown("""
-    1. Abra a **Central de Marketing** > **Shopee Ads**.
-    2. Role a página até encontrar a tabela **Todos os Anúncios de Produtos**.
-    3. Defina o calendário e ative TODAS as métricas em "Diagnóstico".
-    4. Clique em Exportar e baixe o arquivo **"Dados Gerais de Anúncios"**.
-    5. Se você roda GMV MAX exporte tambem o **"Dados do GMV MAX"** na mesma página.
-    6. **Arraste todos os arquivos baixados de uma só vez na caixa abaixo.**
-    """)
-
-    st.link_button("🔗 1. Abrir Painel do Shopee Ads", "https://seller.shopee.com.br/portal/marketing/pas/index", use_container_width=True)
+    with st.expander("📥 Passo a passo para a exportação perfeita"):
+        st.markdown("""
+        1. Abra a **Central de Marketing** > **Shopee Ads**.
+        2. Role a página até encontrar a tabela **Todos os Anúncios de Produtos**.
+        3. Defina o calendário e ative TODAS as métricas em "Diagnóstico".
+        4. Clique em Exportar e baixe o arquivo **"Dados Gerais de Anúncios"**.
+        5. Se você roda GMV MAX, exporte também o **"Dados do GMV MAX"** na mesma página.
+        6. **Arraste todos os arquivos baixados de uma só vez na caixa ao lado.**
+        """)
+        st.link_button("🔗 Abrir Painel do Shopee Ads", "https://seller.shopee.com.br/portal/marketing/pas/index", use_container_width=True)
 
     col_data_ads, col_upload_ads = st.columns([1, 2])
     with col_data_ads:
         hoje = datetime.now()
         data_sugerida_ads = ultima_sync_ads if ultima_sync_ads else (hoje - timedelta(days=7))
-        periodo_ads = st.date_input("📅 Qual o período selecionado no Shopee Ads?",
+        periodo_ads = st.date_input("📅 1. Período selecionado no Shopee Ads",
                                     value=(data_sugerida_ads.date(), hoje.date()),
                                     max_value=hoje.date(),
                                     key="data_input_ads")
@@ -267,7 +260,7 @@ with aba_ads:
                 "Os dias em comum serão sobrescritos com o novo rateio; dias fora do novo período mantêm o rateio antigo."
             )
 
-    if st.button("🧠 PROCESSAR INTELIGÊNCIA DE ADS", type="primary", use_container_width=True, disabled=not arquivos_ads_novos or not datas_ads_validas):
+    if st.button("🧠 3. Processar inteligência de Ads", type="primary", use_container_width=True, disabled=not arquivos_ads_novos or not datas_ads_validas):
         dt_inicio_ads = datetime.combine(periodo_ads[0], datetime.min.time())
         dt_fim_ads = datetime.combine(periodo_ads[1], datetime.max.time())
 
@@ -289,22 +282,19 @@ with aba_ads:
 # ------------------------------------------------------------------------------
 with aba_global:
     st.markdown("### 📈 Saúde Geral da Loja (Dashboard Macro)")
-    st.markdown("""
-    Esta sessão captura as métricas totais da sua loja para comparar o faturamento geral com os custos e o tráfego total.
-    """)
-    st.info("🛡️ **Idempotente:** Se subir os mesmos dias, o Data Warehouse entende e apenas subscreve com os dados mais consolidados.")
+    st.markdown("Captura as métricas totais da loja para comparar o faturamento geral com os custos e o tráfego total.")
+    st.caption("🛡️ Se subir os mesmos dias de novo, o Data Warehouse apenas sobrescreve com os dados mais consolidados.")
 
-    st.markdown("#### 📥 Como extrair a Visão Geral:")
-    st.markdown("""
-    1. Entre em **Informações Gerenciais** usando o botão abaixo.
-    2. No menu lateral, clique em **Painel**.
-    3. Logo abaixo das abas, garanta que você está na aba primária chamada **Visão Geral** (Overview).
-    4. Selecione o período no calendário e clique em **Exportar**.
-    """)
+    with st.expander("📥 Como extrair a Visão Geral (passo a passo)"):
+        st.markdown("""
+        1. Entre em **Informações Gerenciais** usando o botão abaixo.
+        2. No menu lateral, clique em **Painel**.
+        3. Logo abaixo das abas, garanta que você está na aba primária chamada **Visão Geral** (Overview).
+        4. Selecione o período no calendário e clique em **Exportar**.
+        """)
+        st.link_button("🔗 Abrir Painel de Visão Geral", "https://seller.shopee.com.br/datacenter/dashboard", use_container_width=True)
 
-    st.link_button("🔗 1. Abrir Painel de Visão Geral", "https://seller.shopee.com.br/datacenter/dashboard", use_container_width=True)
-
-    arquivo_global = st.file_uploader("📂 2. Arraste a planilha de Visão Geral exportada", type=["csv", "xlsx"], key="upload_global")
+    arquivo_global = st.file_uploader("📂 1. Arraste a planilha de Visão Geral exportada", type=["csv", "xlsx"], key="upload_global")
 
     processar_global_permitido = True
     if arquivo_global:
@@ -328,7 +318,7 @@ with aba_global:
             processar_global_permitido = st.checkbox("Reimportar mesmo assim", key="forcar_global")
 
     if arquivo_global and processar_global_permitido:
-        if st.button("🚀 PROCESSAR VISÃO GERAL DA LOJA", type="primary", use_container_width=True):
+        if st.button("🚀 2. Processar Visão Geral da loja", type="primary", use_container_width=True):
             with st.status("Consolidando métricas globais e alimentando o DW...", expanded=True) as status_global:
                 linhas_global, msg_global, data_min, data_max = processar_arquivo_global(arquivo_global)
 

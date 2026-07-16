@@ -35,6 +35,9 @@ st.set_page_config(
     layout="wide"
 )
 
+from utils.ui import aplicar_estilo, cabecalho, nota
+aplicar_estilo()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS DE INTERFACE
@@ -68,8 +71,8 @@ def salvar_cache_auditoria():
 # ESTRUTURA PRINCIPAL DA TELA
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.title("🧠 Conselho C-Level & Atuador IA")
-st.markdown("Auditoria profunda de **Finanças, Marketing e Fábrica** com predição de cenários e gatilhos de Notificação (Push) na Shopee.")
+cabecalho("🧠", "Conselho C-Level & Atuador IA",
+           "Auditoria profunda de Finanças, Marketing e Fábrica, com predição de cenários e execução direta na Shopee.")
 
 # Inicialização: restaura a auditoria mais recente do disco
 if "analises_preditivas" not in st.session_state:
@@ -99,7 +102,7 @@ with st.container(border=True):
 
 analises = st.session_state.analises_preditivas
 if not analises:
-    st.warning("Ainda não há uma auditoria carregada. Use “Executar Auditoria Profunda” acima para criar o primeiro diagnóstico.")
+    st.warning("Ainda não há uma auditoria carregada. Use um dos botões acima — na primeira vez, prefira o **diagnóstico estratégico de 30 dias**.")
     st.stop()
 
 # ─── Preparação do DataFrame ──────────────────────────────────────────────────
@@ -153,24 +156,8 @@ ids_visiveis = set(df_analises.get('model_id', pd.Series(dtype='object')).astype
 analises = [a for a in analises if str(a.get('model_id', a.get('dados_atuais', {}).get('model_id', ''))) in ids_visiveis]
 
 if df_analises.empty:
-    st.info("Nenhum SKU corresponde aos filtros atuais. Ajuste os filtros na barra lateral.")
+    st.info("Nenhum SKU corresponde aos filtros atuais. Ajuste os filtros no painel acima.")
     st.stop()
-
-st.markdown("""
-<style>
-    .stApp {font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;}
-    .block-container {max-width: 1440px; padding-top: 2rem; padding-bottom: 3rem;}
-    div[data-testid="stTabs"] button {font-size: .95rem; font-weight: 600; padding: .75rem 1rem;}
-    div[data-testid="stTabs"] button[aria-selected="true"] {color: #5b8def;}
-    div[data-testid="stButton"] > button {border-radius: 10px; min-height: 2.75rem; font-weight: 600;}
-    div[data-testid="stExpander"] {border-radius: 12px; border-color: rgba(128, 145, 180, .35);}
-    div[data-testid="stMetric"] {background: linear-gradient(135deg, #101b35, #16254a); border: 1px solid #2b4273; border-radius: 12px; padding: 14px;}
-    div[data-testid="stMetricLabel"] {color: #b9c7e6;}
-    div[data-testid="stMetricValue"] {color: #f7f9ff;}
-    .ia-note {padding: .85rem 1rem; border-left: 4px solid #5b8def; background: #101b35; border-radius: 8px; margin: .4rem 0 1rem;}
-    .ia-label {font-size: .78rem; letter-spacing: .04em; color: #aebee3; text-transform: uppercase;}
-</style>
-""", unsafe_allow_html=True)
 
 # ─── Organização em 4 Abas Ergonômicas ────────────────────────────────────────
 aba_dashboard, aba_atuador, aba_previsao, aba_dossies = st.tabs([
@@ -184,7 +171,12 @@ aba_dashboard, aba_atuador, aba_previsao, aba_dossies = st.tabs([
 # ABA 1: VISÃO EXECUTIVA (KPIs, Categorias e Alertas)
 # ==============================================================================
 with aba_dashboard:
-    st.markdown('<div class="ia-note"><span class="ia-label">Leitura responsável</span><br>Fatos observados (7 dias) são exibidos com contexto de 30 dias. A IA formula hipóteses de ação; a classificação de evidência indica quando executar, testar em pequena escala ou somente monitorar.</div>', unsafe_allow_html=True)
+    nota(
+        "Fatos observados (7 dias) são exibidos com contexto de 30 dias. A IA formula hipóteses "
+        "de ação; a classificação de evidência indica quando executar, testar em pequena escala "
+        "ou somente monitorar.",
+        titulo="Leitura responsável",
+    )
 
     # 1. Recuperação dos Dados Globais (sem sofrer cortes dos filtros da tela)
     analises_globais = st.session_state.analises_preditivas
@@ -317,8 +309,12 @@ with aba_dashboard:
 # ==============================================================================
 with aba_atuador:
     st.subheader("Alterações recomendadas")
-    st.markdown('<div class="ia-note"><span class="ia-label">Fluxo de confirmação</span><br><b>1. Compare</b> o estado atual com o proposto. &nbsp; <b>2. Leia</b> a força da evidência e a consequência. &nbsp; <b>3. Confirme</b> somente quando a alteração estiver clara. Nenhum botão é executado sem clique explícito.</div>', unsafe_allow_html=True)
-    st.info("Fluxo recomendado: analise a recomendação, confira a variação do preço alvo e aprove a ação em 1-clique.")
+    nota(
+        "<b>1. Compare</b> o estado atual com o proposto. &nbsp; <b>2. Leia</b> a força da "
+        "evidência e a consequência. &nbsp; <b>3. Confirme</b> somente quando a alteração estiver "
+        "clara. Nenhum botão é executado sem clique explícito.",
+        titulo="Fluxo de confirmação",
+    )
 
     produtos_agrupados = {}
     for analise in analises:
@@ -588,7 +584,13 @@ with aba_previsao:
 with aba_dossies:
     st.markdown("### Transparência da análise")
     data_cache = datetime.fromtimestamp(config.CACHE_AUDITORIA.stat().st_mtime).strftime('%d/%m/%Y %H:%M') if config.CACHE_AUDITORIA.exists() else 'não disponível'
-    st.markdown(f'<div class="ia-note"><span class="ia-label">Última auditoria em cache</span><br>{data_cache}. A camada determinística calcula vendas, custos de fabricação, ads, tráfego, carrinho, cancelamentos e cobertura de material. O modelo IA recebe esse recorte e devolve recomendações textuais; ele não acessa dados adicionais nem valida causalidade.</div>', unsafe_allow_html=True)
+    nota(
+        f"{data_cache}. A camada determinística calcula vendas, custos de fabricação, ads, "
+        "tráfego, carrinho, cancelamentos e cobertura de material. O modelo IA recebe esse "
+        "recorte e devolve recomendações textuais; ele não acessa dados adicionais nem valida "
+        "causalidade.",
+        titulo="Última auditoria em cache",
+    )
     with st.expander("Ver critérios e limitações metodológicas"):
         st.markdown("""
         - O período operacional principal é de **7 dias**; 30 dias entram como contexto de demanda e tráfego.

@@ -34,10 +34,12 @@ from cerebro.config import MigracaoPendenteError
 from cerebro.dossie import gerar_dossie_produtos_com_memoria
 
 st.set_page_config(page_title="Lucro Real", page_icon="💰", layout="wide")
-st.title("💰 Lucro Real por Produto")
-st.caption(
-    "Repasse do escrow − custo de material − ads, calculado 100% localmente. "
-    "Mapeie os custos na 2ª aba (2 passos) e o lucro aparece aqui."
+
+from utils.ui import aplicar_estilo, cabecalho, secao
+aplicar_estilo()
+cabecalho(
+    "💰", "Lucro Real por Produto",
+    "Repasse do escrow − material − ads, 100% local. Mapeie os custos na 2ª aba (2 passos) e o lucro aparece aqui.",
 )
 
 
@@ -103,11 +105,8 @@ aba_lucro, aba_custos = st.tabs(["💰 Lucro por produto", "🧵 Mapear custos (
 # ══════════════════════════════════════════════════════════════════════════════
 
 with aba_custos:
-    st.subheader("Passo 1 — Seus filamentos e o preço do quilo")
-    st.caption(
-        "💡 Pagou mais caro ou mais barato num lote? Edite o preço aqui — isso muda só o "
-        "cálculo de lucro daqui pra frente, **nunca** o preço de venda na Shopee."
-    )
+    secao(1, "Seus filamentos e o preço do quilo",
+          "Pagou mais caro ou mais barato num lote? Edite o preço aqui — muda só o cálculo de lucro, nunca o preço de venda na Shopee.")
 
     materiais = carregar_materiais()
     df_mat = pd.DataFrame(
@@ -146,11 +145,8 @@ with aba_custos:
         st.success(f"✅ {salvos} filamento(s) atualizado(s), {novos} novo(s). O lucro usa os preços novos daqui pra frente.")
 
     st.divider()
-    st.subheader("Passo 2 — Filamento e peso de cada produto")
-    st.caption(
-        "Uma linha por produto — o mapeamento vale para TODAS as variações dele. "
-        "Se alguma variação for muito diferente (peso/material), refine depois na página 🏭."
-    )
+    secao(2, "Filamento e peso de cada produto",
+          "Uma linha por produto — vale para TODAS as variações. Se alguma for muito diferente, refine depois na página 🏭.")
 
     materiais = carregar_materiais()
     if not materiais:

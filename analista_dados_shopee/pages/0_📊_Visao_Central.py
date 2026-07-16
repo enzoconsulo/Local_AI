@@ -34,11 +34,14 @@ from cerebro.config import MigracaoPendenteError
 from cerebro.dossie import gerar_dossie_produtos_com_memoria
 from cerebro.atuador import salvar_log_acao
 
+from utils.ui import aplicar_estilo, cabecalho, secao
+
 st.set_page_config(page_title="Visão Central", page_icon="📊", layout="wide")
-st.title("📊 Visão Central da Loja")
-st.caption(
-    "Análise profunda calculada **no seu computador** (zero tokens de IA gastos nesta página). "
-    "Para o parecer estratégico da OpenAI, use a página 🧠 Cérebro IA."
+aplicar_estilo()
+cabecalho(
+    "📊", "Visão Central da Loja",
+    "Análise profunda calculada no seu computador — zero tokens de IA nesta página. "
+    "Para o parecer estratégico da OpenAI, use a página 🧠 Cérebro IA.",
 )
 
 
@@ -207,7 +210,7 @@ def _fmt_moeda(v):
 # 1. FRESCOR DOS DADOS + INSTRUÇÕES DE IMPORTAÇÃO
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.header("1️⃣ Saúde dos dados (o que alimenta as análises)")
+secao(1, "Saúde dos dados", "O que alimenta as análises — mantenha os semáforos verdes.")
 
 ROTULOS_MODULOS = {
     "PEDIDOS": ("🛒 Pedidos + Lucro (API)", "Automático na página 2 — botão 'Iniciar Sincronização'"),
@@ -261,7 +264,7 @@ st.divider()
 # 2. KPIs MACRO
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.header("2️⃣ Termômetro da loja — últimos 7 dias vs 7 anteriores")
+secao(2, "Termômetro da loja", "Últimos 7 dias comparados com os 7 anteriores.")
 
 kpi = carregar_kpis_macro()
 if kpi["receita_7d"] is None and kpi["pedidos_7d"] is None:
@@ -297,7 +300,7 @@ st.divider()
 # 3. FUNIL CONSOLIDADO
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.header("3️⃣ Funil de conversão — onde o cliente desiste")
+secao(3, "Funil de conversão", "Da impressão à venda: descubra onde o cliente desiste.")
 
 aba7, aba30 = st.tabs(["Últimos 7 dias", "Últimos 30 dias"])
 for aba, dias in ((aba7, 7), (aba30, 30)):
@@ -349,7 +352,7 @@ st.divider()
 # 4. SAÚDE DA CONTA (API) — o que decide o alcance orgânico
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.header("4️⃣ Saúde da conta — o multiplicador (ou redutor) do seu alcance")
+secao(4, "Saúde da conta", "O multiplicador (ou redutor) silencioso do seu alcance orgânico.")
 st.markdown("""
 A Shopee **rebaixa a exposição** de lojas com indicadores operacionais ruins, antes de
 qualquer otimização de anúncio. As consequências oficiais por faixa de **pontos de penalidade**
@@ -444,7 +447,7 @@ st.divider()
 # 5. BOOST — ALCANCE GRÁTIS
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.header("5️⃣ Boost de produtos — alcance GRÁTIS a cada 4 horas")
+secao(5, "Boost de produtos", "Alcance GRÁTIS a cada 4 horas — escolha os 5 certos e clique.")
 st.markdown("""
 **O que é:** a Shopee deixa impulsionar **até 5 produtos por vez, de graça**; eles ganham
 prioridade nas recomendações e sobem na aba da loja por **4 horas**. Depois é só repetir.
@@ -534,7 +537,7 @@ st.divider()
 # 6. VOUCHER DE CHECKOUT — ataca o abandono de carrinho
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.header("6️⃣ Voucher de checkout — ataca o abandono de carrinho")
+secao(6, "Voucher de checkout", "Ataca diretamente o abandono de carrinho, com custo controlado.")
 
 funil_7d = carregar_funil(7)
 abandonos_7d = max(0, funil_7d["carrinhos"] - funil_7d["unidades"])
@@ -688,7 +691,7 @@ st.divider()
 # 7. RADAR POR PRODUTO (API — sem planilha)
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.header("7️⃣ Radar por produto (direto da API — sem exportar nada)")
+secao(7, "Radar por produto", "Views e curtidas direto da API — sem exportar nada.")
 st.markdown(
     "Views e curtidas **acumuladas** de cada anúncio. Tirando um snapshot por dia, o delta "
     "entre snapshots vira o 'tráfego do dia' — um termômetro independente das planilhas."
@@ -734,7 +737,7 @@ st.divider()
 # 8. PLANO DE AÇÃO DETERMINÍSTICO (custo de IA: R$ 0,00)
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.header("8️⃣ Plano de ação — calculado localmente, com consequências e previsões")
+secao(8, "Plano de ação", "Calculado localmente, com consequências e previsões por produto.")
 
 def _consequencia(d: dict) -> str:
     """Traduz a recomendação heurística em consequência de NÃO agir + o que esperar ao agir."""
