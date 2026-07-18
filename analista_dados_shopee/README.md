@@ -41,7 +41,7 @@ Para encerrar: `Ctrl+C` no terminal. O banco continua de pé no Docker (não per
 | `DB_HOST=localhost` / `DB_PORT=5433` | ✅ | Onde o app encontra o banco do Docker. |
 | `SHOPEE_PARTNER_ID` / `SHOPEE_PARTNER_KEY` / `SHOPEE_SHOP_ID` / `SHOPEE_REFRESH_TOKEN` | ✅ | Shopee Open API v2 (app *seller in-house* em open.shopee.com). O refresh token é renovado e regravado automaticamente. |
 | `OPENAI_API_KEY` | ✅ para Cérebro e Chat | Análise estratégica (pág. 3) e assistente de dados (pág. 4). |
-| `OPENAI_MODEL_7D` / `OPENAI_MODEL_30D` | ✅ | Modelos por horizonte (padrão `gpt-5.4` / `gpt-5.5`). |
+| `OPENAI_MODEL_7D` / `OPENAI_MODEL_30D` | ✅ | Modelos por horizonte (padrão `gpt-5.6-luna` / `gpt-5.6-terra` — melhor custo/qualidade em jul/2026). |
 | `GROQ_API_KEY` | ⬜ | Legado do chat antigo; não é mais necessária para o fluxo principal. |
 | `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD` | ⬜ | Só se for usar o pgAdmin em `localhost:5050`. |
 

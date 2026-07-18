@@ -67,8 +67,8 @@ OPENAI_CHAT_COMPLETIONS_URL = (
     else f"{OPENAI_API_BASE_URL}/chat/completions"
 )
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL_7D = os.getenv("OPENAI_MODEL_7D", "gpt-5.4").strip()
-OPENAI_MODEL_30D = os.getenv("OPENAI_MODEL_30D", "gpt-5.5").strip()
+OPENAI_MODEL_7D = os.getenv("OPENAI_MODEL_7D", "gpt-5.6-luna").strip()
+OPENAI_MODEL_30D = os.getenv("OPENAI_MODEL_30D", "gpt-5.6-terra").strip()
 OPENAI_REASONING_7D = os.getenv("OPENAI_REASONING_7D", "low").strip().lower()
 OPENAI_REASONING_30D = os.getenv("OPENAI_REASONING_30D", "medium").strip().lower()
 
