@@ -45,6 +45,30 @@ def calcular_score_urgencia(d: dict) -> int:
     if d.get("LOJA_macro_conversao_7d", 0) > 0 and d.get("LOJA_macro_conversao_7d", 0) < 2 and d.get("ADS_gasto_7d", 0) > 5:
         score += 10
 
+    # Ruptura do PRÓPRIO anúncio: com venda ativa e estoque publicado curto, o
+    # anúncio some da busca antes de o material acabar.
+    if d.get("vendas_7d_reais", 0) > 0 and (d.get("LOGISTICA_dias_estoque_shopee") or 999) < 7:
+        score += 20
+
+    # ACOS acima do ponto de equilíbrio (margem unitária em % do preço): cada
+    # venda atribuída ao ads sai no prejuízo mesmo com ROAS aparentemente ok.
+    margem_perc = float(d.get("FINANCEIRO_margem_unitaria_perc") or 0)
+    acos = float(d.get("ADS_acos_medio") or 0)
+    if d.get("ADS_gasto_7d", 0) > 5 and acos > margem_perc > 0:
+        score += 15
+
+    # Preparo estourando o prazo: alimenta o late-shipment da conta (afeta o
+    # alcance orgânico da LOJA inteira, não só deste SKU).
+    preparo_atrasado = d.get("POSVENDA_preparo_atrasado_perc")
+    if (
+        int(d.get("POSVENDA_pedidos_preparo_medidos_90d") or 0) >= 3
+        and preparo_atrasado is not None and float(preparo_atrasado) >= 20
+    ):
+        score += 15
+
+    if int(d.get("POSVENDA_devolucoes_90d") or 0) >= 2:
+        score += 10
+
     return min(score, 100)
 
 
@@ -129,10 +153,33 @@ def gerar_recomendacao_executiva(d: dict) -> str:
     # ROAS = 0 não significa ROAS ruim se o gasto em ADS também for 0.
     if d.get("ADS_gasto_7d", 0) > 0 and d.get("ADS_roas_atual", 0) < 1:
         return "Pausar ads imediatamente. Revisar palavras-chave e remover 'Seleção Automática'."
+    margem_perc = float(d.get("FINANCEIRO_margem_unitaria_perc") or 0)
+    acos = float(d.get("ADS_acos_medio") or 0)
+    if d.get("ADS_gasto_7d", 0) > 0 and acos > margem_perc > 0:
+        return (
+            f"ACOS de {acos:.0f}% acima do equilíbrio de {margem_perc:.0f}%: "
+            "a campanha consome a margem. Reduzir lance ou pausar manualmente."
+        )
     if d.get("taxa_cancelamento_7d_perc", 0) > 10:
         return "Reduzir fricção de compra e revisar embalagem/comunicação para conter cancelamentos."
     if d.get("LOGISTICA_dias_estoque_restante", 999) < 7:
         return "Priorizar reabastecimento de filamento ou elevar preço para proteger a margem."
+    if d.get("vendas_7d_reais", 0) > 0 and (d.get("LOGISTICA_dias_estoque_shopee") or 999) < 7:
+        return "Repor o estoque publicado do anúncio antes da ruptura: anúncio zerado sai da busca e perde ranking."
+    preparo_atrasado = d.get("POSVENDA_preparo_atrasado_perc")
+    if (
+        int(d.get("POSVENDA_pedidos_preparo_medidos_90d") or 0) >= 3
+        and preparo_atrasado is not None and float(preparo_atrasado) >= 20
+    ):
+        return (
+            f"{float(preparo_atrasado):.0f}% dos envios saíram após o prazo: priorizar fila de "
+            "impressão/postagem deste produto — o atraso pune o alcance da loja inteira."
+        )
+    if d.get("PROMO_ativa_tipo"):
+        return (
+            f"Promoção vigente ({d['PROMO_ativa_tipo']}): não alterar preço por cima dela; "
+            "garantir estoque para o pico e reavaliar após o término."
+        )
     if d.get("TRAFEGO_taxa_conversao_perc", 0) < 2 and d.get("ADS_gasto_7d", 0) > 5:
         return "Reestruturar tráfego pago (focar em correspondência exata) e revisar imagens de capa."
     if d.get("preco_tendencia_7d_perc", 0) < -10 and d.get("vendas_7d_reais", 0) <= 2:
@@ -224,4 +271,185 @@ def gerar_alertas_criticos(dossie: list[dict]) -> list[dict]:
                 ),
             })
 
+        margem_perc = float(d.get("FINANCEIRO_margem_unitaria_perc") or 0)
+        acos = float(d.get("ADS_acos_medio") or 0)
+        if d.get("ADS_gasto_7d", 0) > 5 and acos > margem_perc > 0:
+            alertas.append({
+                "nivel": "🟠 URGENTE",
+                "produto": nome,
+                "mensagem": (
+                    f"ACOS de {acos:.0f}% acima do ponto de equilíbrio ({margem_perc:.0f}% de "
+                    f"margem unitária): cada venda atribuída ao ads sai no prejuízo. "
+                    f"Reduzir lance ou pausar a campanha."
+                ),
+            })
+
+        dias_anuncio = int(d.get("LOGISTICA_dias_estoque_shopee") or 999)
+        if d.get("vendas_7d_reais", 0) > 0 and dias_anuncio < 7:
+            alertas.append({
+                "nivel": "🟠 URGENTE",
+                "produto": nome,
+                "mensagem": (
+                    f"Estoque publicado do anúncio cobre ~{dias_anuncio} dia(s) no ritmo atual. "
+                    f"Anúncio zerado sai da busca e perde ranking — repor antes da ruptura."
+                ),
+            })
+
+        preparo_atrasado = d.get("POSVENDA_preparo_atrasado_perc")
+        if (
+            int(d.get("POSVENDA_pedidos_preparo_medidos_90d") or 0) >= 5
+            and preparo_atrasado is not None and float(preparo_atrasado) >= 30
+        ):
+            alertas.append({
+                "nivel": "🟠 URGENTE",
+                "produto": nome,
+                "mensagem": (
+                    f"{float(preparo_atrasado):.0f}% dos envios deste produto saíram após o prazo "
+                    f"nos últimos 90 dias — é combustível direto do late shipment que derruba o "
+                    f"alcance da loja. Priorizar fila de impressão/postagem."
+                ),
+            })
+
     return alertas
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ALAVANCAS DE CRESCIMENTO (correlações medidas → ação; custo zero de IA)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def sugerir_alavancas_vendas(d: dict) -> list[dict]:
+    """Converte as correlações do dossiê em alavancas acionáveis de venda.
+
+    Nenhuma alavanca é palpite de modelo: cada uma nasce de um número medido
+    (cesta de co-compra, dia da semana, ACOS vs. margem, estoque do anúncio,
+    share da variação, concentração por UF). nivel='produto' vale para o
+    anúncio inteiro (a interface deduplica por item); nivel='variacao' é do SKU.
+    """
+    alavancas: list[dict] = []
+    vendas_7d = int(d.get("vendas_7d_reais", 0) or 0)
+    vendas_30d = int(d.get("vendas_30d_reais", d.get("vendas_30d_macro", 0)) or 0)
+    visitas_7d = int(d.get("TRAFEGO_visitas_7d", 0) or 0)
+    conversao = float(d.get("TRAFEGO_taxa_conversao_perc", 0) or 0)
+    gasto_ads = float(d.get("ADS_gasto_7d", 0) or 0)
+    acos = float(d.get("ADS_acos_medio", 0) or 0)
+    margem_perc = float(d.get("FINANCEIRO_margem_unitaria_perc", 0) or 0)
+
+    if conversao >= 2.5 and visitas_7d <= 30 and vendas_7d >= 1:
+        alavancas.append({
+            "nivel": "produto", "icone": "🚀", "titulo": "Candidato ao boost gratuito",
+            "detalhe": (
+                f"Converte {conversao:.1f}% com apenas {visitas_7d} visitas em 7 dias — falta "
+                "tráfego, não atratividade. Use o boost gratuito (5 itens a cada 4h) na Visão Central."
+            ),
+        })
+
+    parceiro = d.get("CESTA_parceiro_top")
+    conjuntos = int(d.get("CESTA_pedidos_conjuntos_180d", 0) or 0)
+    if parceiro and conjuntos >= 2:
+        alavancas.append({
+            "nivel": "produto", "icone": "🧺", "titulo": f'Combo com "{parceiro}"',
+            "detalhe": (
+                f"Comprados juntos em {conjuntos} pedido(s) nos últimos 180 dias. Um combo "
+                "(leve mais, pague menos) com desconto pequeno tende a elevar o tíquete médio."
+            ),
+        })
+
+    melhor_dia = d.get("VENDAS_melhor_dia_semana")
+    share_dia = float(d.get("VENDAS_share_melhor_dia_perc", 0) or 0)
+    if melhor_dia and share_dia >= 30 and vendas_30d >= 5:
+        alavancas.append({
+            "nivel": "produto", "icone": "📅", "titulo": f"Concentrar ofertas na {melhor_dia}",
+            "detalhe": (
+                f"{share_dia:.0f}% das unidades de 90 dias saem na {melhor_dia}. Programe "
+                "promoções, voucher e boost para a véspera e o próprio dia."
+            ),
+        })
+
+    if gasto_ads > 0 and 0 < acos <= max(0.0, margem_perc - 5):
+        alavancas.append({
+            "nivel": "variacao", "icone": "📈", "titulo": "Espaço para escalar ads",
+            "detalhe": (
+                f"ACOS de {acos:.0f}% bem abaixo do equilíbrio ({margem_perc:.0f}%): dá para subir "
+                "o orçamento mantendo lucro por venda. Ajuste manual no Seller Center."
+            ),
+        })
+    elif gasto_ads > 0 and acos > margem_perc > 0:
+        alavancas.append({
+            "nivel": "variacao", "icone": "🩸", "titulo": "Ads acima do ponto de equilíbrio",
+            "detalhe": (
+                f"ACOS de {acos:.0f}% contra margem unitária de {margem_perc:.0f}%: cada venda "
+                "atribuída ao ads sai no prejuízo. Reduza o lance ou pause a campanha."
+            ),
+        })
+
+    dias_anuncio = int(d.get("LOGISTICA_dias_estoque_shopee", 999) or 999)
+    if vendas_7d > 0 and dias_anuncio < 7:
+        alavancas.append({
+            "nivel": "variacao", "icone": "📦", "titulo": "Repor estoque do anúncio",
+            "detalhe": (
+                f"O estoque publicado cobre ~{dias_anuncio} dia(s) no ritmo atual. Anúncio "
+                "zerado some da busca e perde o ranking conquistado."
+            ),
+        })
+
+    share_var = d.get("PORTFOLIO_share_variacao_30d_perc")
+    qtd_vars = int(d.get("qtd_variacoes_produto", 1) or 1)
+    vendas_item_30d = int(d.get("PORTFOLIO_vendas_30d_item", 0) or 0)
+    if share_var is not None and qtd_vars >= 3 and vendas_item_30d >= 10 and float(share_var) < 10:
+        alavancas.append({
+            "nivel": "variacao", "icone": "🪓", "titulo": "Variação de cauda",
+            "detalhe": (
+                f"Apenas {float(share_var):.0f}% das vendas do anúncio em 30 dias. Avalie fundir ou "
+                "aposentar esta variação para simplificar a grade e focar foto/preço nas campeãs."
+            ),
+        })
+
+    uf = d.get("GEO_uf_top")
+    uf_share = float(d.get("GEO_uf_top_share_perc", 0) or 0)
+    base_uf = int(d.get("GEO_pedidos_com_uf_90d", 0) or 0)
+    if uf and base_uf >= 5 and uf_share >= 50:
+        alavancas.append({
+            "nivel": "produto", "icone": "🗺️", "titulo": f"Demanda concentrada em {uf}",
+            "detalhe": (
+                f"{uf_share:.0f}% dos pedidos com UF conhecida (90 dias) vêm de {uf}. Priorize "
+                "programas de frete que favoreçam a região e cite o prazo real no anúncio."
+            ),
+        })
+
+    preparo_atrasado = d.get("POSVENDA_preparo_atrasado_perc")
+    preparo_medidos = int(d.get("POSVENDA_pedidos_preparo_medidos_90d", 0) or 0)
+    if preparo_medidos >= 3 and preparo_atrasado is not None and float(preparo_atrasado) >= 20:
+        mediana = d.get("POSVENDA_preparo_mediano_horas")
+        sufixo_mediana = f" (mediana {float(mediana):.0f}h)" if mediana is not None else ""
+        alavancas.append({
+            "nivel": "produto", "icone": "🕒", "titulo": "Preparo estourando o prazo",
+            "detalhe": (
+                f"{float(preparo_atrasado):.0f}% dos envios de 90 dias saíram após o ship-by{sufixo_mediana}. "
+                "Priorize a fila de impressão/postagem deste produto — o late shipment derruba o alcance da loja inteira."
+            ),
+        })
+
+    recompra_perc = d.get("POSVENDA_recompra_perc_180d")
+    base_recompra = int(d.get("POSVENDA_pedidos_identificados_180d", 0) or 0)
+    if recompra_perc is not None and float(recompra_perc) >= 20 and base_recompra >= 5:
+        alavancas.append({
+            "nivel": "produto", "icone": "🔁", "titulo": "Clientes que voltam",
+            "detalhe": (
+                f"{float(recompra_perc):.0f}% dos pedidos de 180 dias vieram de compradores que já "
+                "haviam comprado na loja. Voucher de recompra e kits (cesta) rendem mais aqui do que ads frio."
+            ),
+        })
+
+    devolucoes = int(d.get("POSVENDA_devolucoes_90d", 0) or 0)
+    if devolucoes >= 2:
+        motivo = d.get("POSVENDA_devolucao_motivo")
+        sufixo_motivo = f" Motivo mais recente: {motivo}." if motivo else ""
+        alavancas.append({
+            "nivel": "produto", "icone": "↩️", "titulo": "Devoluções recorrentes",
+            "detalhe": (
+                f"{devolucoes} devolução(ões) em 90 dias.{sufixo_motivo} Revise qualidade, "
+                "embalagem e descrição antes de investir em mais tráfego."
+            ),
+        })
+
+    return alavancas

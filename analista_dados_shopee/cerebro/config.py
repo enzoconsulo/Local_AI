@@ -82,7 +82,11 @@ OPENAI_REASONING_CHAT = os.getenv("OPENAI_REASONING_CHAT", "low").strip().lower(
 # de forma controlada em vez de reutilizarem análises incompatíveis.
 # v3: regra 10 (ACOS de campanha vs. retorno líquido total) após o teste E2E
 # de 14/07/2026 flagrar leitura invertida do sinal de ads no parecer CMO.
-VERSAO_PROMPT = "openai-json-v3"
+# v4 (17/07/2026): camada de correlação profunda no payload (margem/breakeven,
+# share da variação, curva ABC, estoque do anúncio e sinais_produto: cesta,
+# melhor dia, UF, views da API) + regras 11 e 12. Re-inferência única esperada
+# na primeira auditoria de cada horizonte após o deploy — custo aceito.
+VERSAO_PROMPT = "openai-json-v4"
 
 HTTP_SESSION = requests.Session()
 HTTP_SESSION.mount("http://", HTTPAdapter(pool_connections=2, pool_maxsize=4, max_retries=0))

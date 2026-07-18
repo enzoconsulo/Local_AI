@@ -112,6 +112,9 @@ CAMPOS_PROMPT_7D = {
     "funil_ads_impressoes", "funil_ads_cliques", "funil_ads_ctr_perc",
     "funil_ads_acos_medio", "qualidade_evidencia", "limite_evidencia",
     "historico_acoes_passadas", "memoria_estrategica_30d",
+    # Sinais decisivos da camada de correlação (v3): poucos tokens, muito veto.
+    "margem_unitaria_perc", "share_variacao_30d_perc",
+    "dias_estoque_shopee", "curva_abc", "em_promocao_tipo",
 }
 
 
@@ -130,6 +133,9 @@ def compactar_lote_por_horizonte(lote_json: list[dict], horizonte: str) -> list[
             "item_id": produto.get("item_id"),
             "nome_produto": produto.get("nome_produto"),
             "horizonte_solicitado": horizonte,
+            # Correlações medidas do anúncio: enviadas UMA vez por produto (e não
+            # replicadas por SKU) — máximo de contexto por token gasto.
+            "sinais_produto": produto.get("sinais_produto", {}),
             "metricas_macro_produto_30_dias": produto.get("metricas_macro_produto_30_dias", {}) if horizonte == "30d" else {},
             "variacoes_ativas": variacoes,
         })
@@ -156,6 +162,9 @@ REGRAS:
 8. A previsão determinística é a âncora. Só se afaste dela quando um dado explícito justificar, explicando o motivo.
 9. Retorne somente um objeto JSON válido no formato {"resultados":[...]}, com exatamente um objeto por model_id. Sem markdown ou texto externo.
 10. Não confunda métricas de ads: funil_ads_acos_medio avalia só a campanha (gasto/GMV atribuído ao anúncio); retorno_liquido_por_ads é o lucro líquido TOTAL dividido pelo gasto. Retorno líquido alto com ACOS moderado não caracteriza ads fraco.
+11. margem_unitaria_perc (preço − taxa Shopee − fabricação, em % do preço) é o ACOS de equilíbrio do SKU: ads só é rentável com funil_ads_acos_medio abaixo dela; acima, trate como perda de margem por venda.
+12. sinais_produto são correlações MEDIDAS do anúncio (melhor dia de venda, parceiro real de cesta, UF dominante, views da API, recompra, preparo/atraso de envio, devoluções). Use-as para timing de promoção, segmentação e pareceres de operações. Só recomende CRIAR_COMBO com cesta_pedidos_conjuntos_180d >= 2 (cite o parceiro) ou entre variações do próprio anúncio.
+13. em_promocao_tipo != null indica promoção Shopee VIGENTE no SKU: não proponha CRIAR_PROMOCAO nem REDUZIR_PRECO por cima dela, e trate preço corrente e elasticidade do período como efeito da promoção, não como reprecificação.
 """
     if horizonte == "7d":
         return base + """
@@ -508,6 +517,11 @@ def _variacao_para_payload(var: dict) -> dict:
         "previsao_deterministica_lucro_7d": var.get("previsao_lucro_7d", 0),
         "previsao_deterministica_vendas_30d": var.get("previsao_vendas_30d", 0),
         "previsao_deterministica_lucro_30d": var.get("previsao_lucro_30d", 0),
+        "margem_unitaria_perc": var.get("FINANCEIRO_margem_unitaria_perc", 0),
+        "share_variacao_30d_perc": var.get("PORTFOLIO_share_variacao_30d_perc"),
+        "dias_estoque_shopee": var.get("LOGISTICA_dias_estoque_shopee", 999),
+        "curva_abc": var.get("PORTFOLIO_curva_abc"),
+        "em_promocao_tipo": var.get("PROMO_ativa_tipo"),
         "qualidade_evidencia": classificar_confianca_evidencia(var)[0],
         "limite_evidencia": classificar_confianca_evidencia(var)[1],
         "historico_acoes_passadas": var["historico_acoes_passadas"],
@@ -532,6 +546,24 @@ def _agrupar_por_produto(dossie_completo: list[dict]) -> dict:
                     "dias_trafego_coletados_30d": var.get("COBERTURA_dias_trafego_30d", 0),
                     "estrelas": var.get("REPUTACAO_estrelas", 0),
                     "favoritos": var.get("REPUTACAO_curtidas_favoritos", 0)
+                },
+                # Correlações medidas no nível do anúncio (iguais em todas as
+                # variações do item): gravadas uma única vez por produto.
+                "sinais_produto": {
+                    "melhor_dia_semana": var.get("VENDAS_melhor_dia_semana"),
+                    "share_melhor_dia_perc": var.get("VENDAS_share_melhor_dia_perc"),
+                    "cesta_parceiro_top": var.get("CESTA_parceiro_top"),
+                    "cesta_pedidos_conjuntos_180d": var.get("CESTA_pedidos_conjuntos_180d", 0),
+                    "uf_top": var.get("GEO_uf_top"),
+                    "uf_top_share_perc": var.get("GEO_uf_top_share_perc"),
+                    "api_views_7d": var.get("API_views_7d"),
+                    "api_curtidas_7d": var.get("API_curtidas_7d"),
+                    "recompra_perc_180d": var.get("POSVENDA_recompra_perc_180d"),
+                    "preparo_mediano_horas": var.get("POSVENDA_preparo_mediano_horas"),
+                    "preparo_atrasado_perc": var.get("POSVENDA_preparo_atrasado_perc"),
+                    "entrega_mediana_dias": var.get("POSVENDA_entrega_mediana_dias"),
+                    "devolucoes_90d": var.get("POSVENDA_devolucoes_90d", 0),
+                    "devolucao_motivo": var.get("POSVENDA_devolucao_motivo"),
                 },
                 "variacoes_ativas": []
             }
@@ -685,6 +717,7 @@ def _fatiar_em_lotes(produtos_ativos: list[dict], max_vars_por_lote: int) -> lis
                 "item_id": p["item_id"],
                 "nome_produto": p["nome_produto"],
                 "metricas_macro_produto_30_dias": p["metricas_macro_produto_30_dias"],
+                "sinais_produto": p.get("sinais_produto", {}),
                 "variacoes_ativas": chunk_vars
             }
             if lote_atual and variacoes_no_lote + len(chunk_vars) > max_vars_por_lote:

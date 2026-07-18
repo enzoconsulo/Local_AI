@@ -78,6 +78,7 @@ SONDAGENS = {
         "WHERE table_schema = 'public' AND table_name = 'fato_visao_geral_loja' "
         "AND column_name = 'metric_value' AND numeric_scale = 4)"
     ),
+    "17_migration_pos_venda_e_promocoes.sql": _sonda_objeto("fato_promocoes_shopee", "fato_devolucoes"),
 }
 
 

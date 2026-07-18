@@ -70,6 +70,46 @@ def obter_pedidos_por_periodo(time_from, time_to):
     return order_sns
 
 
+# Campos extras confirmados ao vivo (18/07/2026) para este app in-house:
+# comprador (recompra), pay/ship_by/pickup (tempo de preparo REAL vs prazo —
+# o gargalo late-shipment da conta) e frete real pago.
+CAMPOS_OPCIONAIS_PEDIDO = (
+    "buyer_user_id,buyer_username,item_list,cancel_reason,recipient_address,"
+    "pay_time,ship_by_date,pickup_done_time,actual_shipping_fee,package_list"
+)
+
+
+def _ts(valor):
+    """Epoch da Shopee → datetime; 0/None = evento ainda não aconteceu."""
+    try:
+        valor = int(valor or 0)
+    except (TypeError, ValueError):
+        return None
+    return datetime.fromtimestamp(valor) if valor > 0 else None
+
+
+def _pedido_do_detalhe(order: dict) -> dict:
+    """Projeção de um pedido da API para o formato do DW (campos pós-venda incl.)."""
+    pacotes = order.get("package_list") or []
+    transportadora = str((pacotes[0] or {}).get("shipping_carrier") or "")[:80] if pacotes else None
+    frete = order.get("actual_shipping_fee")
+    return {
+        "order_sn": order["order_sn"],
+        "data_hora_criacao": datetime.fromtimestamp(order["create_time"]).strftime('%Y-%m-%d %H:%M:%S'),
+        # UF real do destinatário (order.region é o PAÍS, sempre 'BR')
+        "uf_destino": _uf_do_pedido(order),
+        "status_pedido": order["order_status"],
+        "motivo_cancelamento_devolucao": order.get("cancel_reason") or None,
+        "buyer_user_id": int(order["buyer_user_id"]) if order.get("buyer_user_id") else None,
+        "buyer_username": str(order.get("buyer_username") or "")[:80] or None,
+        "pay_time": _ts(order.get("pay_time")),
+        "ship_by_date": _ts(order.get("ship_by_date")),
+        "pickup_done_time": _ts(order.get("pickup_done_time")),
+        "frete_real": float(frete) if frete not in (None, "") else None,
+        "shipping_carrier": transportadora or None,
+    }
+
+
 def obter_detalhes_pedidos(order_sns):
     path_order_detail = "/api/v2/order/get_order_detail"
     pedidos, itens_pedido = [], []
@@ -78,22 +118,13 @@ def obter_detalhes_pedidos(order_sns):
     for lote in lotes:
         params = {
             "order_sn_list": ",".join(lote),
-            "response_optional_fields": "buyer_user_id,item_list,cancel_reason,recipient_address"
+            "response_optional_fields": CAMPOS_OPCIONAIS_PEDIDO
         }
         response = chamar_shopee_api(path_order_detail, params)
 
         if response and "order_list" in response:
             for order in response["order_list"]:
-                motivo = order.get("cancel_reason") or None
-
-                pedidos.append({
-                    "order_sn": order["order_sn"],
-                    "data_hora_criacao": datetime.fromtimestamp(order["create_time"]).strftime('%Y-%m-%d %H:%M:%S'),
-                    # UF real do destinatário (order.region é o PAÍS, sempre 'BR')
-                    "uf_destino": _uf_do_pedido(order),
-                    "status_pedido": order["order_status"],
-                    "motivo_cancelamento_devolucao": motivo
-                })
+                pedidos.append(_pedido_do_detalhe(order))
 
                 for item in order.get("item_list", []):
                     # .get com defaults: um item malformado da API não pode
@@ -189,16 +220,32 @@ def salvar_transacoes_no_banco(pedidos, itens, repasses):
                     """, variacoes_fantasma,
                     template="(%s, %s, 'Variação Excluída', 0)")
 
-                # 2. Grava Pedidos
+                # 2. Grava Pedidos (COALESCE nos campos pós-venda: a API pode
+                #    omitir um campo num refresh e não pode apagar o que já
+                #    foi capturado; delivered/logistics são do worker de rastreio)
                 query_pedidos = """
-                    INSERT INTO fato_pedidos_venda (order_sn, data_hora_criacao, uf_destino, status_pedido, motivo_cancelamento_devolucao)
+                    INSERT INTO fato_pedidos_venda (
+                        order_sn, data_hora_criacao, uf_destino, status_pedido,
+                        motivo_cancelamento_devolucao, buyer_user_id, buyer_username,
+                        pay_time, ship_by_date, pickup_done_time, frete_real, shipping_carrier
+                    )
                     VALUES %s ON CONFLICT (order_sn) DO UPDATE SET
                         status_pedido = EXCLUDED.status_pedido,
                         motivo_cancelamento_devolucao = EXCLUDED.motivo_cancelamento_devolucao,
-                        uf_destino = COALESCE(EXCLUDED.uf_destino, fato_pedidos_venda.uf_destino);
+                        uf_destino = COALESCE(EXCLUDED.uf_destino, fato_pedidos_venda.uf_destino),
+                        buyer_user_id = COALESCE(EXCLUDED.buyer_user_id, fato_pedidos_venda.buyer_user_id),
+                        buyer_username = COALESCE(EXCLUDED.buyer_username, fato_pedidos_venda.buyer_username),
+                        pay_time = COALESCE(EXCLUDED.pay_time, fato_pedidos_venda.pay_time),
+                        ship_by_date = COALESCE(EXCLUDED.ship_by_date, fato_pedidos_venda.ship_by_date),
+                        pickup_done_time = COALESCE(EXCLUDED.pickup_done_time, fato_pedidos_venda.pickup_done_time),
+                        frete_real = COALESCE(EXCLUDED.frete_real, fato_pedidos_venda.frete_real),
+                        shipping_carrier = COALESCE(EXCLUDED.shipping_carrier, fato_pedidos_venda.shipping_carrier);
                 """
                 valores_pedidos = [
-                    (p["order_sn"], p["data_hora_criacao"], p["uf_destino"], p["status_pedido"], p["motivo_cancelamento_devolucao"])
+                    (p["order_sn"], p["data_hora_criacao"], p["uf_destino"], p["status_pedido"],
+                     p["motivo_cancelamento_devolucao"], p.get("buyer_user_id"), p.get("buyer_username"),
+                     p.get("pay_time"), p.get("ship_by_date"), p.get("pickup_done_time"),
+                     p.get("frete_real"), p.get("shipping_carrier"))
                     for p in pedidos
                 ]
                 if valores_pedidos:

@@ -21,9 +21,15 @@ Melhorias sobre a versão monolítica anterior:
      unidades vendidas (não média de médias).
   6. Rateio inteiro por "maior resto": a soma das variações reproduz EXATO o
      total do anúncio (o arredondamento por linha divergia em ±1/variação).
+  7. Camada de correlação profunda (v3, custo zero de IA): cesta de co-compra
+     (180d), perfil de vendas por dia da semana (90d), concentração geográfica
+     por UF (90d), deltas dos acumulados da API (views/curtidas em 7d), margem
+     unitária real com ACOS de equilíbrio, dias de estoque do PRÓPRIO anúncio,
+     participação da variação no item e curva ABC por lucro de 30 dias.
 
-Todos os nomes de campo do dossiê são preservados — o fingerprint do cache
-semântico, a UI e o motor de IA dependem deles.
+Todos os nomes de campo pré-existentes do dossiê são preservados — o
+fingerprint do cache semântico, a UI e o motor de IA dependem deles. Os campos
+novos são aditivos; a re-inferência única após o deploy é esperada e aceita.
 """
 
 import psycopg2.extras
@@ -42,17 +48,33 @@ STATUS_CANCELADOS = "('CANCELLED', 'CANCELED', 'CANCELLED_BY_BUYER', 'IN_CANCEL'
 # ══════════════════════════════════════════════════════════════════════════════
 
 @memoizar_ttl(300)
-def _views_migration12_disponiveis() -> bool:
+def _schema_dossie_disponivel() -> bool:
+    """Sonda as views da migração 12, a imagem da 15 e o pós-venda da 17 —
+    tudo o que a QUERY_DOSSIE referencia além do schema base."""
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT to_regclass('public.vw_vendas_diarias_variacao') IS NOT NULL
                        AND to_regclass('public.vw_funil_diario_item') IS NOT NULL
+                       AND to_regclass('public.fato_promocoes_shopee') IS NOT NULL
+                       AND to_regclass('public.fato_devolucoes') IS NOT NULL
+                       AND EXISTS (
+                           SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = 'public'
+                             AND table_name = 'dim_produtos'
+                             AND column_name = 'imagem_url'
+                       )
+                       AND EXISTS (
+                           SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = 'public'
+                             AND table_name = 'fato_pedidos_venda'
+                             AND column_name = 'buyer_user_id'
+                       )
                 """)
                 return bool(cur.fetchone()[0])
     except Exception as exc:
-        logger.warning(f"Não foi possível verificar as views da migração 12: {exc}")
+        logger.warning(f"Não foi possível verificar o schema do dossiê (migrações 12/15/17): {exc}")
         return False
 
 
@@ -293,6 +315,161 @@ memoria_ia AS (
     WHERE status_api = 'SUCESSO' AND model_id IS NOT NULL
     ORDER BY model_id, data_aplicacao DESC
 ),
+vendas_dow AS (
+    -- Perfil de vendas por dia da semana no nível do ITEM (90 dias): a amostra
+    -- por variação seria pequena demais para o padrão semanal ser real.
+    SELECT
+        dv.item_id,
+        EXTRACT(ISODOW FROM vd.data)::int AS dow,
+        SUM(vd.unidades_vendidas)         AS unidades
+    FROM vw_vendas_diarias_variacao vd
+    JOIN dim_variacoes dv ON dv.model_id = vd.model_id
+    WHERE vd.data >= CURRENT_DATE - 90
+    GROUP BY dv.item_id, EXTRACT(ISODOW FROM vd.data)
+),
+perfil_semana AS (
+    -- Melhor dia da semana do item + participação dele no total de 90 dias.
+    SELECT DISTINCT ON (item_id)
+        item_id,
+        dow                                          AS melhor_dow,
+        unidades                                     AS unidades_melhor_dia,
+        SUM(unidades) OVER (PARTITION BY item_id)    AS unidades_dow_90d
+    FROM vendas_dow
+    WHERE unidades > 0
+    ORDER BY item_id, unidades DESC, dow
+),
+geografia AS (
+    -- UF que mais compra o item (90 dias, pedidos não cancelados). uf_destino
+    -- real vem do recipient_address desde a correção de 17/07; linhas antigas
+    -- podem ser NULL e ficam fora da amostra.
+    SELECT DISTINCT ON (dv.item_id)
+        dv.item_id,
+        p.uf_destino                                                    AS uf_top,
+        COUNT(DISTINCT p.order_sn)                                      AS pedidos_uf,
+        SUM(COUNT(DISTINCT p.order_sn)) OVER (PARTITION BY dv.item_id)  AS pedidos_uf_total
+    FROM fato_itens_pedido i
+    JOIN fato_pedidos_venda p ON p.order_sn = i.order_sn
+    JOIN dim_variacoes dv     ON dv.model_id = i.model_id
+    WHERE p.data_hora_criacao >= CURRENT_DATE - INTERVAL '90 days'
+      AND p.uf_destino IS NOT NULL
+      AND p.status_pedido NOT IN {STATUS_CANCELADOS}
+    GROUP BY dv.item_id, p.uf_destino
+    ORDER BY dv.item_id, COUNT(DISTINCT p.order_sn) DESC, p.uf_destino
+),
+pedidos_itens_180d AS (
+    -- Base da análise de cesta: um registro por (pedido, item) em 180 dias.
+    SELECT DISTINCT i.order_sn, dv.item_id
+    FROM fato_itens_pedido i
+    JOIN dim_variacoes dv     ON dv.model_id = i.model_id
+    JOIN fato_pedidos_venda p ON p.order_sn = i.order_sn
+    WHERE p.data_hora_criacao >= CURRENT_DATE - INTERVAL '180 days'
+      AND p.status_pedido NOT IN {STATUS_CANCELADOS}
+),
+cesta AS (
+    -- Co-compra REAL: o produto mais frequentemente comprado no mesmo pedido.
+    -- É a evidência que fundamenta CRIAR_COMBO — sem ela, combo é chute.
+    SELECT DISTINCT ON (a.item_id)
+        a.item_id,
+        b.item_id     AS parceiro_item_id,
+        pb.nome_atual AS parceiro_nome,
+        COUNT(*)      AS pedidos_conjuntos
+    FROM pedidos_itens_180d a
+    JOIN pedidos_itens_180d b ON b.order_sn = a.order_sn AND b.item_id <> a.item_id
+    JOIN dim_produtos pb      ON pb.item_id = b.item_id
+    GROUP BY a.item_id, b.item_id, pb.nome_atual
+    ORDER BY a.item_id, COUNT(*) DESC, b.item_id
+),
+api_extra AS (
+    -- Acumulados da API (sync_saude_conta / get_item_extra_info): o delta entre
+    -- o snapshot mais novo e o mais antigo da janela de 8 dias mede views e
+    -- curtidas RECENTES sem depender de planilha. COUNT(DISTINCT) distingue
+    -- "1 snapshot só" (delta não mensurável) de "delta real".
+    SELECT
+        item_id,
+        (ARRAY_AGG(metric_value ORDER BY data_registro DESC)
+            FILTER (WHERE metric_name = 'api_views_acumuladas'))[1]     AS views_fim,
+        (ARRAY_AGG(metric_value ORDER BY data_registro ASC)
+            FILTER (WHERE metric_name = 'api_views_acumuladas'))[1]     AS views_ini,
+        COUNT(DISTINCT data_registro)
+            FILTER (WHERE metric_name = 'api_views_acumuladas')         AS snapshots_views,
+        (ARRAY_AGG(metric_value ORDER BY data_registro DESC)
+            FILTER (WHERE metric_name = 'api_curtidas_acumuladas'))[1]  AS curtidas_fim,
+        (ARRAY_AGG(metric_value ORDER BY data_registro ASC)
+            FILTER (WHERE metric_name = 'api_curtidas_acumuladas'))[1]  AS curtidas_ini
+    FROM fato_metricas_produto_importadas
+    WHERE fonte = 'API_EXTRA_INFO'
+      AND data_registro >= CURRENT_DATE - 8
+    GROUP BY item_id
+),
+recompra_base AS (
+    -- Um registro por (item, pedido) com o comprador identificado (180 dias).
+    SELECT DISTINCT dv.item_id, p.order_sn, p.buyer_user_id, p.data_hora_criacao
+    FROM fato_itens_pedido i
+    JOIN fato_pedidos_venda p ON p.order_sn = i.order_sn
+    JOIN dim_variacoes dv     ON dv.model_id = i.model_id
+    WHERE p.data_hora_criacao >= CURRENT_DATE - INTERVAL '180 days'
+      AND p.buyer_user_id IS NOT NULL
+      AND p.status_pedido NOT IN {STATUS_CANCELADOS}
+),
+recompra AS (
+    -- Comprador recorrente = já tinha comprado QUALQUER item da loja antes
+    -- deste pedido (EXISTS ancorado no índice buyer+data da migração 17).
+    SELECT
+        b.item_id,
+        COUNT(*)                                   AS pedidos_identificados,
+        COUNT(*) FILTER (WHERE ant.ja_comprou)     AS pedidos_recorrentes,
+        COUNT(DISTINCT b.buyer_user_id)            AS compradores_unicos
+    FROM recompra_base b
+    LEFT JOIN LATERAL (
+        SELECT TRUE AS ja_comprou
+        FROM fato_pedidos_venda p2
+        WHERE p2.buyer_user_id = b.buyer_user_id
+          AND p2.data_hora_criacao < b.data_hora_criacao
+          AND p2.status_pedido NOT IN {STATUS_CANCELADOS}
+        LIMIT 1
+    ) ant ON TRUE
+    GROUP BY b.item_id
+),
+preparo_base AS (
+    -- Um registro por (item, pedido) com preparo mensurável (90 dias).
+    SELECT DISTINCT dv.item_id, p.order_sn, p.pay_time, p.pickup_done_time,
+                    p.ship_by_date, p.delivered_time
+    FROM fato_itens_pedido i
+    JOIN fato_pedidos_venda p ON p.order_sn = i.order_sn
+    JOIN dim_variacoes dv     ON dv.model_id = i.model_id
+    WHERE p.data_hora_criacao >= CURRENT_DATE - INTERVAL '90 days'
+      AND p.pay_time IS NOT NULL
+      AND p.pickup_done_time IS NOT NULL
+      AND p.status_pedido NOT IN {STATUS_CANCELADOS}
+),
+preparo AS (
+    -- Preparo REAL (pagamento→coleta) vs prazo, e tempo até a entrega: o
+    -- gargalo late-shipment da conta medido POR PRODUTO.
+    SELECT
+        item_id,
+        COUNT(*) AS pedidos_medidos,
+        percentile_cont(0.5) WITHIN GROUP (
+            ORDER BY EXTRACT(EPOCH FROM (pickup_done_time - pay_time)) / 3600.0
+        ) AS preparo_mediano_horas,
+        COUNT(*) FILTER (
+            WHERE ship_by_date IS NOT NULL AND pickup_done_time > ship_by_date
+        ) AS pedidos_preparo_atrasado,
+        percentile_cont(0.5) WITHIN GROUP (
+            ORDER BY EXTRACT(EPOCH FROM (delivered_time - pickup_done_time)) / 86400.0
+        ) FILTER (WHERE delivered_time IS NOT NULL) AS entrega_mediana_dias
+    FROM preparo_base
+    GROUP BY item_id
+),
+devolucoes_recentes AS (
+    SELECT
+        mi.item_id,
+        COUNT(DISTINCT d.return_sn) AS devolucoes_90d,
+        (ARRAY_AGG(d.motivo ORDER BY d.criado_em_shopee DESC NULLS LAST))[1] AS devolucao_motivo_recente
+    FROM map_devolucao_itens mi
+    JOIN fato_devolucoes d ON d.return_sn = mi.return_sn
+    WHERE d.criado_em_shopee >= CURRENT_DATE - 90
+    GROUP BY mi.item_id
+),
 historico_variacoes AS (
     -- Último registro CONHECIDO até cada marco (hoje, -7d, -30d), e não a data
     -- exata: o casamento exato zerava preço/estoque históricos (e, com eles,
@@ -418,7 +595,37 @@ SELECT
 
     m.tipo_acao          AS ultima_acao,
     m.detalhe_acao       AS ultimo_detalhe,
-    m.impacto_projetado  AS ultima_projecao
+    m.impacto_projetado  AS ultima_projecao,
+
+    -- Camada de correlação profunda (nível do item; custo zero de IA)
+    p.imagem_url,
+    ps.melhor_dow,
+    ps.unidades_melhor_dia,
+    ps.unidades_dow_90d,
+    geo.uf_top,
+    geo.pedidos_uf,
+    geo.pedidos_uf_total,
+    ces.parceiro_item_id     AS cesta_parceiro_item_id,
+    ces.parceiro_nome        AS cesta_parceiro_nome,
+    ces.pedidos_conjuntos    AS cesta_pedidos_conjuntos,
+    ax.views_fim             AS api_views_fim,
+    ax.views_ini             AS api_views_ini,
+    ax.snapshots_views       AS api_snapshots_views,
+    ax.curtidas_fim          AS api_curtidas_fim,
+    ax.curtidas_ini          AS api_curtidas_ini,
+
+    -- Pós-venda via API (migração 17): recompra, preparo/entrega, devoluções
+    rec.pedidos_identificados  AS recompra_pedidos_ident,
+    rec.pedidos_recorrentes    AS recompra_pedidos_recorrentes,
+    rec.compradores_unicos     AS recompra_compradores_unicos,
+    prep.pedidos_medidos       AS preparo_pedidos_medidos,
+    prep.preparo_mediano_horas,
+    prep.pedidos_preparo_atrasado,
+    prep.entrega_mediana_dias,
+    devr.devolucoes_90d,
+    devr.devolucao_motivo_recente,
+    promo.tipo                 AS promo_ativa_tipo,
+    promo.fim                  AS promo_ativa_fim
 
 FROM dim_produtos p
 JOIN dim_variacoes v              ON p.item_id   = v.item_id
@@ -433,6 +640,27 @@ LEFT JOIN metricas_importadas_7d mi ON p.item_id = mi.item_id
 LEFT JOIN macro_loja_7d macro     ON TRUE
 LEFT JOIN memoria_ia    m         ON v.model_id  = m.model_id
 LEFT JOIN historico_variacoes h   ON v.model_id  = h.model_id
+LEFT JOIN perfil_semana ps        ON p.item_id   = ps.item_id
+LEFT JOIN geografia     geo       ON p.item_id   = geo.item_id
+LEFT JOIN cesta         ces       ON p.item_id   = ces.item_id
+LEFT JOIN api_extra     ax        ON p.item_id   = ax.item_id
+LEFT JOIN recompra      rec       ON p.item_id   = rec.item_id
+LEFT JOIN preparo       prep      ON p.item_id   = prep.item_id
+LEFT JOIN devolucoes_recentes devr ON p.item_id  = devr.item_id
+LEFT JOIN LATERAL (
+    -- Promoção Shopee VIGENTE cobrindo esta variação (model_id 0 = anúncio
+    -- inteiro). Sem este sinal, o preço promocional contamina a elasticidade.
+    SELECT pr.tipo, pr.fim
+    FROM map_promocao_itens pi
+    JOIN fato_promocoes_shopee pr
+      ON pr.tipo = pi.tipo AND pr.id_promocao = pi.id_promocao
+    WHERE pi.item_id = p.item_id
+      AND (pi.model_id = 0 OR pi.model_id = v.model_id)
+      AND pr.inicio <= CURRENT_TIMESTAMP
+      AND pr.fim >= CURRENT_TIMESTAMP
+    ORDER BY pr.fim DESC
+    LIMIT 1
+) promo ON TRUE
 WHERE p.status_shopee = 'NORMAL'
   AND v.nome_variacao NOT ILIKE '%Excluída%'
   AND v.nome_variacao NOT ILIKE '%Excluida%';
@@ -529,13 +757,50 @@ def _alocar_rateios_por_item(registros) -> dict:
 # MONTAGEM DO DOSSIÊ
 # ══════════════════════════════════════════════════════════════════════════════
 
+NOMES_DOW = {1: "segunda", 2: "terça", 3: "quarta", 4: "quinta", 5: "sexta", 6: "sábado", 7: "domingo"}
+
+
+def classificar_curva_abc(dossie: list[dict]) -> None:
+    """Marca cada variação com a curva ABC pela contribuição ao lucro de 30d.
+
+    Corte clássico pela participação acumulada ANTES do item (o líder é sempre
+    "A" mesmo que sozinho passe de 80%): <80% → A, <95% → B, resto → C.
+    Contribuição usa só lucro positivo — SKU no prejuízo nunca é "A"; se a loja
+    inteira está sem lucro no mês, cai para unidades vendidas como base.
+    """
+    if not dossie:
+        return
+    contribuicoes = [max(0.0, float(d.get("lucro_liquido_real_30d") or 0)) for d in dossie]
+    if sum(contribuicoes) <= 0:
+        contribuicoes = [float(d.get("vendas_30d_reais") or 0) for d in dossie]
+    total = sum(contribuicoes)
+    if total <= 0:
+        for d in dossie:
+            d["PORTFOLIO_curva_abc"] = "C"
+        return
+    ordem = sorted(range(len(dossie)), key=lambda i: contribuicoes[i], reverse=True)
+    acumulado = 0.0
+    for i in ordem:
+        participacao_antes = acumulado / total
+        if contribuicoes[i] <= 0:
+            classe = "C"
+        elif participacao_antes < 0.80:
+            classe = "A"
+        elif participacao_antes < 0.95:
+            classe = "B"
+        else:
+            classe = "C"
+        dossie[i]["PORTFOLIO_curva_abc"] = classe
+        acumulado += contribuicoes[i]
+
+
 def gerar_dossie_produtos_com_memoria() -> list[dict]:
     """Extrai o DW, aplica a camada determinística e anexa a memória analítica."""
-    if not _views_migration12_disponiveis():
+    if not _schema_dossie_disponivel():
         raise MigracaoPendenteError(
-            "As views de pré-agregação não existem no banco. "
-            "Execute `python init_db/aplicar_migrations.py` (aplica as migrações pendentes, "
-            "incluindo a 12) e recarregue a página."
+            "O banco não tem as views de pré-agregação (migração 12) ou a coluna de "
+            "imagem do produto (migração 15). Execute `python init_db/aplicar_migrations.py` "
+            "e recarregue a página."
         )
 
     garantir_tabela_historico_variacoes()
@@ -547,6 +812,7 @@ def gerar_dossie_produtos_com_memoria() -> list[dict]:
 
     alocacoes = _alocar_rateios_por_item(registros)
     dossie = [_montar_dados_variacao(r, alocacoes) for r in registros]
+    classificar_curva_abc(dossie)
     return enriquecer_dossie_com_memoria(dossie)
 
 
@@ -690,6 +956,56 @@ def _montar_dados_variacao(r, alocacoes: dict | None = None) -> dict:
         if taxa_diaria_30d > 0 else 0
     )
 
+    # ── Correlação profunda (derivados determinísticos, custo zero de IA) ─────
+    # Margem unitária = preço − taxa Shopee − fabricação. Em % do preço, ela É
+    # o ACOS de equilíbrio: campanha com ACOS acima dela consome toda a margem.
+    margem_unitaria_perc = round(margem_unitaria_real / preco * 100, 1) if preco > 0 else 0.0
+    # Ruptura do PRÓPRIO anúncio (estoque publicado ÷ ritmo semanal) — é
+    # diferente da capacidade de material, que é compartilhada entre produtos.
+    dias_estoque_shopee = min(999, round(estoque_hoje / (vendas / 7))) if vendas > 0 else 999
+    share_variacao = round(vendas_30d / vendas_30d_item * 100, 1) if vendas_30d_item > 0 else None
+
+    melhor_dow = r["melhor_dow"]
+    unidades_dow_90d = float(r["unidades_dow_90d"] or 0)
+    melhor_dia_semana = NOMES_DOW.get(int(melhor_dow)) if melhor_dow else None
+    share_melhor_dia = (
+        round(float(r["unidades_melhor_dia"] or 0) / unidades_dow_90d * 100, 1)
+        if melhor_dia_semana and unidades_dow_90d > 0 else None
+    )
+
+    pedidos_uf_total = int(r["pedidos_uf_total"] or 0)
+    uf_top = r["uf_top"] if pedidos_uf_total > 0 else None
+    uf_share = round(int(r["pedidos_uf"] or 0) / pedidos_uf_total * 100, 1) if uf_top else None
+
+    cesta_parceiro = r["cesta_parceiro_nome"]
+    cesta_conjuntos = int(r["cesta_pedidos_conjuntos"] or 0)
+
+    # Views/curtidas da API: delta só é mensurável com 2+ snapshots na janela —
+    # com 1, enviamos None (escudo anti-alucinação, não "zero de tráfego").
+    api_snapshots = int(r["api_snapshots_views"] or 0)
+    api_views_total = int(float(r["api_views_fim"])) if r["api_views_fim"] is not None else None
+    api_views_7d = None
+    api_curtidas_7d = None
+    if api_snapshots >= 2:
+        api_views_7d = max(0, int(float(r["api_views_fim"] or 0) - float(r["api_views_ini"] or 0)))
+        if r["api_curtidas_fim"] is not None and r["api_curtidas_ini"] is not None:
+            api_curtidas_7d = max(0, int(float(r["api_curtidas_fim"]) - float(r["api_curtidas_ini"])))
+
+    # ── Pós-venda via API (migração 17) — todos com escudo de nulos ──────────
+    recompra_ident = int(r["recompra_pedidos_ident"] or 0)
+    recompra_perc = (
+        round(int(r["recompra_pedidos_recorrentes"] or 0) / recompra_ident * 100, 1)
+        if recompra_ident > 0 else None
+    )
+    preparo_medidos = int(r["preparo_pedidos_medidos"] or 0)
+    preparo_horas = round(float(r["preparo_mediano_horas"]), 1) if r["preparo_mediano_horas"] is not None else None
+    preparo_atrasado_perc = (
+        round(int(r["pedidos_preparo_atrasado"] or 0) / preparo_medidos * 100, 1)
+        if preparo_medidos > 0 else None
+    )
+    entrega_dias = round(float(r["entrega_mediana_dias"]), 1) if r["entrega_mediana_dias"] is not None else None
+    promo_fim = r["promo_ativa_fim"]
+
     historico_ia = None
     if r["ultima_acao"]:
         historico_ia = {
@@ -749,6 +1065,40 @@ def _montar_dados_variacao(r, alocacoes: dict | None = None) -> dict:
         "LOGISTICA_capacidade_material_restante": capacidade_maxima,
         "LOGISTICA_dias_estoque_restante":  dias_estoque,
         "LOGISTICA_dias_estoque_base_30d":  dias_estoque_30d,
+        "LOGISTICA_dias_estoque_shopee":    dias_estoque_shopee,
+
+        # --- CORRELAÇÃO PROFUNDA (v3; determinística, custo zero de IA) ---
+        "FINANCEIRO_margem_unitaria_reais": round(margem_unitaria_real, 2),
+        "FINANCEIRO_margem_unitaria_perc":  margem_unitaria_perc,
+        "PORTFOLIO_share_variacao_30d_perc": share_variacao,
+        "PORTFOLIO_vendas_30d_item": vendas_30d_item,
+        "VENDAS_melhor_dia_semana":  melhor_dia_semana,
+        "VENDAS_share_melhor_dia_perc": share_melhor_dia,
+        "GEO_uf_top": uf_top,
+        "GEO_uf_top_share_perc": uf_share,
+        "GEO_pedidos_com_uf_90d": pedidos_uf_total,
+        "CESTA_parceiro_top": str(cesta_parceiro)[:80] if cesta_parceiro else None,
+        "CESTA_parceiro_item_id": int(r["cesta_parceiro_item_id"]) if r["cesta_parceiro_item_id"] else None,
+        "CESTA_pedidos_conjuntos_180d": cesta_conjuntos,
+        "API_views_acumuladas": api_views_total,
+        "API_views_7d": api_views_7d,
+        "API_curtidas_7d": api_curtidas_7d,
+        "imagem_url": r["imagem_url"],
+
+        # Pós-venda via API (migração 17)
+        "POSVENDA_recompra_perc_180d": recompra_perc,
+        "POSVENDA_pedidos_identificados_180d": recompra_ident,
+        "POSVENDA_compradores_unicos_180d": int(r["recompra_compradores_unicos"] or 0),
+        "POSVENDA_preparo_mediano_horas": preparo_horas,
+        "POSVENDA_preparo_atrasado_perc": preparo_atrasado_perc,
+        "POSVENDA_pedidos_preparo_medidos_90d": preparo_medidos,
+        "POSVENDA_entrega_mediana_dias": entrega_dias,
+        "POSVENDA_devolucoes_90d": int(r["devolucoes_90d"] or 0),
+        "POSVENDA_devolucao_motivo": r["devolucao_motivo_recente"],
+        # isoformat: o cache em disco é JSON puro (sem default=str)
+        "PROMO_ativa_tipo": r["promo_ativa_tipo"],
+        "PROMO_ativa_fim": promo_fim.isoformat() if promo_fim else None,
+        # ------------------------------------------------------------------
 
         # Transparência do rateio híbrido (novo na v2)
         "RATEIO_peso_variacao": round(peso, 4),

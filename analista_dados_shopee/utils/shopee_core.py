@@ -570,3 +570,236 @@ def obter_info_extra_itens(item_ids):
                 "estrelas": float(item.get("rating_star", 0) or 0),
             }
     return resultado
+
+
+# ==============================================================================
+# PÓS-VENDA E PROMOÇÕES (sondados ao vivo em 18/07/2026 — todos FUNCIONAM
+# neste app in-house: returns, discount, bundle_deal, add_on_deal,
+# shop_flash_sale, get_tracking_info)
+# ==============================================================================
+
+def _promo_status_derivado(inicio, fim):
+    """Status temporal uniforme entre as 4 famílias (cada uma tem enum próprio)."""
+    agora = int(time.time())
+    if inicio and agora < int(inicio):
+        return "upcoming"
+    if fim and agora > int(fim):
+        return "expired"
+    return "ongoing"
+
+
+def _itens_de_promocao(tipo, id_promocao):
+    """Itens cobertos por uma promoção. model_id 0 = anúncio inteiro.
+
+    Cada família tem um endpoint de detalhe próprio e formatos levemente
+    diferentes; tudo aqui é defensivo — um formato inesperado vira lista vazia,
+    nunca uma exceção que derrube a sincronização.
+    """
+    itens = []
+    try:
+        if tipo == "DESCONTO":
+            pagina = 1
+            while True:
+                resp = chamar_shopee_api("/api/v2/discount/get_discount", params={
+                    "discount_id": id_promocao, "page_no": pagina, "page_size": 100,
+                })
+                if not resp:
+                    break
+                for item in resp.get("item_list") or []:
+                    modelos = item.get("model_list") or []
+                    if modelos:
+                        for modelo in modelos:
+                            itens.append((int(item.get("item_id", 0)), int(modelo.get("model_id", 0) or 0),
+                                          float(modelo.get("model_promotion_price", 0) or 0)))
+                    else:
+                        itens.append((int(item.get("item_id", 0)), 0,
+                                      float(item.get("item_promotion_price", 0) or 0)))
+                if not resp.get("more"):
+                    break
+                pagina += 1
+        elif tipo == "COMBO":
+            resp = chamar_shopee_api("/api/v2/bundle_deal/get_bundle_deal_item",
+                                     params={"bundle_deal_id": id_promocao})
+            for item in (resp or {}).get("item_list") or []:
+                iid = item.get("item_id") if isinstance(item, dict) else item
+                if iid:
+                    itens.append((int(iid), 0, None))
+        elif tipo == "ADD_ON":
+            for endpoint, chave in (
+                ("/api/v2/add_on_deal/get_add_on_deal_main_item", "main_item_list"),
+                ("/api/v2/add_on_deal/get_add_on_deal_sub_item", "sub_item_list"),
+            ):
+                resp = chamar_shopee_api(endpoint, params={"add_on_deal_id": id_promocao})
+                for item in (resp or {}).get(chave) or []:
+                    if isinstance(item, dict) and item.get("item_id"):
+                        itens.append((int(item["item_id"]), int(item.get("model_id", 0) or 0),
+                                      float(item.get("sub_item_input_price", 0) or 0) or None))
+        elif tipo == "FLASH_SALE":
+            offset = 0
+            while True:
+                resp = chamar_shopee_api("/api/v2/shop_flash_sale/get_shop_flash_sale_items", params={
+                    "flash_sale_id": id_promocao, "offset": offset, "limit": 100,
+                })
+                if not resp:
+                    break
+                modelos = resp.get("models") or []
+                for modelo in modelos:
+                    if isinstance(modelo, dict) and modelo.get("item_id"):
+                        itens.append((int(modelo["item_id"]), int(modelo.get("model_id", 0) or 0),
+                                      float(modelo.get("input_promotion_price", 0) or 0) or None))
+                if not modelos:
+                    for item in resp.get("item_info") or []:
+                        if isinstance(item, dict) and item.get("item_id"):
+                            itens.append((int(item["item_id"]), 0, None))
+                if len(modelos) < 100:
+                    break
+                offset += 100
+    except Exception as exc:
+        logger.warning(f"Itens da promoção {tipo}/{id_promocao} não puderam ser lidos: {exc}")
+    # Deduplicação preservando o menor preço informado
+    unicos = {}
+    for iid, mid, preco in itens:
+        chave = (iid, mid)
+        if chave not in unicos or (preco is not None and (unicos[chave] is None or preco < unicos[chave])):
+            unicos[chave] = preco
+    return [(iid, mid, preco) for (iid, mid), preco in unicos.items()]
+
+
+def listar_promocoes_loja(incluir_itens=True):
+    """Lê as 4 famílias de promoção da loja e devolve uma lista normalizada:
+    {tipo, id_promocao, nome, status, inicio, fim, itens: [(item_id, model_id, preco)]}.
+    """
+    promocoes = []
+
+    pagina = 1
+    while True:
+        resp = chamar_shopee_api("/api/v2/discount/get_discount_list", params={
+            "discount_status": "all", "page_no": pagina, "page_size": 100,
+        })
+        if not resp:
+            break
+        for promo in resp.get("discount_list") or []:
+            promocoes.append({
+                "tipo": "DESCONTO", "id_promocao": int(promo.get("discount_id", 0)),
+                "nome": str(promo.get("discount_name") or "")[:255],
+                "inicio": promo.get("start_time"), "fim": promo.get("end_time"),
+            })
+        if not resp.get("more"):
+            break
+        pagina += 1
+
+    pagina = 1
+    while True:
+        resp = chamar_shopee_api("/api/v2/bundle_deal/get_bundle_deal_list", params={
+            "page_no": pagina, "page_size": 100,
+        })
+        if not resp:
+            break
+        lista = resp.get("bundle_deal_list") or []
+        for promo in lista:
+            promocoes.append({
+                "tipo": "COMBO", "id_promocao": int(promo.get("bundle_deal_id", 0)),
+                "nome": str(promo.get("name") or "")[:255],
+                "inicio": promo.get("start_time"), "fim": promo.get("end_time"),
+            })
+        if not resp.get("more"):
+            break
+        pagina += 1
+
+    pagina = 1
+    while True:
+        resp = chamar_shopee_api("/api/v2/add_on_deal/get_add_on_deal_list", params={
+            "promotion_status": "all", "page_no": pagina, "page_size": 100,
+        })
+        if not resp:
+            break
+        for promo in resp.get("add_on_deal_list") or []:
+            promocoes.append({
+                "tipo": "ADD_ON", "id_promocao": int(promo.get("add_on_deal_id", 0)),
+                "nome": str(promo.get("add_on_deal_name") or "")[:255],
+                "inicio": promo.get("start_time"), "fim": promo.get("end_time"),
+            })
+        if not resp.get("more"):
+            break
+        pagina += 1
+
+    offset = 0
+    while True:
+        resp = chamar_shopee_api("/api/v2/shop_flash_sale/get_shop_flash_sale_list", params={
+            "type": 0, "offset": offset, "limit": 100,
+        })
+        if not resp:
+            break
+        lista = resp.get("flash_sale_list") or []
+        for promo in lista:
+            promocoes.append({
+                "tipo": "FLASH_SALE", "id_promocao": int(promo.get("flash_sale_id", 0)),
+                "nome": f"Flash sale {promo.get('flash_sale_id')}",
+                "inicio": promo.get("start_time"), "fim": promo.get("end_time"),
+            })
+        if len(lista) < 100:
+            break
+        offset += 100
+
+    promocoes = [p for p in promocoes if p["id_promocao"]]
+    for promo in promocoes:
+        promo["status"] = _promo_status_derivado(promo.get("inicio"), promo.get("fim"))
+        if incluir_itens:
+            promo["itens"] = _itens_de_promocao(promo["tipo"], promo["id_promocao"])
+    return promocoes
+
+
+def listar_devolucoes(time_from=None, time_to=None):
+    """Lista devoluções/reembolsos (v2.returns), paginado. Retorna dicts com
+    return_sn, order_sn, status, motivo, motivo_texto, valor_reembolso,
+    criado_em (epoch) e itens [(item_id, model_id, quantidade)]."""
+    devolucoes = []
+    pagina = 1
+    while True:
+        params = {"page_no": pagina, "page_size": 50}
+        if time_from:
+            params["create_time_from"] = int(time_from)
+        if time_to:
+            params["create_time_to"] = int(time_to)
+        resp = chamar_shopee_api("/api/v2/returns/get_return_list", params=params)
+        if not resp:
+            break
+        for ret in resp.get("return") or []:
+            itens = []
+            for item in ret.get("item") or []:
+                if isinstance(item, dict) and item.get("item_id"):
+                    itens.append((int(item["item_id"]), int(item.get("model_id", 0) or 0),
+                                  int(item.get("amount", 0) or 0)))
+            devolucoes.append({
+                "return_sn": str(ret.get("return_sn") or ""),
+                "order_sn": str(ret.get("order_sn") or "") or None,
+                "status": str(ret.get("status") or "")[:40],
+                "motivo": str(ret.get("reason") or "")[:120],
+                "motivo_texto": str(ret.get("text_reason") or "") or None,
+                "valor_reembolso": float(ret.get("refund_amount", 0) or 0),
+                "criado_em": ret.get("create_time"),
+                "itens": itens,
+            })
+        if not resp.get("more"):
+            break
+        pagina += 1
+    return [d for d in devolucoes if d["return_sn"]]
+
+
+def obter_rastreio_pedido(order_sn):
+    """Status logístico atual e o momento da entrega de um pedido.
+
+    Retorna (logistics_status | None, delivered_epoch | None). O delivered vem
+    do evento DELIVERED mais recente da linha do tempo de rastreio.
+    """
+    resp = chamar_shopee_api("/api/v2/logistics/get_tracking_info", params={"order_sn": order_sn})
+    if not resp:
+        return None, None
+    status_atual = str(resp.get("logistics_status") or "") or None
+    delivered = None
+    for evento in resp.get("tracking_info") or []:
+        if str(evento.get("logistics_status") or "").upper() == "DELIVERED":
+            momento = int(evento.get("update_time", 0) or 0)
+            if momento and (delivered is None or momento > delivered):
+                delivered = momento
+    return status_atual, delivered

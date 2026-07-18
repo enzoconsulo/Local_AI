@@ -28,6 +28,7 @@ load_dotenv(ROOT_DIR / "CHAVES_DADOS.env")
 # Importação dos módulos da API
 from workers.sync_catalogo import sincronizar_catalogo
 from workers.sync_pedidos import sincronizar_pedidos
+from workers.sync_pos_venda import sincronizar_pos_venda
 from utils.db_pool import get_connection
 
 st.set_page_config(page_title="Sincronização do DW", page_icon="🔄", layout="wide")
@@ -183,10 +184,35 @@ with aba_principal:
                 else:
                     status.update(label=f"Sincronização de pedidos parcial ({total_pedidos} pedidos salvos). Rode novamente para completar.", state="error")
 
+        with st.status("3. Pós-venda via API: comprador, preparo, entrega, devoluções e promoções...", expanded=True) as status:
+            barra_pos_venda = st.progress(0.0, text="Iniciando pós-venda...")
+            resumo_pos_venda = sincronizar_pos_venda(
+                ao_progresso=lambda fracao, texto: barra_pos_venda.progress(fracao, text=texto)
+            )
+            barra_pos_venda.empty()
+            rotulos_pos_venda = {
+                "enriquecimento": "pedido(s) enriquecido(s)",
+                "rastreio": "entrega(s) confirmada(s)",
+                "devolucoes": "devolução(ões)",
+                "promocoes": "promoção(ões)",
+            }
+            partes_pos_venda = [
+                f"{resumo_pos_venda[chave]['quantidade']} {rotulo}"
+                for chave, rotulo in rotulos_pos_venda.items() if chave in resumo_pos_venda
+            ]
+            etapas_falhas = [chave for chave, dados in resumo_pos_venda.items() if not dados["ok"]]
+            if etapas_falhas:
+                status.update(
+                    label=f"Pós-venda parcial ({', '.join(partes_pos_venda)}) — falhou: {', '.join(etapas_falhas)}. Rode novamente.",
+                    state="error",
+                )
+            else:
+                status.update(label=f"Pós-venda atualizado! ({', '.join(partes_pos_venda)})", state="complete")
+
         if arquivo_trafego and not processar_trafego_permitido:
             st.info("📄 Planilha de tráfego ignorada: arquivo idêntico já importado (marque 'Reimportar mesmo assim' para forçar).")
         elif arquivo_trafego:
-            with st.status(f"3. Processando Tráfego Orgânico ({dt_inicio_csv.strftime('%d/%m')} a {dt_fim_csv.strftime('%d/%m')})...", expanded=True) as status:
+            with st.status(f"4. Processando Tráfego Orgânico ({dt_inicio_csv.strftime('%d/%m')} a {dt_fim_csv.strftime('%d/%m')})...", expanded=True) as status:
                 linhas, msg = processar_trafego_organico(arquivo_trafego, dt_inicio_csv, dt_fim_csv)
 
                 if msg == "Sucesso":

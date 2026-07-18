@@ -26,6 +26,7 @@ from cerebro.heuristicas import (
     classificar_confianca_evidencia,
     gerar_alertas_criticos,
     intervalo_demanda_exploratorio,
+    sugerir_alavancas_vendas,
 )
 from cerebro.motor_ia import validar_sugestao_ia
 
@@ -65,6 +66,106 @@ def salvar_cache_auditoria():
         st.session_state.get("horizonte_auditoria", "7d") or "7d",
         st.session_state.analises_preditivas,
     )
+
+
+def _soma_com_escudo(variacoes: list[dict], campo: str):
+    """Soma um campo rateado entre as variações preservando o escudo de nulos:
+    None em todas = dado não coletado (retorna None, não zero)."""
+    valores = [v.get("dados_atuais", {}).get(campo) for v in variacoes]
+    numericos = [float(x) for x in valores if x is not None]
+    return sum(numericos) if numericos else None
+
+
+def _fmt_qtd(valor) -> str:
+    return f"{int(valor):,}".replace(",", ".") if valor is not None else "—"
+
+
+def _float_ou_none(valor):
+    try:
+        return float(valor)
+    except (TypeError, ValueError):
+        return None
+
+
+def _render_parecer_variacao(analise_var: dict):
+    """Dossiê completo de UMA variação: indicadores medidos, ação, pareceres e planos."""
+    dados_var = analise_var.get("dados_atuais", {})
+    acao = analise_var.get("tipo_acao", "MANTER")
+    confianca_var, leitura_var, _ = classificar_confianca_evidencia(dados_var)
+
+    margem_rs = _float_ou_none(dados_var.get("FINANCEIRO_margem_unitaria_reais"))
+    margem_pc = _float_ou_none(dados_var.get("FINANCEIRO_margem_unitaria_perc"))
+    acos = _float_ou_none(dados_var.get("ADS_acos_medio")) or 0.0
+    gasto = _float_ou_none(dados_var.get("ADS_gasto_7d")) or 0.0
+    share = _float_ou_none(dados_var.get("PORTFOLIO_share_variacao_30d_perc"))
+    abc = dados_var.get("PORTFOLIO_curva_abc")
+    dias_anuncio = dados_var.get("LOGISTICA_dias_estoque_shopee")
+
+    i1, i2, i3, i4 = st.columns(4)
+    i1.metric(
+        "Margem unitária", f"R$ {margem_rs:.2f}" if margem_rs is not None else "—",
+        delta=f"{margem_pc:.0f}% do preço" if margem_pc is not None else None, delta_color="off",
+        help="Preço − taxa Shopee − custo de fabricação. Em % do preço, é o ACOS de equilíbrio.",
+    )
+    if gasto > 0 and margem_pc and acos > 0:
+        rentavel = acos <= margem_pc
+        i2.metric(
+            "ACOS × equilíbrio", f"{acos:.0f}% / {margem_pc:.0f}%",
+            delta="ads rentável" if rentavel else "consumindo margem",
+            delta_color="normal" if rentavel else "inverse",
+            help="ACOS da campanha contra a margem unitária em % do preço. Acima do equilíbrio, cada venda por ads sai no prejuízo.",
+        )
+    else:
+        i2.metric("ACOS × equilíbrio", "—", delta="sem gasto em ads no período", delta_color="off")
+    i3.metric(
+        "Participação no anúncio", f"{share:.0f}%" if share is not None else "—",
+        delta=f"Curva {abc}" if abc else None, delta_color="off",
+        help="Fatia desta variação nas vendas de 30 dias do anúncio. Curva ABC pela contribuição ao lucro mensal da loja.",
+    )
+    if dias_anuncio in (None, 999):
+        rotulo_estoque = "confortável"
+    else:
+        rotulo_estoque = f"{int(dias_anuncio)} dia(s)"
+    i4.metric(
+        "Estoque do anúncio", rotulo_estoque,
+        delta=f"{int(dados_var.get('estoque_shopee_hoje', 0) or 0)} un. publicadas", delta_color="off",
+        help="Estoque publicado ÷ ritmo de vendas de 7 dias. Anúncio zerado sai da busca e perde ranking.",
+    )
+
+    st.markdown(
+        f"**Ação recomendada:** {rotulo_acao(acao)} &nbsp;·&nbsp; Evidência **{confianca_var}** — "
+        f"{padronizar_texto(leitura_var)}"
+    )
+    if dados_var.get("PROMO_ativa_tipo"):
+        st.warning(
+            f"🏷️ Promoção Shopee vigente ({dados_var['PROMO_ativa_tipo']}) neste SKU: o preço atual "
+            "é promocional — não crie promoção nem reduza preço por cima; reavalie após o término.",
+            icon="🏷️",
+        )
+    st.markdown(f"**Recomendação executiva:** {padronizar_texto(analise_var.get('recomendacao_executiva', 'N/A'))}")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.info(f"**💰 CFO — Finanças**\n\n{padronizar_texto(analise_var.get('relatorio_cfo_financas', 'N/A'))}")
+    with c2:
+        st.success(f"**🎯 CMO — Marketing**\n\n{padronizar_texto(analise_var.get('relatorio_cmo_marketing', 'N/A'))}")
+    with c3:
+        st.warning(f"**🏭 COO — Operações**\n\n{padronizar_texto(analise_var.get('relatorio_coo_operacoes', 'N/A'))}")
+
+    plano7 = analise_var.get("plano_curto_prazo_7d") or analise_var.get("plano_acao_shopee") or []
+    plano30 = analise_var.get("plano_longo_prazo_30d") or []
+    if plano7 or plano30:
+        p1, p2 = st.columns(2)
+        with p1:
+            st.markdown("**Plano · 7 dias**")
+            for passo in plano7:
+                st.write(f"• {padronizar_texto(str(passo))}")
+        with p2:
+            st.markdown("**Plano · 30 dias**")
+            for passo in plano30:
+                st.write(f"• {padronizar_texto(str(passo))}")
+    if analise_var.get("analise_de_consequencias"):
+        st.caption(f"Consequência esperada: {padronizar_texto(analise_var['analise_de_consequencias'])}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -164,7 +265,7 @@ aba_dashboard, aba_atuador, aba_previsao, aba_dossies = st.tabs([
     "Resumo",
     "Alterações recomendadas",
     "Cenários e previsões",
-    "Pareceres e método"
+    "Dossiês e alavancas"
 ])
 
 # ==============================================================================
@@ -249,16 +350,23 @@ with aba_dashboard:
         )), axis=1
     )
     fila_decisao['elasticidade_legivel'] = fila_decisao.apply(
-        lambda row: f"{float(row.get('elasticidade_preco_volume', 0)):.2f}" if abs(float(row.get('preco_tendencia_7d_perc', 0))) >= 0.5 and float(row.get('vendas_30d_macro', 0)) >= 5 else "Não identificável",
+        lambda row: "Em promoção" if row.get('PROMO_ativa_tipo')
+        else f"{float(row.get('elasticidade_preco_volume', 0)):.2f}" if abs(float(row.get('preco_tendencia_7d_perc', 0))) >= 0.5 and float(row.get('vendas_30d_macro', 0)) >= 5
+        else "Não identificável",
         axis=1
     )
+    if 'PORTFOLIO_curva_abc' not in fila_decisao.columns:
+        fila_decisao['PORTFOLIO_curva_abc'] = '—'
+    fila_decisao['PORTFOLIO_curva_abc'] = fila_decisao['PORTFOLIO_curva_abc'].fillna('—')
     fila_decisao = fila_decisao.sort_values(['score_urgencia', 'lucro_liquido_real_7d'], ascending=[False, True])
-    colunas_fila = ['nome_produto', 'nome_variacao', 'ação', 'confianca', 'score_urgencia', 'lucro_liquido_real_7d', 'faixa_demanda_7d', 'elasticidade_legivel', 'leitura_evidencia']
+    colunas_fila = ['nome_produto', 'nome_variacao', 'ação', 'confianca', 'PORTFOLIO_curva_abc', 'score_urgencia', 'lucro_liquido_real_7d', 'faixa_demanda_7d', 'elasticidade_legivel', 'leitura_evidencia']
     st.dataframe(
         fila_decisao[colunas_fila], use_container_width=True, hide_index=True, height=280,
         column_config={
             'nome_produto': 'Produto', 'nome_variacao': 'SKU', 'ação': 'Próxima ação',
-            'confianca': 'Evidência', 'score_urgencia': st.column_config.ProgressColumn('Prioridade', min_value=0, max_value=100, format='%d/100'),
+            'confianca': 'Evidência',
+            'PORTFOLIO_curva_abc': st.column_config.TextColumn('ABC', help='Curva ABC pela contribuição ao lucro de 30 dias: A concentra ~80% do resultado.'),
+            'score_urgencia': st.column_config.ProgressColumn('Prioridade', min_value=0, max_value=100, format='%d/100'),
             'lucro_liquido_real_7d': st.column_config.NumberColumn('Resultado 7d', format='R$ %.2f'),
             'faixa_demanda_7d': 'Faixa exploratória (7d)', 'elasticidade_legivel': 'Elasticidade',
             'leitura_evidencia': 'Limite da leitura'
@@ -575,6 +683,8 @@ with aba_previsao:
             "Previsão Lucro (7d)": a.get("previsao_lucro_7d", dados.get("previsao_lucro_7d", 0)),
             "Previsão Vendas (30d)": a.get("previsao_vendas_30d", dados.get("previsao_vendas_30d", 0)),
             "Previsão Lucro (30d)": a.get("previsao_lucro_30d", dados.get("previsao_lucro_30d", 0)),
+            "Margem un. (%)": dados.get("FINANCEIRO_margem_unitaria_perc"),
+            "ACOS 7d (%)": dados.get("ADS_acos_medio") if float(dados.get("ADS_gasto_7d", 0) or 0) > 0 else None,
             "Evidência": classificar_confianca_evidencia(dados)[0],
             "Vendas observadas (30d)": dados.get("vendas_30d_macro", 0),
             "Cluster": a.get("cluster_mercado", dados.get("cluster_mercado", "Estável")),
@@ -590,21 +700,25 @@ with aba_previsao:
                 "Previsão Vendas (7d)": st.column_config.NumberColumn(format="%d un."),
                 "Previsão Lucro (7d)": st.column_config.NumberColumn(format="R$ %.2f"),
                 "Previsão Vendas (30d)": st.column_config.NumberColumn(format="%d un."),
-                "Previsão Lucro (30d)": st.column_config.NumberColumn(format="R$ %.2f")
+                "Previsão Lucro (30d)": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Margem un. (%)": st.column_config.NumberColumn(format="%.0f%%", help="Margem unitária em % do preço = ACOS de equilíbrio para ads."),
+                "ACOS 7d (%)": st.column_config.NumberColumn(format="%.0f%%", help="Só exibido quando houve gasto em ads no período. Compare com a margem unitária."),
             }
         )
+        st.caption("Regra de bolso: ads é rentável enquanto o ACOS ficar abaixo da margem unitária em % do preço — esse é o ponto de equilíbrio de cada SKU.")
 
 # ==============================================================================
-# ABA 4: DOSSIÊS E RANKINGS (Textos integrais da IA)
+# ABA 4: DOSSIÊS — correlações medidas, alavancas de crescimento e pareceres
 # ==============================================================================
 with aba_dossies:
     st.markdown("### Transparência da análise")
     data_cache = datetime.fromtimestamp(config.CACHE_AUDITORIA.stat().st_mtime).strftime('%d/%m/%Y %H:%M') if config.CACHE_AUDITORIA.exists() else 'não disponível'
     nota(
         f"{data_cache}. A camada determinística calcula vendas, custos de fabricação, ads, "
-        "tráfego, carrinho, cancelamentos e cobertura de material. O modelo IA recebe esse "
-        "recorte e devolve recomendações textuais; ele não acessa dados adicionais nem valida "
-        "causalidade.",
+        "tráfego, carrinho, cancelamentos, cobertura de material e as correlações profundas "
+        "(cesta de co-compra, dia da semana, geografia, views da API, margem unitária e curva "
+        "ABC). O modelo IA recebe esse recorte e devolve recomendações textuais; ele não "
+        "acessa dados adicionais nem valida causalidade.",
         titulo="Última auditoria em cache",
     )
     with st.expander("Ver critérios e limitações metodológicas"):
@@ -613,9 +727,54 @@ with aba_dossies:
         - A elasticidade só é interpretável se houve mudança material de preço e vendas suficientes. Sem isso, correlação não prova que o preço causou a variação de volume.
         - Tráfego e ads são dados no nível do anúncio/produto e são rateados entre variações (metade igualitário, metade proporcional às vendas de 30 dias); use a leitura por SKU como sinal, não como atribuição causal definitiva.
         - O lucro do escrow é rateado por participação de valor de cada item dentro do pedido.
+        - **Margem unitária** = preço − taxa Shopee − fabricação. Em % do preço, ela é o **ACOS de equilíbrio**: campanha com ACOS acima dela consome toda a margem da venda.
+        - **Cesta de co-compra** (180 dias), **melhor dia da semana** (90 dias) e **UF dominante** (90 dias) são correlações medidas nos pedidos reais; com amostra pequena, trate como indício.
+        - **Views e curtidas da API** vêm dos snapshots diários da sincronização de saúde da conta; o delta de 7 dias só aparece com 2+ snapshots na janela.
+        - **Curva ABC** classifica cada SKU pela contribuição ao lucro de 30 dias da loja (A ≈ 80% do resultado).
         - Resultado operacional não inclui todos os custos contábeis (por exemplo, mão de obra, impostos fora do repasse e frete, se não estiverem na origem).
         - Recomendações com baixa evidência ficam bloqueadas de execução automática nesta página.
         """)
+
+    # ── Alavancas de crescimento (determinísticas, custo zero de IA) ──────────
+    st.markdown("### 🚀 Alavancas de crescimento — sem custo de IA")
+    st.caption(
+        "Cada alavanca nasce de uma correlação medida no seu próprio dado (cesta de co-compra, "
+        "dia da semana, ACOS × margem, estoque do anúncio, participação da variação, geografia). "
+        "Nada aqui consome tokens de IA."
+    )
+    alavancas_por_produto = {}
+    chaves_alavancas = set()
+    for analise_alav in analises:
+        dados_alav = analise_alav.get("dados_atuais", {})
+        if not dados_alav:
+            continue
+        for alavanca in sugerir_alavancas_vendas(dados_alav):
+            chave = (
+                (dados_alav.get("item_id"), alavanca["titulo"])
+                if alavanca["nivel"] == "produto"
+                else (dados_alav.get("model_id"), alavanca["titulo"])
+            )
+            if chave in chaves_alavancas:
+                continue
+            chaves_alavancas.add(chave)
+            registro = dict(alavanca)
+            if alavanca["nivel"] == "variacao":
+                registro["contexto"] = padronizar_texto(dados_alav.get("nome_variacao", ""))
+            alavancas_por_produto.setdefault(
+                padronizar_texto(dados_alav.get("nome_produto", "Produto")), []
+            ).append(registro)
+
+    if not alavancas_por_produto:
+        st.success("Nenhuma alavanca óbvia pendente nos SKUs filtrados — a operação já aproveita o que os dados mostram.")
+    else:
+        for nome_prod_alav, alavancas_prod in alavancas_por_produto.items():
+            with st.container(border=True):
+                st.markdown(f"**{nome_prod_alav}**")
+                for alavanca in alavancas_prod:
+                    contexto = f" · `{alavanca['contexto']}`" if alavanca.get("contexto") else ""
+                    st.markdown(f"{alavanca['icone']} **{alavanca['titulo']}**{contexto} — {alavanca['detalhe']}")
+
+    st.divider()
     st.markdown("### 🎯 Ranking de Potencial de Margem")
     st.caption("Fórmula: Lucro / Gasto Ads + Fator Volume - Fator Cancelamento")
 
@@ -644,14 +803,131 @@ with aba_dossies:
 
     st.divider()
     st.markdown("### 📖 Dossiês e Pareceres de Diretoria")
-    st.caption("Acesse a defesa argumentativa do Conselho C-Level (CFO, CMO, COO) gerada pela IA para cada produto.")
+    st.caption(
+        "O raio-X de cada anúncio: correlações medidas, funil de 7 dias com escudo de nulos e a "
+        "defesa argumentativa do Conselho (CFO, CMO, COO) por variação."
+    )
 
     for iid, p in produtos_agrupados.items():
-        var_base = p["variacoes"][0]
-        with st.expander(f"Ler Parecer: {p['nome_produto']}"):
-            st.markdown(f"**Recomendação Executiva:** {var_base.get('recomendacao_executiva', 'N/A')}")
+        variacoes_produto = p["variacoes"]
+        dados_base = variacoes_produto[0].get("dados_atuais", {})
+        classes_abc = {v.get("dados_atuais", {}).get("PORTFOLIO_curva_abc") for v in variacoes_produto}
+        classe_abc = next((c for c in ("A", "B", "C") if c in classes_abc), None)
+        rotulo_abc = f" · Curva {classe_abc}" if classe_abc else ""
 
-            c1, c2, c3 = st.columns(3)
-            with c1: st.info(f"**💰 Parecer CFO (Finanças):**\n\n{var_base.get('relatorio_cfo_financas', 'N/A')}")
-            with c2: st.success(f"**🎯 Parecer CMO (Marketing):**\n\n{var_base.get('relatorio_cmo_marketing', 'N/A')}")
-            with c3: st.warning(f"**🏭 Parecer COO (Operações):**\n\n{var_base.get('relatorio_coo_operacoes', 'N/A')}")
+        with st.expander(f"Ler dossiê: {padronizar_texto(p['nome_produto'])} · {len(variacoes_produto)} SKU(s){rotulo_abc}"):
+            # Perfil do anúncio: imagem + correlações medidas
+            if dados_base.get("imagem_url"):
+                col_img, col_perfil = st.columns([1, 5], vertical_alignment="center")
+                col_img.image(dados_base["imagem_url"], width=110)
+            else:
+                col_perfil = st.container()
+
+            correlacoes = []
+            melhor_dia_prod = dados_base.get("VENDAS_melhor_dia_semana")
+            if melhor_dia_prod:
+                share_dia_prod = _float_ou_none(dados_base.get("VENDAS_share_melhor_dia_perc"))
+                sufixo_dia = f" ({share_dia_prod:.0f}% das vendas de 90d)" if share_dia_prod else ""
+                correlacoes.append(f"📅 Melhor dia: **{melhor_dia_prod}**{sufixo_dia}")
+            uf_prod = dados_base.get("GEO_uf_top")
+            if uf_prod:
+                share_uf_prod = _float_ou_none(dados_base.get("GEO_uf_top_share_perc")) or 0
+                base_uf_prod = int(dados_base.get("GEO_pedidos_com_uf_90d", 0) or 0)
+                correlacoes.append(f"🗺️ UF dominante: **{uf_prod}** ({share_uf_prod:.0f}% de {base_uf_prod} pedidos)")
+            parceiro_prod = dados_base.get("CESTA_parceiro_top")
+            conjuntos_prod = int(dados_base.get("CESTA_pedidos_conjuntos_180d", 0) or 0)
+            if parceiro_prod and conjuntos_prod >= 1:
+                correlacoes.append(f"🧺 Sai junto com: **{padronizar_texto(parceiro_prod)}** ({conjuntos_prod}× em 180d)")
+            api_views_prod = dados_base.get("API_views_7d")
+            if api_views_prod is not None:
+                curtidas_prod = dados_base.get("API_curtidas_7d")
+                sufixo_curtidas = f" · ❤️ +{int(curtidas_prod)}" if curtidas_prod else ""
+                correlacoes.append(f"👁️ Views pela API (7d): **{_fmt_qtd(api_views_prod)}**{sufixo_curtidas}")
+            recompra_prod = _float_ou_none(dados_base.get("POSVENDA_recompra_perc_180d"))
+            if recompra_prod is not None:
+                base_rec_prod = int(dados_base.get("POSVENDA_pedidos_identificados_180d", 0) or 0)
+                correlacoes.append(f"🔁 Recompra: **{recompra_prod:.0f}%** dos {base_rec_prod} pedidos (180d) de clientes que voltaram")
+            preparo_prod = _float_ou_none(dados_base.get("POSVENDA_preparo_mediano_horas"))
+            if preparo_prod is not None:
+                atraso_prod = _float_ou_none(dados_base.get("POSVENDA_preparo_atrasado_perc"))
+                sufixo_atraso = f" · **{atraso_prod:.0f}%** fora do prazo" if atraso_prod is not None else ""
+                correlacoes.append(f"🕒 Preparo mediano: **{preparo_prod:.0f}h**{sufixo_atraso}")
+            entrega_prod = _float_ou_none(dados_base.get("POSVENDA_entrega_mediana_dias"))
+            if entrega_prod is not None:
+                correlacoes.append(f"🚚 Entrega mediana: **{entrega_prod:.0f} dia(s)** após a coleta")
+            devolucoes_prod = int(dados_base.get("POSVENDA_devolucoes_90d", 0) or 0)
+            if devolucoes_prod:
+                motivo_prod = dados_base.get("POSVENDA_devolucao_motivo")
+                sufixo_motivo = f" ({padronizar_texto(str(motivo_prod))})" if motivo_prod else ""
+                correlacoes.append(f"↩️ Devoluções (90d): **{devolucoes_prod}**{sufixo_motivo}")
+            promo_prod = dados_base.get("PROMO_ativa_tipo")
+            if promo_prod:
+                fim_promo = str(dados_base.get("PROMO_ativa_fim") or "")[:10]
+                sufixo_fim = f" até **{fim_promo[8:10]}/{fim_promo[5:7]}**" if len(fim_promo) == 10 else ""
+                correlacoes.append(f"🏷️ **Em promoção** ({promo_prod}){sufixo_fim} — elasticidade e preço do período refletem a promoção")
+            estrelas_prod = _float_ou_none(dados_base.get("REPUTACAO_estrelas")) or 0
+            favoritos_prod = int(dados_base.get("REPUTACAO_curtidas_favoritos", 0) or 0)
+            correlacoes.append(f"⭐ {estrelas_prod:.1f} estrelas · ❤️ {favoritos_prod} favoritos")
+            col_perfil.markdown("  \n".join(correlacoes))
+
+            # Funil de 7 dias do anúncio inteiro (rateios somados = totais exatos)
+            impressoes_item = _soma_com_escudo(variacoes_produto, "TRAFEGO_ORG_impressoes_7d")
+            impressoes_ads_item = _soma_com_escudo(variacoes_produto, "ADS_impressoes_7d")
+            if impressoes_item is not None or impressoes_ads_item is not None:
+                impressoes_totais = (impressoes_item or 0) + (impressoes_ads_item or 0)
+            else:
+                impressoes_totais = None
+            cliques_item = _soma_com_escudo(variacoes_produto, "TRAFEGO_ORG_cliques_7d")
+            cliques_ads_item = _soma_com_escudo(variacoes_produto, "ADS_cliques_7d")
+            if cliques_item is not None or cliques_ads_item is not None:
+                cliques_totais = (cliques_item or 0) + (cliques_ads_item or 0)
+            else:
+                cliques_totais = None
+            visitas_item = _soma_com_escudo(variacoes_produto, "TRAFEGO_visitas_7d") or 0
+            carrinhos_item = _soma_com_escudo(variacoes_produto, "TRAFEGO_adicoes_carrinho_7d") or 0
+            vendas_item = _soma_com_escudo(variacoes_produto, "vendas_7d_reais") or 0
+
+            st.markdown("**Funil de 7 dias — anúncio inteiro**")
+            f1, f2, f3, f4, f5 = st.columns(5)
+            f1.metric("Impressões", _fmt_qtd(impressoes_totais), help="Orgânico + ads. '—' significa dado não coletado (não é zero).")
+            ctr_funil = (
+                f"CTR {cliques_totais / impressoes_totais * 100:.1f}%"
+                if cliques_totais is not None and impressoes_totais else None
+            )
+            f2.metric("Cliques", _fmt_qtd(cliques_totais), delta=ctr_funil, delta_color="off")
+            f3.metric("Visitas", _fmt_qtd(visitas_item))
+            taxa_carrinho = f"{carrinhos_item / visitas_item * 100:.0f}% das visitas" if visitas_item else None
+            f4.metric("Carrinhos", _fmt_qtd(carrinhos_item), delta=taxa_carrinho, delta_color="off")
+            conversao_funil = f"conversão {vendas_item / visitas_item * 100:.1f}%" if visitas_item else None
+            f5.metric("Vendas", _fmt_qtd(vendas_item), delta=conversao_funil, delta_color="off")
+
+            visitas_30d_item = _soma_com_escudo(variacoes_produto, "TRAFEGO_visitas_30d") or 0
+            carrinhos_30d_item = _soma_com_escudo(variacoes_produto, "TRAFEGO_adicoes_carrinho_30d") or 0
+            vendas_30d_item_funil = _soma_com_escudo(variacoes_produto, "vendas_30d_reais") or 0
+            conversao_30d_funil = f" · conversão {vendas_30d_item_funil / visitas_30d_item * 100:.1f}%" if visitas_30d_item else ""
+            st.caption(
+                f"Contexto de 30 dias: {_fmt_qtd(visitas_30d_item)} visitas · {_fmt_qtd(carrinhos_30d_item)} carrinhos · "
+                f"{_fmt_qtd(vendas_30d_item_funil)} vendas{conversao_30d_funil}"
+            )
+
+            st.divider()
+            st.markdown("**Pareceres por variação**")
+            if len(variacoes_produto) == 1:
+                _render_parecer_variacao(variacoes_produto[0])
+            else:
+                nomes_tabs = []
+                contagem_nomes = {}
+                for v in variacoes_produto:
+                    nome_v = padronizar_texto(v.get("dados_atuais", {}).get("nome_variacao", "SKU")) or "SKU"
+                    contagem_nomes[nome_v] = contagem_nomes.get(nome_v, 0) + 1
+                    nomes_tabs.append(nome_v if contagem_nomes[nome_v] == 1 else f"{nome_v} ({contagem_nomes[nome_v]})")
+                if len(variacoes_produto) > 8:
+                    indice_var = st.selectbox(
+                        "Escolher variação", range(len(variacoes_produto)),
+                        format_func=lambda i: nomes_tabs[i], key=f"dossie_var_{iid}",
+                    )
+                    _render_parecer_variacao(variacoes_produto[indice_var])
+                else:
+                    for tab_var, analise_var_dossie in zip(st.tabs(nomes_tabs), variacoes_produto):
+                        with tab_var:
+                            _render_parecer_variacao(analise_var_dossie)

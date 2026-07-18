@@ -172,6 +172,18 @@ CAMPOS_FINGERPRINT_7D = {
     "TRAFEGO_ORG_impressoes_7d", "TRAFEGO_ORG_cliques_7d", "TRAFEGO_ORG_ctr_perc",
     "ADS_impressoes_7d", "ADS_cliques_7d", "ADS_ctr_perc", "ADS_acos_medio",
     "MEMORIA_ESTRATEGICA_30D", "historico_acoes_passadas",
+    # Camada de correlação (v3): tudo o que chega ao modelo precisa estar no
+    # fingerprint, ou uma mudança nesses fatos reutilizaria análise antiga.
+    "FINANCEIRO_margem_unitaria_perc", "PORTFOLIO_share_variacao_30d_perc",
+    "PORTFOLIO_curva_abc", "LOGISTICA_dias_estoque_shopee",
+    "VENDAS_melhor_dia_semana", "VENDAS_share_melhor_dia_perc",
+    "GEO_uf_top", "GEO_uf_top_share_perc",
+    "CESTA_parceiro_top", "CESTA_pedidos_conjuntos_180d",
+    "API_views_7d", "API_curtidas_7d",
+    # Pós-venda (migração 17): promoção vigente e sinais enviados no payload.
+    "PROMO_ativa_tipo", "PROMO_ativa_fim",
+    "POSVENDA_recompra_perc_180d", "POSVENDA_preparo_atrasado_perc",
+    "POSVENDA_devolucoes_90d",
 }
 
 
