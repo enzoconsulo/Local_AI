@@ -72,6 +72,12 @@ SONDAGENS = {
     "13_migration_indice_janelas_vendas.sql": _sonda_objeto("idx_pedidos_data_date"),
     "14_migration_indices_apoio_janelas.sql": _sonda_objeto("idx_historico_variacoes_data", "idx_metricas_importadas_data"),
     "15_migration_imagem_produto.sql": _sonda_coluna("dim_produtos", "imagem_url"),
+    # A 16 altera o TIPO de uma coluna existente: a sondagem confere a escala.
+    "16_migration_precisao_metricas.sql": (
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = 'fato_visao_geral_loja' "
+        "AND column_name = 'metric_value' AND numeric_scale = 4)"
+    ),
 }
 
 
@@ -86,6 +92,9 @@ def conectar():
         password=os.getenv("POSTGRES_PASSWORD"),
         connect_timeout=10,
         application_name="aplicar_migrations",
+        # Mesmo fuso da sessão do app (utils/db_pool.py): datas de migrações e
+        # sondagens enxergam o mesmo "hoje" que os workers.
+        options=f"-c timezone={os.getenv('APP_TIMEZONE', 'America/Sao_Paulo')}",
     )
     conn.autocommit = True
     return conn

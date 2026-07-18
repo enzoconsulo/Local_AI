@@ -509,7 +509,7 @@ def renderizar_item_engenharia(m, incluir_padrao: bool, exigir_selecao_manual: b
 
         st.caption(
             f"⚖️ {item['peso_gramas']} g · ⏱️ {item['tempo_impressao_minutos']} min · "
-            f"📦 R$ {item['custo_embalagem']:.2f} embalagem · ⚡ R$ {item['energy_h']:.4f}/h"
+            f"📦 R\\$ {item['custo_embalagem']:.2f} embalagem · ⚡ R\\$ {item['energy_h']:.4f}/h"
         )
 
         if item["nome_material_sugerido"] and decisoes_materiais.get(item["nome_material_sugerido"]):

@@ -20,8 +20,19 @@ Correções validadas contra exports REAIS de jul/2026:
      mesmo gasto duas vezes.
   4. "Add to Cart" (inglês) reconhecido como adições ao carrinho.
   5. limpar_valor entende milhar EN ("1,234.56").
+  6. GMV Max sem dupla contagem: o "Dados Gerais" traz o GMV Max DUAS vezes
+     (linha-total da loja com ID '-' e linhas por produto com despesa zero) e
+     o arquivo Detail traz os MESMOS produtos com a despesa real. A regra em
+     decidir_linha_gmv_max garante que só UMA fonte entra por lote: o Detail
+     quando presente; senão a linha-total, alocada na Loja Global.
+  7. Arquivo com erro de leitura NÃO é registrado como importado: o retorno
+     inclui os nomes efetivamente processados e a página só registra esses.
+  8. limpar_valor só aceita milhar EN com decimal explícito ("1,234.56") ou
+     2+ grupos ("1,234,567"); "3,333" volta a ser decimal BR (3.333) — antes
+     virava 3333 e corrompia médias/taxas de exports BR.
 """
 
+import difflib
 import hashlib
 import io
 import re
@@ -148,10 +159,12 @@ def buscar_importacoes_sobrepostas(modulo, periodo_inicio, periodo_fim):
 def limpar_valor(val):
     """Converte texto monetário/percentual em float, detectando formato BR e EN.
 
-    Regras: "1,234.56" (milhar EN) → 1234.56. Vírgula sem esse padrão → formato
-    BR (ponto é milhar). Só pontos e mais de um → todos são milhar. Um único
-    ponto seguido de exatamente 3 dígitos → milhar BR ("1.234" = 1234); caso
-    contrário é decimal ("12.5" = 12.5).
+    Regras: milhar EN só é reconhecido com decimal explícito ("1,234.56" →
+    1234.56) ou com 2+ grupos ("1,234,567" → 1234567) — um único grupo sem
+    ponto ("3,333") é decimal BR (3.333), o caso real dos exports em português.
+    Vírgula fora desses padrões → formato BR (ponto é milhar). Só pontos e
+    mais de um → todos são milhar. Um único ponto seguido de exatamente 3
+    dígitos → milhar BR ("1.234" = 1234); caso contrário é decimal ("12.5").
     """
     if pd.isna(val) or val == '-':
         return 0.0
@@ -160,7 +173,7 @@ def limpar_valor(val):
     s = str(val).replace('R$', '').replace('%', '').strip().replace(' ', '')
     if not s:
         return 0.0
-    if re.fullmatch(r'-?\d{1,3}(,\d{3})+(\.\d+)?', s):
+    if re.fullmatch(r'-?\d{1,3}(,\d{3})+\.\d+', s) or re.fullmatch(r'-?\d{1,3}(,\d{3}){2,}', s):
         s = s.replace(',', '')
     elif ',' in s:
         s = s.replace('.', '').replace(',', '.')
@@ -496,9 +509,70 @@ def _localizar_coluna_investimento(cols: dict) -> str | None:
     return None
 
 
+def _e_arquivo_gmv_max_detail(nome: str) -> bool:
+    """O download real chama-se "Shop+GMV+MAX-Detail-..." (com '+')."""
+    return 'gmv max' in _nome_arquivo_normalizado(nome)
+
+
+def decidir_linha_gmv_max(e_arquivo_detail: bool, lote_tem_detail: bool, e_linha_loja: bool) -> str:
+    """Decide o destino de uma linha GMV Max para impedir dupla contagem.
+
+    Validado contra os exports reais de 05–11/07/2026: o "Dados Gerais" traz o
+    GMV Max DUAS vezes — a linha-total da loja (ID '-', a única com as despesas
+    reais) e linhas por produto (despesa 0, mas com impressões/cliques/GMV) — e
+    o arquivo "GMV Max Detail" repete os MESMOS produtos com a despesa correta.
+    Importar as duas fontes somava impressões/cliques/GMV em dobro e inflava o
+    ROAS; importar só o "Dados Gerais" descartando a linha-total perdia 100% do
+    gasto GMV Max. Regra:
+
+      - arquivo Detail: linhas por produto entram; a linha-total é redundante
+        (é a soma dos próprios produtos do arquivo);
+      - "Dados Gerais" com Detail no mesmo lote: TODA linha GMV Max é ignorada
+        (o Detail é a fonte canônica);
+      - "Dados Gerais" sem Detail: só a linha-total entra, alocada na Loja
+        Global (item 0) — as linhas por produto são subconjunto dela.
+    """
+    if e_arquivo_detail:
+        return "IGNORAR" if e_linha_loja else "IMPORTAR"
+    if lote_tem_detail:
+        return "IGNORAR"
+    return "IMPORTAR_NA_LOJA" if e_linha_loja else "IGNORAR"
+
+
+def _item_por_nome_anuncio(nome_anuncio: str, produtos_db) -> int | None:
+    """Liga um anúncio sem ID ao produto pelo nome, com limiar de confiança.
+
+    O critério antigo (substring simples) casava nomes vazios/curtos ("nan",
+    "-") com o primeiro produto do banco. Agora: nome com pelo menos 8
+    caracteres e contenção mútua OU similaridade difflib ≥ 0.75 — o sufixo
+    "[3]" dos anúncios reais continua casando por contenção.
+    """
+    nome = (nome_anuncio or '').strip().lower()
+    if len(nome) < 8 or nome in {'nan', 'none'}:
+        return None
+    melhor, melhor_score = None, 0.0
+    for pid, pnome in produtos_db:
+        if not pnome or pid == 0:
+            continue
+        if (pnome in nome or nome in pnome) and min(len(nome), len(pnome)) >= 8:
+            score = 0.90
+        else:
+            score = difflib.SequenceMatcher(None, nome, pnome).ratio()
+        if score > melhor_score:
+            melhor, melhor_score = pid, score
+    return melhor if melhor_score >= 0.75 else None
+
+
 def processar_relatorio_ads_avancado(arquivos_ads, data_inicio, data_fim):
+    """Processa o lote de arquivos de Ads.
+
+    Retorna (linhas_gravadas, mensagem, nomes_processados): apenas os arquivos
+    em nomes_processados foram lidos com sucesso e podem ser registrados como
+    lote importado — um arquivo com erro de leitura fica FORA do registro para
+    que o reenvio não seja bloqueado pelo aviso de hash duplicado.
+    """
     if not arquivos_ads:
-        return 0, "Nenhum arquivo de Ads fornecido."
+        return 0, "Nenhum arquivo de Ads fornecido.", set()
 
     if not isinstance(arquivos_ads, list):
         arquivos_ads = [arquivos_ads]
@@ -506,7 +580,7 @@ def processar_relatorio_ads_avancado(arquivos_ads, data_inicio, data_fim):
     data_inicio, data_fim = _como_date(data_inicio), _como_date(data_fim)
     dias_no_periodo = (data_fim - data_inicio).days + 1
     if dias_no_periodo <= 0:
-        return 0, "Data inválida."
+        return 0, "Data inválida.", set()
 
     granularidade = granularidade_do_periodo(dias_no_periodo)
 
@@ -533,6 +607,13 @@ def processar_relatorio_ads_avancado(arquivos_ads, data_inicio, data_fim):
 
     agregados = {}  # (item_id, tipo_campanha) -> métricas somadas do período
     arquivos_ignorados = []
+    arquivos_falhos = []
+    nomes_processados = set()
+    gmv_max_na_loja = False
+
+    # Pré-passada: o lote tem um arquivo GMV Max Detail? A resposta muda o
+    # destino de TODA linha GMV Max dos demais arquivos (ver decidir_linha_gmv_max).
+    lote_tem_detail = any(_e_arquivo_gmv_max_detail(a.name) for a in arquivos_ads)
 
     for arquivo_ads in arquivos_ads:
         nome_normalizado = _nome_arquivo_normalizado(arquivo_ads.name)
@@ -571,7 +652,7 @@ def processar_relatorio_ads_avancado(arquivos_ads, data_inicio, data_fim):
 
             # É um arquivo de detalhes do GMV Max? Downloads reais usam '+'
             # no lugar de espaço ("Shop+GMV+MAX-Detail-...").
-            is_detail_file = 'gmv max' in nome_normalizado
+            is_detail_file = _e_arquivo_gmv_max_detail(arquivo_ads.name)
 
             for _, row in df.iterrows():
                 item_id = None
@@ -591,30 +672,31 @@ def processar_relatorio_ads_avancado(arquivos_ads, data_inicio, data_fim):
                             break
 
                 # ALOCAÇÃO DE IDs E PREVENÇÃO DE DUPLA CONTAGEM
-                is_shop_level = False
-                if col_id and str(row.get(col_id, '')).strip() == '-':
-                    is_shop_level = True
+                is_shop_level = bool(col_id) and str(row.get(col_id, '')).strip() == '-'
 
-                    if is_gmv_max:
-                        # Linha-total do GMV Max no arquivo "Dados Gerais": os valores
-                        # virão diluídos por SKU no arquivo "Detalhes GMV Max".
+                if is_gmv_max:
+                    decisao = decidir_linha_gmv_max(is_detail_file, lote_tem_detail, is_shop_level)
+                    if decisao == "IGNORAR":
                         continue
-                    else:
-                        # Campanha de Busca da Loja (tradicional): salva na entidade Loja.
+                    if decisao == "IMPORTAR_NA_LOJA":
+                        # Lote sem o arquivo Detail: a linha-total (única com a
+                        # despesa real) entra na entidade Loja para o gasto não sumir.
                         item_id = 0
+                        gmv_max_na_loja = True
+                elif is_shop_level:
+                    # Campanha de Busca da Loja (tradicional): salva na entidade Loja.
+                    item_id = 0
 
-                if not is_shop_level and col_id and pd.notna(row.get(col_id)) and str(row.get(col_id, '')).strip() != '-':
+                if item_id is None and not is_shop_level and col_id and pd.notna(row.get(col_id)) and str(row.get(col_id, '')).strip() != '-':
                     try:
                         item_id = int(limpar_valor(row.get(col_id)))
                     except Exception:
                         pass
 
                 # Fallback: ligar pelo nome do anúncio ao nome do produto na base
-                if not item_id and not is_shop_level and col_nome:
-                    for pid, pnome in produtos_db:
-                        if pnome and (pnome in nome_csv_lower or nome_csv_lower in pnome):
-                            item_id = pid
-                            break
+                # (com limiar de confiança — nome curto/vazio não casa com nada)
+                if item_id is None and not is_shop_level and col_nome:
+                    item_id = _item_por_nome_anuncio(nome_csv_lower, produtos_db)
 
                 if item_id is None:
                     continue
@@ -661,17 +743,22 @@ def processar_relatorio_ads_avancado(arquivos_ads, data_inicio, data_fim):
                     if nome_anuncio_raw and nome_anuncio_raw not in m["nome"]:
                         m["nome"] = f"{m['nome']} + {nome_anuncio_raw}"
 
+            nomes_processados.add(arquivo_ads.name)
+
         except Exception as e:
             logger.error(f"Erro ao processar um dos arquivos de Ads ({arquivo_ads.name}): {e}")
+            arquivos_falhos.append(arquivo_ads.name)
             continue
 
     if not agregados:
+        if arquivos_falhos:
+            return 0, f"Falha na leitura de: {', '.join(arquivos_falhos)}. Nenhum dado foi gravado.", set()
         if arquivos_ignorados:
             return 0, (
                 "Somente arquivo(s) de Ad Group foram enviados; eles são ignorados para evitar "
                 "dupla contagem. Envie o 'Dados Gerais de Anúncios' (e o 'GMV Max Detail', se usar GMV Max)."
-            )
-        return 0, "Nenhum dado válido extraído dos arquivos."
+            ), set()
+        return 0, "Nenhum dado válido extraído dos arquivos.", set()
 
     # Rateio temporal por chave agregada. ROAS/ACOS são recalculados dos totais
     # (média das linhas do arquivo distorceria campanhas de pesos diferentes).
@@ -714,8 +801,18 @@ def processar_relatorio_ads_avancado(arquivos_ads, data_inicio, data_fim):
                         granularidade_origem = EXCLUDED.granularidade_origem;
                 """, linhas_insercao)
         mensagem = "Sucesso"
+        detalhes = []
         if arquivos_ignorados:
-            mensagem = f"Sucesso ({len(arquivos_ignorados)} arquivo(s) de Ad Group ignorado(s) para evitar dupla contagem)"
-        return len(linhas_insercao), mensagem
+            detalhes.append(f"{len(arquivos_ignorados)} arquivo(s) de Ad Group ignorado(s) para evitar dupla contagem")
+        if arquivos_falhos:
+            detalhes.append(f"FALHA de leitura em: {', '.join(arquivos_falhos)} — reenvie-os")
+        if gmv_max_na_loja:
+            detalhes.append(
+                "gasto do GMV Max alocado na Loja Global — exporte também o 'GMV Max Detail' "
+                "para atribuir o gasto por produto"
+            )
+        if detalhes:
+            mensagem = f"Sucesso ({'; '.join(detalhes)})"
+        return len(linhas_insercao), mensagem, nomes_processados
     except Exception as e:
-        return 0, f"Erro crítico de banco de dados na inserção de Ads: {e}"
+        return 0, f"Erro crítico de banco de dados na inserção de Ads: {e}", set()

@@ -1,4 +1,5 @@
 import sys
+import unicodedata
 from datetime import datetime
 from psycopg2.extras import execute_values
 from loguru import logger
@@ -11,6 +12,37 @@ sys.path.append(str(ROOT_DIR))
 load_dotenv(ROOT_DIR / "CHAVES_DADOS.env")
 from utils.shopee_core import chamar_shopee_api
 from utils.db_pool import get_connection
+
+
+# A API devolve recipient_address.state às vezes como sigla ("SP"), às vezes
+# como nome por extenso ("São Paulo"). order.region NÃO serve: é o PAÍS ("BR").
+UFS_VALIDAS = {
+    "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS",
+    "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC",
+    "SP", "SE", "TO",
+}
+_MAPA_ESTADO_UF = {
+    "acre": "AC", "alagoas": "AL", "amapa": "AP", "amazonas": "AM",
+    "bahia": "BA", "ceara": "CE", "distrito federal": "DF",
+    "espirito santo": "ES", "goias": "GO", "maranhao": "MA",
+    "mato grosso": "MT", "mato grosso do sul": "MS", "minas gerais": "MG",
+    "para": "PA", "paraiba": "PB", "parana": "PR", "pernambuco": "PE",
+    "piaui": "PI", "rio de janeiro": "RJ", "rio grande do norte": "RN",
+    "rio grande do sul": "RS", "rondonia": "RO", "roraima": "RR",
+    "santa catarina": "SC", "sao paulo": "SP", "sergipe": "SE",
+    "tocantins": "TO",
+}
+
+
+def _uf_do_pedido(order: dict) -> str | None:
+    """Extrai a sigla da UF do endereço do destinatário; None = desconhecida."""
+    estado = str((order.get("recipient_address") or {}).get("state") or "").strip()
+    if not estado:
+        return None
+    if len(estado) == 2 and estado.upper() in UFS_VALIDAS:
+        return estado.upper()
+    chave = unicodedata.normalize("NFKD", estado).encode("ascii", "ignore").decode().lower().strip()
+    return _MAPA_ESTADO_UF.get(chave)
 
 
 def obter_pedidos_por_periodo(time_from, time_to):
@@ -46,7 +78,7 @@ def obter_detalhes_pedidos(order_sns):
     for lote in lotes:
         params = {
             "order_sn_list": ",".join(lote),
-            "response_optional_fields": "buyer_user_id,item_list,cancel_reason"
+            "response_optional_fields": "buyer_user_id,item_list,cancel_reason,recipient_address"
         }
         response = chamar_shopee_api(path_order_detail, params)
 
@@ -57,7 +89,8 @@ def obter_detalhes_pedidos(order_sns):
                 pedidos.append({
                     "order_sn": order["order_sn"],
                     "data_hora_criacao": datetime.fromtimestamp(order["create_time"]).strftime('%Y-%m-%d %H:%M:%S'),
-                    "uf_destino": order.get("region", "BR"),
+                    # UF real do destinatário (order.region é o PAÍS, sempre 'BR')
+                    "uf_destino": _uf_do_pedido(order),
                     "status_pedido": order["order_status"],
                     "motivo_cancelamento_devolucao": motivo
                 })
@@ -161,7 +194,8 @@ def salvar_transacoes_no_banco(pedidos, itens, repasses):
                     INSERT INTO fato_pedidos_venda (order_sn, data_hora_criacao, uf_destino, status_pedido, motivo_cancelamento_devolucao)
                     VALUES %s ON CONFLICT (order_sn) DO UPDATE SET
                         status_pedido = EXCLUDED.status_pedido,
-                        motivo_cancelamento_devolucao = EXCLUDED.motivo_cancelamento_devolucao;
+                        motivo_cancelamento_devolucao = EXCLUDED.motivo_cancelamento_devolucao,
+                        uf_destino = COALESCE(EXCLUDED.uf_destino, fato_pedidos_venda.uf_destino);
                 """
                 valores_pedidos = [
                     (p["order_sn"], p["data_hora_criacao"], p["uf_destino"], p["status_pedido"], p["motivo_cancelamento_devolucao"])

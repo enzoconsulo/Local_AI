@@ -19,7 +19,13 @@ import streamlit as st
 _CSS = """
 <style>
 /* ── Tipografia do sistema (SF no Mac, Segoe no Windows) ──────────────────── */
-html, body, [data-testid="stAppViewContainer"] * {
+/* NUNCA usar o seletor universal (*) aqui: os ícones do Streamlit são a fonte
+   "Material Symbols" via ligadura de texto — sobrescrever a fonte deles faz o
+   NOME do ícone (ex.: "keyboard_arrow_right", "upload") aparecer como texto
+   cru dentro de botões, expanders e uploaders. Código (code/pre) também
+   precisa manter a fonte mono. */
+html, body,
+[data-testid="stAppViewContainer"] *:not([data-testid="stIconMaterial"]):not([class*="material-symbols"]):not(code):not(pre):not(kbd):not(samp):not(code *):not(pre *) {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
                  "Segoe UI Variable", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
@@ -39,7 +45,11 @@ hr { border: none; border-top: 1px solid rgba(0,0,0,.07); margin: 2rem 0; }
     box-shadow: 0 1px 2px rgba(0,0,0,.04);
 }
 [data-testid="stMetricLabel"] p { font-weight: 600; color: #6E6E73; font-size: .82rem; }
-[data-testid="stMetricValue"] { font-weight: 700; letter-spacing: -0.02em; }
+/* clamp evita o valor truncar em "R$ 2..." quando há 6 cartões lado a lado */
+[data-testid="stMetricValue"] {
+    font-weight: 700; letter-spacing: -0.02em;
+    font-size: clamp(1.35rem, 1.75vw, 2.25rem);
+}
 
 /* ── Botões ───────────────────────────────────────────────────────────────── */
 .stButton > button, .stLinkButton > a, .stDownloadButton > button,
@@ -60,18 +70,22 @@ hr { border: none; border-top: 1px solid rgba(0,0,0,.07); margin: 2rem 0; }
 .stButton > button[kind="primary"]:hover { background: #0077ED; }
 
 /* ── Abas em pílula ───────────────────────────────────────────────────────── */
-.stTabs [data-baseweb="tab-list"] {
+/* Streamlit ≥1.59 trocou o baseweb por [role="tablist"] + [data-testid="stTab"];
+   mantemos os seletores antigos junto por compatibilidade. */
+.stTabs [data-baseweb="tab-list"], .stTabs [role="tablist"] {
     gap: 4px; background: #ECECEE; padding: 4px;
-    border-radius: 12px; width: fit-content;
+    border-radius: 12px; width: fit-content; border-bottom: none;
 }
-.stTabs [data-baseweb="tab"] {
+.stTabs [data-baseweb="tab"], .stTabs [data-testid="stTab"] {
     border-radius: 9px; padding: 6px 18px; font-weight: 600; color: #3A3A3C;
+    border-bottom: none;
 }
 .stTabs [aria-selected="true"] {
     background: #FFFFFF !important; color: #1D1D1F !important;
     box-shadow: 0 1px 3px rgba(0,0,0,.10);
 }
-.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { display: none; }
+.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"],
+.stTabs [data-testid="stTab"] > div:not([data-testid]) { display: none; }
 
 /* ── Expanders, alertas, tabelas, formulários ─────────────────────────────── */
 [data-testid="stExpander"] {

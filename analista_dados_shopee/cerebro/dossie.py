@@ -16,6 +16,11 @@ Melhorias sobre a versão monolítica anterior:
      Antes o rateio era 100% igualitário, o que atribuía o mesmo tráfego a
      uma variação campeã e a uma variação morta.
   4. ACOS calculado dos totais (investimento/GMV) em vez de média das médias.
+  5. Estimativa de pedidos sem escrow usa o preço PRATICADO na venda (não o
+     preço atual da variação) e a taxa Shopee unitária é ponderada pelas
+     unidades vendidas (não média de médias).
+  6. Rateio inteiro por "maior resto": a soma das variações reproduz EXATO o
+     total do anúncio (o arredondamento por linha divergia em ±1/variação).
 
 Todos os nomes de campo do dossiê são preservados — o fingerprint do cache
 semântico, a UI e o motor de IA dependem deles.
@@ -94,6 +99,9 @@ WITH vendas_janelas AS (
 lucro_rateado AS (
     -- Escrow é do PEDIDO: rateia por participação de valor de cada item para
     -- não somar o lucro do pedido inteiro em cada variação (dupla contagem).
+    -- Pedido ainda sem escrow: estimativa sobre o preço PRATICADO na venda —
+    -- usar o preço ATUAL da variação enviesava a estimativa a cada ajuste de
+    -- preço feito depois da venda (exatamente o que o Atuador faz).
     SELECT
         i.model_id,
         p.data_hora_criacao::date AS data,
@@ -101,20 +109,19 @@ lucro_rateado AS (
             COALESCE(
                 r.lucro_liquido_absoluto
                     * (i.preco_praticado * i.quantidade) / NULLIF(tot.valor_pedido, 0),
-                ((v.preco_venda_atual * 0.80) - 3.00) * i.quantidade
+                ((i.preco_praticado * 0.80) - 3.00) * i.quantidade
             )
         ) AS lucro_liquido,
-        AVG(
+        SUM(
             COALESCE(
                 (r.comissao_shopee + r.taxa_servico + r.taxa_transacao)
-                    * (i.preco_praticado * i.quantidade) / NULLIF(tot.valor_pedido, 0)
-                    / NULLIF(i.quantidade, 0),
-                (v.preco_venda_atual * 0.20) + 3.00
+                    * (i.preco_praticado * i.quantidade) / NULLIF(tot.valor_pedido, 0),
+                ((i.preco_praticado * 0.20) + 3.00) * i.quantidade
             )
-        ) AS taxa_media_unitaria
+        ) AS taxas_shopee_total,
+        SUM(i.quantidade) AS unidades
     FROM fato_itens_pedido i
     JOIN fato_pedidos_venda p ON p.order_sn = i.order_sn
-    JOIN dim_variacoes v ON v.model_id = i.model_id
     LEFT JOIN fato_repasse_escrow r ON r.order_sn = i.order_sn
     JOIN (
         -- Total do pedido calculado apenas para a janela de 30 dias: sem o
@@ -135,7 +142,11 @@ lucro_janelas AS (
         model_id,
         COALESCE(SUM(lucro_liquido) FILTER (WHERE data >= CURRENT_DATE - 7), 0) AS receita_liquida_7d,
         COALESCE(SUM(lucro_liquido), 0)                                         AS receita_liquida_30d,
-        AVG(taxa_media_unitaria) FILTER (WHERE data >= CURRENT_DATE - 7)        AS taxa_shopee_7d
+        -- Taxa unitária PONDERADA pelas unidades (total de taxas ÷ total de
+        -- unidades): a média de médias antiga pesava igual dias de 1 venda e
+        -- dias de 10 vendas.
+        SUM(taxas_shopee_total) FILTER (WHERE data >= CURRENT_DATE - 7)
+            / NULLIF(SUM(unidades) FILTER (WHERE data >= CURRENT_DATE - 7), 0)  AS taxa_shopee_7d
     FROM lucro_rateado
     GROUP BY model_id
 ),
@@ -448,6 +459,72 @@ def _ratear_float(valor, peso: float) -> float:
     return float(valor or 0) * peso
 
 
+# Campos inteiros do anúncio que são rateados entre as variações. A alocação
+# usa "largest remainder": arredondar cada variação isoladamente (round) fazia
+# a soma dos rateios divergir do total do anúncio em ±1 por variação — e esses
+# desvios se acumulavam nos KPIs somados da página 3.
+CAMPOS_RATEIO_INTEIRO = (
+    "visitas_7d", "carrinhos_7d", "impressoes_org", "cliques_org",
+    "impressoes_ads", "cliques_ads",
+    "visitas_30d", "carrinhos_30d", "impressoes_org_30d", "cliques_org_30d",
+    "impressoes_ads_30d", "cliques_ads_30d",
+    "conversoes_ads_30d", "itens_vendidos_ads_30d",
+)
+
+
+def alocar_inteiro_por_peso(total: int, pesos: list[float]) -> list[int]:
+    """Distribui um total inteiro por pesos sem perder nem inventar unidades.
+
+    Método do maior resto: piso de cada cota exata e o resíduo vai, uma unidade
+    por vez, para as maiores frações (desempate determinístico pela posição).
+    A soma do retorno é SEMPRE igual ao total.
+    """
+    if not pesos:
+        return []
+    total = int(total or 0)
+    if total <= 0:
+        return [0] * len(pesos)
+    soma_pesos = sum(pesos)
+    if soma_pesos <= 0:
+        pesos = [1.0] * len(pesos)
+        soma_pesos = float(len(pesos))
+    exatos = [total * (p / soma_pesos) for p in pesos]
+    base = [int(e) for e in exatos]
+    residuo = total - sum(base)
+    ordem = sorted(range(len(pesos)), key=lambda i: (exatos[i] - base[i], -i), reverse=True)
+    for i in ordem[:residuo]:
+        base[i] += 1
+    return base
+
+
+def _alocar_rateios_por_item(registros) -> dict:
+    """Pré-calcula, por item, a alocação inteira de cada campo rateado.
+
+    Retorna {(model_id, campo): valor}. Os totais do anúncio são idênticos em
+    todas as linhas do item (vêm de agregação por item_id), então a alocação
+    lê o total da primeira linha e distribui pelos pesos das variações.
+    """
+    por_item: dict = {}
+    for r in registros:
+        por_item.setdefault(int(r["item_id"]), []).append(r)
+
+    alocacoes: dict = {}
+    for linhas in por_item.values():
+        pesos = [
+            _peso_rateio_variacao(
+                int(linha["vendas_30d"] or 0),
+                int(linha["vendas_30d_item_total"] or 0),
+                max(1, int(linha["qtd_variacoes_produto"] or 1)),
+            )
+            for linha in linhas
+        ]
+        for campo in CAMPOS_RATEIO_INTEIRO:
+            total = int(linhas[0][campo] or 0)
+            for linha, valor in zip(linhas, alocar_inteiro_por_peso(total, pesos)):
+                alocacoes[(int(linha["model_id"]), campo)] = valor
+    return alocacoes
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # MONTAGEM DO DOSSIÊ
 # ══════════════════════════════════════════════════════════════════════════════
@@ -468,12 +545,17 @@ def gerar_dossie_produtos_com_memoria() -> list[dict]:
             cur.execute(QUERY_DOSSIE)
             registros = cur.fetchall()
 
-    dossie = [_montar_dados_variacao(r) for r in registros]
+    alocacoes = _alocar_rateios_por_item(registros)
+    dossie = [_montar_dados_variacao(r, alocacoes) for r in registros]
     return enriquecer_dossie_com_memoria(dossie)
 
 
-def _montar_dados_variacao(r) -> dict:
-    """Converte uma linha do DW no dicionário analítico de uma variação."""
+def _montar_dados_variacao(r, alocacoes: dict | None = None) -> dict:
+    """Converte uma linha do DW no dicionário analítico de uma variação.
+
+    alocacoes: {(model_id, campo): int} da alocação sem perda por item; na
+    ausência (testes/chamadas antigas) cai no rateio arredondado por linha.
+    """
     preco        = float(r["preco_venda_atual"] or 0)
     preco_hoje   = float(r["preco_hoje"] or 0) or preco
     preco_7d     = float(r["preco_7d_atras"] or 0) or preco
@@ -500,22 +582,31 @@ def _montar_dados_variacao(r) -> dict:
     # Rateio híbrido: métricas do anúncio distribuídas entre as variações
     # metade por igual, metade proporcional às vendas de 30 dias.
     peso = _peso_rateio_variacao(vendas_30d, vendas_30d_item, qtd_variacoes)
+    model_id_int = int(r["model_id"])
+
+    def _int_rateado(campo: str) -> int:
+        """Alocação sem perda quando disponível; senão rateio arredondado."""
+        if alocacoes is not None:
+            valor = alocacoes.get((model_id_int, campo))
+            if valor is not None:
+                return valor
+        return _ratear_int(r[campo], peso)
 
     gasto_ads     = _ratear_float(r["gasto_ads_7d"], peso)
-    visitas       = _ratear_int(r["visitas_7d"], peso)
-    carrinhos     = _ratear_int(r["carrinhos_7d"], peso)
+    visitas       = _int_rateado("visitas_7d")
+    carrinhos     = _int_rateado("carrinhos_7d")
     gasto_ads_30d = _ratear_float(r["gasto_ads_30d"], peso)
-    visitas_30d   = _ratear_int(r["visitas_30d"], peso)
-    carrinhos_30d = _ratear_int(r["carrinhos_30d"], peso)
+    visitas_30d   = _int_rateado("visitas_30d")
+    carrinhos_30d = _int_rateado("carrinhos_30d")
 
-    impressoes_org = _ratear_int(r["impressoes_org"], peso)
-    cliques_org    = _ratear_int(r["cliques_org"], peso)
+    impressoes_org = _int_rateado("impressoes_org")
+    cliques_org    = _int_rateado("cliques_org")
     rejeicao_media = float(r["rejeicao_media"] or 0)
     org_impressoes_disponiveis = int(r["registros_impressoes_org"] or 0) > 0 and (impressoes_org > 0 or visitas == 0)
     org_cliques_disponiveis = int(r["registros_cliques_org"] or 0) > 0 and (cliques_org > 0 or visitas == 0)
 
-    impressoes_ads = _ratear_int(r["impressoes_ads"], peso)
-    cliques_ads    = _ratear_int(r["cliques_ads"], peso)
+    impressoes_ads = _int_rateado("impressoes_ads")
+    cliques_ads    = _int_rateado("cliques_ads")
     gmv_ads        = _ratear_float(r["gmv_ads"], peso)
     gasto_ads_item = float(r["gasto_ads_7d"] or 0)
     gmv_ads_item   = float(r["gmv_ads"] or 0)
@@ -527,14 +618,14 @@ def _montar_dados_variacao(r) -> dict:
     ctr_org = round((cliques_org / impressoes_org) * 100, 2) if org_impressoes_disponiveis and org_cliques_disponiveis and impressoes_org > 0 else None
     ctr_ads = round((cliques_ads / impressoes_ads) * 100, 2) if ads_impressoes_disponiveis and ads_cliques_disponiveis and impressoes_ads > 0 else None
 
-    impressoes_org_30d = _ratear_int(r["impressoes_org_30d"], peso)
-    cliques_org_30d    = _ratear_int(r["cliques_org_30d"], peso)
+    impressoes_org_30d = _int_rateado("impressoes_org_30d")
+    cliques_org_30d    = _int_rateado("cliques_org_30d")
     org_impressoes_30d_disponiveis = int(r["registros_impressoes_org_30d"] or 0) > 0 and (impressoes_org_30d > 0 or visitas_30d == 0)
     org_cliques_30d_disponiveis = int(r["registros_cliques_org_30d"] or 0) > 0 and (cliques_org_30d > 0 or visitas_30d == 0)
     ctr_org_30d = round((cliques_org_30d / impressoes_org_30d) * 100, 2) if org_impressoes_30d_disponiveis and org_cliques_30d_disponiveis and impressoes_org_30d > 0 else None
 
-    impressoes_ads_30d = _ratear_int(r["impressoes_ads_30d"], peso)
-    cliques_ads_30d    = _ratear_int(r["cliques_ads_30d"], peso)
+    impressoes_ads_30d = _int_rateado("impressoes_ads_30d")
+    cliques_ads_30d    = _int_rateado("cliques_ads_30d")
     ads_impressoes_30d_disponiveis = int(r["registros_impressoes_ads_30d"] or 0) > 0 and (impressoes_ads_30d > 0 or gasto_ads_30d == 0)
     ads_cliques_30d_disponiveis = int(r["registros_cliques_ads_30d"] or 0) > 0 and (cliques_ads_30d > 0 or gasto_ads_30d == 0)
     ctr_ads_30d = round((cliques_ads_30d / impressoes_ads_30d) * 100, 2) if ads_impressoes_30d_disponiveis and ads_cliques_30d_disponiveis and impressoes_ads_30d > 0 else None
@@ -680,8 +771,8 @@ def _montar_dados_variacao(r) -> dict:
         "ADS_cliques_30d": cliques_ads_30d if ads_cliques_30d_disponiveis else None,
         "ADS_ctr_30d_perc": ctr_ads_30d,
         "ADS_gmv_30d": round(gmv_ads_30d, 2),
-        "ADS_conversoes_30d": _ratear_int(r["conversoes_ads_30d"], peso),
-        "ADS_itens_vendidos_30d": _ratear_int(r["itens_vendidos_ads_30d"], peso),
+        "ADS_conversoes_30d": _int_rateado("conversoes_ads_30d"),
+        "ADS_itens_vendidos_30d": _int_rateado("itens_vendidos_ads_30d"),
         # -------------------------------------------------------------
 
         "TRAFEGO_visitas_7d":           visitas,

@@ -1,8 +1,6 @@
 import streamlit as st
-import psycopg2
 import psycopg2.errors
 import pandas as pd
-import os
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -12,43 +10,36 @@ load_dotenv(dotenv_path=ROOT_DIR / "CHAVES_DADOS.env")
 
 st.set_page_config(page_title="Engenharia de Fábrica", page_icon="⚙️", layout="wide")
 
+from utils.db_pool import get_connection
 from utils.ui import aplicar_estilo, cabecalho
 aplicar_estilo()
 
 # ==============================================================================
-# CONEXÃO BLINDADA COM O POSTGRESQL (Abre e fecha a cada requisição)
+# ACESSO AO POSTGRESQL — via pool compartilhado (utils/db_pool)
+# Era a única página abrindo/fechando conexão própria por query, fora do
+# statement_timeout e do fuso de sessão do pool.
 # ==============================================================================
-def get_db_connection():
-    try:
-        return psycopg2.connect(
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT"),
-            database=os.getenv("POSTGRES_DB"),
-            user=os.getenv("POSTGRES_USER"),
-            password=os.getenv("POSTGRES_PASSWORD")
-        )
-    except Exception as e:
-        st.error(f"🚨 Falha ao conectar no PostgreSQL. Verifique se o Docker está rodando. Erro: {e}")
-        st.stop()
-
 
 def run_query(query, params=None):
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            if cur.description:
-                col_names = [desc[0] for desc in cur.description]
-                return pd.DataFrame(cur.fetchall(), columns=col_names)
-            return pd.DataFrame()
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                if cur.description:
+                    col_names = [desc[0] for desc in cur.description]
+                    return pd.DataFrame(cur.fetchall(), columns=col_names)
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"🚨 Falha ao consultar o PostgreSQL. Verifique se o Docker está rodando. Erro: {e}")
+        st.stop()
 
 
 def run_insert(query, params):
     """Executa INSERT/UPDATE. Retorna True/False e mostra erro cru se falhar."""
     try:
-        with get_db_connection() as conn:
+        with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(query, params)
-            conn.commit()
         return True
     except Exception as e:
         st.error(f"Erro de Banco de Dados: {e}")
@@ -58,10 +49,9 @@ def run_insert(query, params):
 def run_delete(query, params):
     """Executa DELETE. Retorna (sucesso, mensagem_de_erro_amigavel_ou_None)."""
     try:
-        with get_db_connection() as conn:
+        with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(query, params)
-            conn.commit()
         return True, None
     except psycopg2.errors.ForeignKeyViolation:
         return False, (
@@ -735,19 +725,21 @@ with tab_mapeamento:
                         if not model_ids_alvo:
                             st.warning("Selecione ao menos uma variação.")
                         else:
+                            gravou_lote = False
                             try:
-                                with get_db_connection() as conn:
+                                with get_connection() as conn:
                                     with conn.cursor() as cur:
                                         for model_id in model_ids_alvo:
                                             cur.execute(UPSERT_ENGENHARIA_SQL, (
                                                 model_id, id_material_sel, id_maquina_sel,
                                                 peso, tempo, custo_emb, perda,
                                             ))
-                                conn.commit()
-                                st.success(f"Custo mapeado para {len(model_ids_alvo)} variação(ões) de {nome_produto_sel}!")
-                                st.rerun()
+                                gravou_lote = True
                             except Exception as e:
                                 st.error(f"Erro de Banco de Dados: {e}")
+                            if gravou_lote:
+                                st.success(f"Custo mapeado para {len(model_ids_alvo)} variação(ões) de {nome_produto_sel}!")
+                                st.rerun()
 
         st.divider()
 

@@ -54,6 +54,13 @@ MIN_CONN: int = 2    # Conexões abertas ao iniciar
 MAX_CONN: int = 12   # Teto de conexões simultâneas
 STMT_TIMEOUT_MS: int = 30_000  # 30 s — mata queries travadas automaticamente
 
+# Fuso da SESSÃO no Postgres: o servidor no Docker roda em UTC, mas os workers
+# gravam datas com date.today()/datetime.now() do Windows (BRT). Sem alinhar,
+# entre ~21h e meia-noite locais o CURRENT_DATE do banco já é "amanhã" e todas
+# as janelas 7d/30d deslizam um dia. (O PGTZ do docker-compose não resolve:
+# é variável de cliente, não do servidor.)
+APP_TIMEZONE: str = os.getenv("APP_TIMEZONE", "America/Sao_Paulo")
+
 # ── Singleton thread-safe ─────────────────────────────────────────────────────
 _pool: ThreadedConnectionPool | None = None
 _lock = threading.Lock()
@@ -70,8 +77,13 @@ def _build_pool() -> ThreadedConnectionPool:
         user=os.getenv("POSTGRES_USER"),
         password=os.getenv("POSTGRES_PASSWORD"),
         connect_timeout=10,
-        # statement_timeout mata queries longas; application_name aparece no pg_stat_activity
-        options=f"-c statement_timeout={STMT_TIMEOUT_MS} -c application_name=shopee_dw",
+        # statement_timeout mata queries longas; application_name aparece no
+        # pg_stat_activity; timezone alinha CURRENT_DATE ao relógio local
+        options=(
+            f"-c statement_timeout={STMT_TIMEOUT_MS}"
+            f" -c application_name=shopee_dw"
+            f" -c timezone={APP_TIMEZONE}"
+        ),
     )
 
 

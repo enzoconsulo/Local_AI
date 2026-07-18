@@ -151,7 +151,7 @@ with aba_principal:
                 dt_inicio_pedidos = datetime(2026, 1, 26)
 
             if ultima_sync_pedidos and ultima_sync_pedidos >= agora - timedelta(minutes=10):
-                status.update(label="Pedidos já estão atualizados na última hora.", state="complete")
+                status.update(label="Pedidos já estão atualizados (sincronizados há menos de 10 minutos).", state="complete")
             else:
                 blocos = fatiar_periodo(dt_inicio_pedidos, agora)
                 barra = st.progress(0)
@@ -265,14 +265,21 @@ with aba_ads:
         dt_fim_ads = datetime.combine(periodo_ads[1], datetime.max.time())
 
         with st.status(f"Mapeando campanhas de {len(arquivos_ads_novos)} arquivo(s)... ({dt_inicio_ads.strftime('%d/%m')} a {dt_fim_ads.strftime('%d/%m')})", expanded=True) as status_ads:
-            linhas_ads, msg_ads = processar_relatorio_ads_avancado(arquivos_ads_novos, dt_inicio_ads, dt_fim_ads)
+            linhas_ads, msg_ads, nomes_processados = processar_relatorio_ads_avancado(arquivos_ads_novos, dt_inicio_ads, dt_fim_ads)
 
-            if msg_ads == "Sucesso":
+            if msg_ads.startswith("Sucesso"):
                 registrar_sincronizacao('ADS_AVANCADO', dt_inicio_ads, dt_fim_ads, 'SUCESSO', linhas_ads)
+                # Só registra como importado o que foi de fato lido: um arquivo
+                # com erro fica de fora para o reenvio não ser bloqueado pelo
+                # aviso de "hash já importado".
                 for arq in arquivos_ads_novos:
-                    registrar_lote_importacao('ADS_AVANCADO', arq.name, calcular_hash_arquivo(arq),
-                                              periodo_ads[0], periodo_ads[1], linhas_ads)
-                status_ads.update(label=f"Análise Concluída! Foram injetados {linhas_ads} dias-registro de inteligência.", state="complete")
+                    if arq.name in nomes_processados:
+                        registrar_lote_importacao('ADS_AVANCADO', arq.name, calcular_hash_arquivo(arq),
+                                                  periodo_ads[0], periodo_ads[1], linhas_ads)
+                rotulo = f"Análise Concluída! Foram injetados {linhas_ads} dias-registro de inteligência."
+                if msg_ads != "Sucesso":
+                    st.warning(f"⚠️ {msg_ads}")
+                status_ads.update(label=rotulo, state="complete")
                 st.balloons()
             else:
                 status_ads.update(label=f"Aviso de leitura: {msg_ads}", state="error")

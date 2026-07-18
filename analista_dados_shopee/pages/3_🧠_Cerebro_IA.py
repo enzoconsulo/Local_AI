@@ -448,8 +448,9 @@ with aba_atuador:
                             if st.session_state.get(reverify_key, False):
                                 discount_id = analise_var.get("discount_id_shopee")
 
-                                if not discount_id:
-                                    # Item marcado SUCESSO por execução antiga, sem discount_id salvo — não dá pra auto-checar
+                                # IDs legados podem ser texto (bug antigo gravava a mensagem
+                                # de sucesso do combo aqui) — sem ID numérico não há auto-check.
+                                if not discount_id or not str(discount_id).isdigit():
                                     st.warning("Este item foi marcado como concluído antes da verificação automática existir. "
                                                 "Confira manualmente no Seller Center. Se não estiver lá, use 'Liberar mesmo assim' abaixo.")
                                     if st.button("Liberar para nova tentativa", key=f"forcerelease_{dados_var['model_id']}"):
@@ -475,6 +476,13 @@ with aba_atuador:
                             st.warning("⏳ Enviado à Shopee, aguardando confirmação real", icon="🟡")
                             if st.button("Verificar status real", key=f"check_{dados_var['model_id']}", use_container_width=True):
                                 discount_id = analise_var.get("discount_id_shopee")
+                                if not discount_id or not str(discount_id).isdigit():
+                                    # Registro legado (combo antigo gravava texto aqui): a API
+                                    # já tinha aceitado o envio — libera o card e orienta.
+                                    analise_var["status_api_execucao"] = "SUCESSO"
+                                    salvar_cache_auditoria()
+                                    st.toast("Envio já confirmado pela API; confira o combo no Seller Center.", icon="✅")
+                                    st.rerun()
                                 status_api, detalhe = verificar_status_promocao(discount_id)
 
                                 if status_api in ("ongoing", "upcoming"):
@@ -519,10 +527,18 @@ with aba_atuador:
 
                                         if sucesso:
                                             # 5. MUTAÇÃO DO ESTADO NA MEMÓRIA RAM
-                                            if acao_var in ("CRIAR_PROMOCAO", "CRIAR_COMBO"):
-                                                # Assíncrono na Shopee — fica pendente até verificarmos de fato
+                                            if acao_var == "CRIAR_PROMOCAO":
+                                                # Assíncrona na Shopee — fica pendente até verificarmos de fato
+                                                # (msg aqui é o discount_id numérico)
                                                 analise_var["status_api_execucao"] = "PENDENTE_VERIFICACAO"
                                                 analise_var["discount_id_shopee"] = msg
+                                            elif acao_var == "CRIAR_COMBO":
+                                                # O bundle_deal é confirmado sincronicamente pela API
+                                                # (add + attach validados, com failure_list checada);
+                                                # verificar via get_discount era um bug — o ID não é
+                                                # de desconto e o card ficava preso em "pendente".
+                                                analise_var["status_api_execucao"] = "SUCESSO"
+                                                analise_var["bundle_id_shopee"] = msg
                                             else:
                                                 # Alteração de preço é síncrona — a Shopee confirma na hora
                                                 analise_var["status_api_execucao"] = "SUCESSO"

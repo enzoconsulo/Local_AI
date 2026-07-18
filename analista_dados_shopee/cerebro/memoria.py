@@ -608,11 +608,14 @@ def avaliar_acoes_maduras(dossie_atual: list[dict]) -> int:
     if not atuais:
         return 0
 
+    # LEFT JOIN no snapshot: ações registradas sem execução de origem (sessão
+    # restaurada de cache antigo, ações da Visão Central) também maturam — o
+    # baseline delas fica vazio, mas o observado da janela pós-ação é medido.
     query = """
         SELECT l.id_log, l.id_execucao_origem, l.item_id, l.model_id, l.data_aplicacao,
                l.impacto_projetado, s.metricas_observadas
         FROM log_acoes_shopee l
-        JOIN ia_snapshots_variacao s
+        LEFT JOIN ia_snapshots_variacao s
           ON s.id_execucao = l.id_execucao_origem AND s.model_id = l.model_id
         LEFT JOIN ia_avaliacoes_acoes a ON a.id_log = l.id_log
         WHERE l.status_api = 'SUCESSO'
@@ -668,7 +671,9 @@ def avaliar_acoes_maduras(dossie_atual: list[dict]) -> int:
                         VALUES (%s, %s::uuid, %s, %s, 7, %s, %s + INTERVAL '7 days',
                                 %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb, %s)
                     """, (
-                        acao["id_log"], str(acao["id_execucao_origem"]), acao["item_id"], acao["model_id"],
+                        acao["id_log"],
+                        str(acao["id_execucao_origem"]) if acao["id_execucao_origem"] else None,
+                        acao["item_id"], acao["model_id"],
                         acao["data_aplicacao"], acao["data_aplicacao"],
                         json.dumps(baseline), json.dumps(previsto), json.dumps(observado), json.dumps(comparacao), status
                     ))

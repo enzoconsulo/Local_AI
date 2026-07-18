@@ -69,7 +69,7 @@ for linha in range(0, len(PAGINAS), 3):
                     </div>""",
                 unsafe_allow_html=True,
             )
-            st.page_link(arquivo, label="Abrir", icon="→")
+            st.page_link(arquivo, label="Abrir", icon=":material/arrow_forward:")
     st.markdown("")
 
 st.divider()

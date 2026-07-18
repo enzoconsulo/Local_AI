@@ -1,4 +1,7 @@
+import contextlib
 import os
+import secrets
+import threading
 import time
 import hmac
 import hashlib
@@ -19,58 +22,113 @@ BASE_URL = "https://partner.shopeemobile.com"
 
 # ==============================================================================
 # MOTOR DE AUTENTICAÇÃO INTELIGENTE (Auto-Renovação de Token)
+#
+# O refresh_token da Shopee é de USO ÚNICO: se dois processos (app + um worker
+# via CLI, ou o app aberto duas vezes) renovarem com o mesmo token, a cadeia é
+# invalidada e a integração morre até rodar pegar_token.py de novo. Por isso a
+# renovação é protegida por um lock de arquivo (entre processos) + lock de
+# thread (dentro do processo), e o .env é RELIDO já dentro do lock — se outro
+# processo renovou enquanto esperávamos, usamos o token novo dele.
 # ==============================================================================
 _CACHE_ACCESS_TOKEN = None
 _CACHE_EXPIRATION = 0
+_TOKEN_THREAD_LOCK = threading.Lock()
+_TOKEN_LOCK_FILE = ROOT_DIR / ".shopee_token.lock"
+
+
+@contextlib.contextmanager
+def _trava_renovacao_entre_processos():
+    """Lock exclusivo de arquivo, cross-platform. Se o mecanismo de lock do SO
+    falhar, segue sem ele (app single-user: melhor renovar do que travar)."""
+    handle = None
+    travado = False
+    try:
+        handle = open(_TOKEN_LOCK_FILE, "a+")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle, fcntl.LOCK_EX)
+            travado = True
+        except Exception as exc:
+            logger.warning(f"Lock de renovação de token indisponível; seguindo sem ele: {exc}")
+        yield
+    finally:
+        if handle is not None:
+            if travado:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle, fcntl.LOCK_UN)
+                except Exception:
+                    pass
+            handle.close()
+
 
 def obter_access_token():
     """Gera e renova o access_token de forma autônoma usando o refresh_token."""
     global _CACHE_ACCESS_TOKEN, _CACHE_EXPIRATION
-    
-    # Se o token ainda for válido na memória, reaproveita (evita block da API)
+
+    # Fora do lock: caminho quente (token válido em memória)
     if _CACHE_ACCESS_TOKEN and time.time() < _CACHE_EXPIRATION:
         return _CACHE_ACCESS_TOKEN
-        
-    refresh_token = os.getenv("SHOPEE_REFRESH_TOKEN", "")
-    
-    if not refresh_token:
-        logger.error("Refresh Token não encontrado no CHAVES_DADOS.env")
-        return None
-        
-    path = "/api/v2/auth/access_token/get"
-    timestamp = int(time.time())
-    base_string = f"{PARTNER_ID}{path}{timestamp}".encode('utf-8')
-    sign = hmac.new(PARTNER_KEY, base_string, hashlib.sha256).hexdigest()
-    
-    url = f"{BASE_URL}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
-    payload = {
-        "refresh_token": refresh_token,
-        "partner_id": PARTNER_ID,
-        "shop_id": SHOP_ID
-    }
-    
-    try:
-        res = requests.post(url, json=payload, timeout=20).json()
-        
-        if res.get("error"):
-            logger.error(f"Falha ao gerar Token na Shopee: {res.get('message')}")
-            return None
-            
-        _CACHE_ACCESS_TOKEN = res.get("access_token")
-        novo_refresh = res.get("refresh_token")
-        
-        # O Access Token dura 4 horas. Vamos forçar a renovação a cada 3 horas por segurança.
-        _CACHE_EXPIRATION = time.time() + 10800 
-        
-        # Salva o novo refresh_token no .env para o sistema nunca mais quebrar!
-        set_key(str(ENV_FILE), "SHOPEE_REFRESH_TOKEN", novo_refresh)
-        os.environ["SHOPEE_REFRESH_TOKEN"] = novo_refresh
-        
-        logger.success("🔑 Conexão validada! Access Token gerado com sucesso.")
-        return _CACHE_ACCESS_TOKEN
-    except Exception as e:
-        logger.error(f"Erro ao comunicar com a API de Autenticação: {e}")
-        return None
+
+    with _TOKEN_THREAD_LOCK:
+        # Outra thread pode ter renovado enquanto esperávamos o lock
+        if _CACHE_ACCESS_TOKEN and time.time() < _CACHE_EXPIRATION:
+            return _CACHE_ACCESS_TOKEN
+
+        with _trava_renovacao_entre_processos():
+            # Outro PROCESSO pode ter renovado: relê o .env para pegar o
+            # refresh_token mais novo antes de gastar o nosso (uso único!).
+            load_dotenv(ENV_FILE, override=True)
+            refresh_token = os.getenv("SHOPEE_REFRESH_TOKEN", "")
+
+            if not refresh_token:
+                logger.error("Refresh Token não encontrado no CHAVES_DADOS.env")
+                return None
+
+            path = "/api/v2/auth/access_token/get"
+            timestamp = int(time.time())
+            base_string = f"{PARTNER_ID}{path}{timestamp}".encode('utf-8')
+            sign = hmac.new(PARTNER_KEY, base_string, hashlib.sha256).hexdigest()
+
+            url = f"{BASE_URL}{path}?partner_id={PARTNER_ID}&timestamp={timestamp}&sign={sign}"
+            payload = {
+                "refresh_token": refresh_token,
+                "partner_id": PARTNER_ID,
+                "shop_id": SHOP_ID
+            }
+
+            try:
+                res = requests.post(url, json=payload, timeout=20).json()
+
+                if res.get("error"):
+                    logger.error(f"Falha ao gerar Token na Shopee: {res.get('message')}")
+                    return None
+
+                _CACHE_ACCESS_TOKEN = res.get("access_token")
+                novo_refresh = res.get("refresh_token")
+
+                # O Access Token dura 4 horas. Vamos forçar a renovação a cada 3 horas por segurança.
+                _CACHE_EXPIRATION = time.time() + 10800
+
+                # Salva o novo refresh_token no .env para o sistema nunca mais quebrar!
+                set_key(str(ENV_FILE), "SHOPEE_REFRESH_TOKEN", novo_refresh)
+                os.environ["SHOPEE_REFRESH_TOKEN"] = novo_refresh
+
+                logger.success("🔑 Conexão validada! Access Token gerado com sucesso.")
+                return _CACHE_ACCESS_TOKEN
+            except Exception as e:
+                logger.error(f"Erro ao comunicar com a API de Autenticação: {e}")
+                return None
 
 def gerar_assinatura(path, access_token):
     """Gera a assinatura criptografada obrigatória da Shopee v2."""
@@ -300,6 +358,9 @@ def criar_combo_shopee(item_id, percentual_desconto=10, limite_compras=100):
     """
     Cria um 'Bundle Deal' (Leve 2, Pague menos) para diluir frete e aumentar conversão.
     (Integração bônus para habilitar o comando 'CRIAR_COMBO' da IA).
+
+    Retorna (True, bundle_deal_id) — o ID numérico, e não uma mensagem, para o
+    chamador poder registrar/verificar o combo depois — ou (False, motivo).
     """
     path_add_bundle = "/api/v2/bundle_deal/add_bundle_deal"
     path_add_item = "/api/v2/bundle_deal/add_bundle_deal_item"
@@ -336,10 +397,17 @@ def criar_combo_shopee(item_id, percentual_desconto=10, limite_compras=100):
     
     resp_item = chamar_shopee_api(path_add_item, method="POST", payload=payload_item)
 
-    if resp_item is not None and not resp_item.get("error"):
-        return True, "Combo 'Leve 2' configurado com sucesso. Ativo em ~30 min."
+    if resp_item is None:
+        return False, "Falha ao atrelar item ao Combo."
 
-    return False, "Falha ao atrelar item ao Combo."
+    # A Shopee devolve rejeições item-a-item aninhadas (não no 'error' de topo);
+    # o nome do campo varia por versão/região — mesmo tratamento da promoção.
+    falhas = resp_item.get("failed_list") or resp_item.get("failure_list") or []
+    if falhas:
+        logger.error(f"Shopee rejeitou o item no combo: {falhas}")
+        return False, f"Item rejeitado no combo: {falhas}"
+
+    return True, bundle_id
 
 
 # ==============================================================================
@@ -415,14 +483,13 @@ def impulsionar_itens(item_ids):
 # ==============================================================================
 
 def _gerar_codigo_voucher() -> str:
-    """Código único de 5 chars (limite da Shopee BR): 'IA' + timestamp base36."""
+    """Código de 5 chars (limite da Shopee BR): 'IA' + 3 chars ALEATÓRIOS.
+
+    O sufixo era derivado do timestamp com ciclo de ~13h — dois vouchers no
+    mesmo segundo (ou 13h depois) colidiam e a Shopee rejeitava o segundo.
+    """
     alfabeto = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    n = int(time.time()) % (36 ** 3)
-    sufixo = ""
-    for _ in range(3):
-        n, resto = divmod(n, 36)
-        sufixo = alfabeto[resto] + sufixo
-    return f"IA{sufixo}"
+    return "IA" + "".join(secrets.choice(alfabeto) for _ in range(3))
 
 
 def criar_voucher_loja(nome, desconto_reais, min_gasto, usos, dias_duracao=7, codigo=None):

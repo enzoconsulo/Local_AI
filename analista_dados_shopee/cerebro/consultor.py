@@ -101,8 +101,12 @@ def validar_sql_somente_leitura(query: str) -> str:
         raise ValueError("O chat aceita somente uma instrução SQL por vez.")
     if not re.match(r"^(SELECT|WITH|EXPLAIN)\b", sem_comentarios, flags=re.IGNORECASE):
         raise ValueError("Por segurança, apenas consultas de leitura são permitidas.")
-    proibidos = r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|COPY|CALL|DO|VACUUM)\b"
+    proibidos = r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|COPY|CALL|VACUUM)\b"
     if re.search(proibidos, sem_comentarios, flags=re.IGNORECASE):
+        raise ValueError("A consulta contém um comando de escrita ou administração proibido.")
+    # Bloco anônimo PL/pgSQL: só "DO $" é perigoso — a palavra "do" solta é
+    # português legítimo em aliases ("AS "vendas do mês""), que o prompt pede.
+    if re.search(r"\bDO\s*\$", sem_comentarios, flags=re.IGNORECASE):
         raise ValueError("A consulta contém um comando de escrita ou administração proibido.")
     return sem_comentarios
 

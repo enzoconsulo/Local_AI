@@ -1,7 +1,8 @@
 *.env
 *.yaml
-estudio_shopee\fotos_prontas\*
-estudio_shopee\peças_brutas\*
+# gitignore usa "/" como separador — os padrões antigos com "\" nunca casavam
+estudio_shopee/fotos_prontas/*
+estudio_shopee/peças_brutas/*
 *.log
 *.txt
 !requirements.txt
@@ -12,3 +13,5 @@ estudio_shopee\peças_brutas\*
 *.venv
 **/__pycache__/
 ultima_auditoria*.json
+# Lock de renovação do token Shopee (runtime)
+.shopee_token.lock

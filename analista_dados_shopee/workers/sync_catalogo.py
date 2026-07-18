@@ -1,6 +1,6 @@
 import sys
 import time
-from datetime import date
+from datetime import date, datetime
 from psycopg2.extras import execute_values
 from loguru import logger
 from pathlib import Path
@@ -211,5 +211,14 @@ def sincronizar_catalogo():
             desativados = marcar_produtos_fora_do_ar(lista_ids)
             if desativados:
                 logger.info(f"{desativados} produto(s) saíram da listagem NORMAL e foram marcados como NAO_LISTADO.")
+        if sucesso:
+            # Registra no controle de sync: o painel de frescor da Visão
+            # Central passa a enxergar a idade do catálogo como das demais fontes.
+            try:
+                from workers.importar_planilhas import registrar_sincronizacao
+                agora = datetime.now()
+                registrar_sincronizacao('CATALOGO', agora, agora, 'SUCESSO', len(produtos_extraidos))
+            except Exception as exc:
+                logger.warning(f"Não foi possível registrar o sync de catálogo: {exc}")
         return {"status": "sucesso" if sucesso else "erro", "produtos": len(produtos_extraidos)}
     return {"status": "erro", "produtos": 0}

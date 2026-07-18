@@ -206,6 +206,12 @@ def _fmt_moeda(v):
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def _fmt_moeda_md(v):
+    # Em markdown, dois "$" na mesma string disparam o modo LaTeX do Streamlit
+    # (o trecho entre eles vira fórmula). Escapar o $ mantém o texto literal.
+    return _fmt_moeda(v).replace("$", "\\$")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. FRESCOR DOS DADOS + INSTRUÇÕES DE IMPORTAÇÃO
 # ══════════════════════════════════════════════════════════════════════════════
@@ -214,6 +220,7 @@ secao(1, "Saúde dos dados", "O que alimenta as análises — mantenha os semáf
 
 ROTULOS_MODULOS = {
     "PEDIDOS": ("🛒 Pedidos + Lucro (API)", "Automático na página 2 — botão 'Iniciar Sincronização'"),
+    "CATALOGO": ("📚 Catálogo & preços (API)", "Automático junto com a sincronização da página 2"),
     "VISAO_GERAL": ("🏪 Visão Geral da Loja (planilha)", "Exportar a cada 7 dias"),
     "TRAFEGO_ORG": ("🌱 Tráfego Orgânico por produto (planilha)", "Exportar a cada 7 dias"),
     "ADS_AVANCADO": ("📢 Shopee Ads (planilha)", "Exportar a cada 7 dias, se investir em Ads"),
@@ -344,7 +351,7 @@ for aba, dias in ((aba7, 7), (aba30, 30)):
             a3.metric("📈 ROAS", f"{roas:.2f}×", "≥ 3× é saudável" , delta_color="off")
             a4.metric("🖱️ CTR dos anúncios", f"{ctr_ads:.2f}%")
             if roas < 1:
-                st.error("🔴 ROAS abaixo de 1×: cada R$ 1 investido volta menos de R$ 1. Veja o plano de ação (seção 7).")
+                st.error("🔴 ROAS abaixo de 1×: cada R\\$ 1 investido volta menos de R\\$ 1. Veja o plano de ação (seção 7).")
 
 st.divider()
 
@@ -655,15 +662,15 @@ if ganho_por_recuperado <= 0:
 else:
     st.info(
         f"📐 **A conta, em LUCRO LÍQUIDO (não em vendas brutas):** cada pedido recuperado deixa "
-        f"~**{_fmt_moeda(ganho_por_recuperado)}** líquidos ({_fmt_moeda(ganho_liquido_pedido)} de ganho − "
-        f"{_fmt_moeda(v_desconto)} do cupom, que sai do seu repasse). Cada cliente que usaria o cupom "
-        f"mas compraria mesmo sem ele ('carona') custa {_fmt_moeda(v_desconto)} — ou seja, "
+        f"~**{_fmt_moeda_md(ganho_por_recuperado)}** líquidos ({_fmt_moeda_md(ganho_liquido_pedido)} de ganho − "
+        f"{_fmt_moeda_md(v_desconto)} do cupom, que sai do seu repasse). Cada cliente que usaria o cupom "
+        f"mas compraria mesmo sem ele ('carona') custa {_fmt_moeda_md(v_desconto)} — ou seja, "
         f"**1 pedido recuperado paga até {caronas_pagaveis} carona(s)**. "
         f"**Previsão conservadora** (5–15% dos {abandonos_7d} abandonos/semana recuperados): "
         f"**{recuperacao_min}–{recuperacao_max} pedidos extras/semana ≈ "
-        f"{_fmt_moeda(lucro_extra_min)}–{_fmt_moeda(lucro_extra_max)} de lucro líquido adicional**. "
-        f"Teto de exposição: {_fmt_moeda(custo_maximo)} ({v_usos} usos × {_fmt_moeda(v_desconto)}), "
-        f"e cupom não usado não custa nada. Como o gasto mínimo ({_fmt_moeda(v_min)}) fica acima da "
+        f"{_fmt_moeda_md(lucro_extra_min)}–{_fmt_moeda_md(lucro_extra_max)} de lucro líquido adicional**. "
+        f"Teto de exposição: {_fmt_moeda_md(custo_maximo)} ({v_usos} usos × {_fmt_moeda_md(v_desconto)}), "
+        f"e cupom não usado não custa nada. Como o gasto mínimo ({_fmt_moeda_md(v_min)}) fica acima da "
         f"cesta média, pedidos com cupom tendem a ser maiores — a previsão acima NÃO conta esse ganho."
     )
 
