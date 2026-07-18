@@ -50,27 +50,28 @@ cabecalho(
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=120, show_spinner=False)
-def carregar_kpis_macro():
+def carregar_kpis_macro(dias: int = 7):
+    """KPIs macro da janela de `dias`, comparados com a janela anterior de mesmo tamanho."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT
-                    SUM(metric_value) FILTER (WHERE metric_name = 'vendas_brl' AND data_registro >= CURRENT_DATE - 7)  AS receita_7d,
-                    SUM(metric_value) FILTER (WHERE metric_name = 'vendas_brl' AND data_registro >= CURRENT_DATE - 14 AND data_registro < CURRENT_DATE - 7) AS receita_7d_ant,
-                    SUM(metric_value) FILTER (WHERE metric_name = 'pedidos' AND data_registro >= CURRENT_DATE - 7)     AS pedidos_7d,
-                    SUM(metric_value) FILTER (WHERE metric_name = 'pedidos' AND data_registro >= CURRENT_DATE - 14 AND data_registro < CURRENT_DATE - 7) AS pedidos_7d_ant,
-                    SUM(metric_value) FILTER (WHERE metric_name = 'visitantes' AND data_registro >= CURRENT_DATE - 7)  AS visitantes_7d,
-                    SUM(metric_value) FILTER (WHERE metric_name = 'visitantes' AND data_registro >= CURRENT_DATE - 14 AND data_registro < CURRENT_DATE - 7) AS visitantes_7d_ant,
-                    AVG(metric_value) FILTER (WHERE metric_name LIKE 'taxa_de_convers%%' AND data_registro >= CURRENT_DATE - 7) AS conversao_7d,
-                    AVG(metric_value) FILTER (WHERE metric_name LIKE 'taxa_de_convers%%' AND data_registro >= CURRENT_DATE - 14 AND data_registro < CURRENT_DATE - 7) AS conversao_7d_ant,
-                    SUM(metric_value) FILTER (WHERE metric_name = 'vendas_canceladas' AND data_registro >= CURRENT_DATE - 7) AS canceladas_7d,
+                    SUM(metric_value) FILTER (WHERE metric_name = 'vendas_brl' AND data_registro >= CURRENT_DATE - %(d)s)  AS receita,
+                    SUM(metric_value) FILTER (WHERE metric_name = 'vendas_brl' AND data_registro >= CURRENT_DATE - %(d2)s AND data_registro < CURRENT_DATE - %(d)s) AS receita_ant,
+                    SUM(metric_value) FILTER (WHERE metric_name = 'pedidos' AND data_registro >= CURRENT_DATE - %(d)s)     AS pedidos,
+                    SUM(metric_value) FILTER (WHERE metric_name = 'pedidos' AND data_registro >= CURRENT_DATE - %(d2)s AND data_registro < CURRENT_DATE - %(d)s) AS pedidos_ant,
+                    SUM(metric_value) FILTER (WHERE metric_name = 'visitantes' AND data_registro >= CURRENT_DATE - %(d)s)  AS visitantes,
+                    SUM(metric_value) FILTER (WHERE metric_name = 'visitantes' AND data_registro >= CURRENT_DATE - %(d2)s AND data_registro < CURRENT_DATE - %(d)s) AS visitantes_ant,
+                    AVG(metric_value) FILTER (WHERE metric_name LIKE 'taxa_de_convers%%' AND data_registro >= CURRENT_DATE - %(d)s) AS conversao,
+                    AVG(metric_value) FILTER (WHERE metric_name LIKE 'taxa_de_convers%%' AND data_registro >= CURRENT_DATE - %(d2)s AND data_registro < CURRENT_DATE - %(d)s) AS conversao_ant,
+                    SUM(metric_value) FILTER (WHERE metric_name = 'vendas_canceladas' AND data_registro >= CURRENT_DATE - %(d)s) AS canceladas,
                     MAX(data_registro) FILTER (WHERE metric_name = 'vendas_brl') AS ultimo_dia
                 FROM fato_visao_geral_loja
                 WHERE fonte NOT LIKE 'API_%%';
-            """)
+            """, {"d": dias, "d2": dias * 2})
             r = cur.fetchone()
-    campos = ["receita_7d", "receita_7d_ant", "pedidos_7d", "pedidos_7d_ant", "visitantes_7d",
-              "visitantes_7d_ant", "conversao_7d", "conversao_7d_ant", "canceladas_7d", "ultimo_dia"]
+    campos = ["receita", "receita_ant", "pedidos", "pedidos_ant", "visitantes",
+              "visitantes_ant", "conversao", "conversao_ant", "canceladas", "ultimo_dia"]
     return {c: (float(v) if v is not None and c != "ultimo_dia" else v) for c, v in zip(campos, r)}
 
 
@@ -271,35 +272,41 @@ st.divider()
 # 2. KPIs MACRO
 # ══════════════════════════════════════════════════════════════════════════════
 
-secao(2, "Termômetro da loja", "Últimos 7 dias comparados com os 7 anteriores.")
+secao(2, "Termômetro da loja", "Cada janela comparada com o período anterior de mesmo tamanho.")
 
-kpi = carregar_kpis_macro()
-if kpi["receita_7d"] is None and kpi["pedidos_7d"] is None:
-    st.warning("Sem dados da planilha de Visão Geral ainda. Exporte-a (instruções acima) e suba na página 2.")
-else:
-    def _delta(atual, anterior):
-        if not anterior:
-            return None
-        return f"{((atual or 0) - anterior) / anterior * 100:+.1f}%"
 
-    economia = carregar_economia_real()
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("🛍️ Vendas BRUTAS", _fmt_moeda(kpi["receita_7d"] or 0), _delta(kpi["receita_7d"], kpi["receita_7d_ant"]))
-    c1.caption("o que o CLIENTE pagou — não é o que você recebe")
-    if economia["repasse_medio_pedido"] is not None:
-        c2.metric("💵 Ganho líquido/pedido", _fmt_moeda(economia["repasse_medio_pedido"]))
-        c2.caption(f"média REAL dos {economia['pedidos_liquidados']} pedidos já liquidados no escrow (30d)")
-    else:
-        c2.metric("💵 Ganho líquido/pedido", "—")
-        c2.caption("nenhum escrow liquidado ainda — sincronize pedidos na página 2")
-    c3.metric("📦 Pedidos", int(kpi["pedidos_7d"] or 0), _delta(kpi["pedidos_7d"], kpi["pedidos_7d_ant"]))
-    c4.metric("👀 Visitantes", int(kpi["visitantes_7d"] or 0), _delta(kpi["visitantes_7d"], kpi["visitantes_7d_ant"]))
-    c5.metric("🎯 Conversão média", f"{kpi['conversao_7d'] or 0:.2f}%", _delta(kpi["conversao_7d"], kpi["conversao_7d_ant"]))
-    c6.metric("↩️ Vendas canceladas", _fmt_moeda(kpi["canceladas_7d"] or 0))
-    if kpi["ultimo_dia"]:
-        idade = (pd.Timestamp.now().date() - kpi["ultimo_dia"]).days
-        if idade > 2:
-            st.caption(f"⚠️ A planilha de Visão Geral cobre até **{kpi['ultimo_dia']:%d/%m}** ({idade} dias atrás) — os KPIs acima estão defasados; exporte uma nova.")
+def _delta(atual, anterior):
+    if not anterior:
+        return None
+    return f"{((atual or 0) - anterior) / anterior * 100:+.1f}%"
+
+
+economia = carregar_economia_real()
+termo7, termo30 = st.tabs(["Últimos 7 dias", "Últimos 30 dias"])
+for aba_termo, dias_termo in ((termo7, 7), (termo30, 30)):
+    with aba_termo:
+        kpi = carregar_kpis_macro(dias_termo)
+        if kpi["receita"] is None and kpi["pedidos"] is None:
+            st.warning("Sem dados da planilha de Visão Geral nesta janela. Exporte-a (instruções acima) e suba na página 2.")
+            continue
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("🛍️ Vendas BRUTAS", _fmt_moeda(kpi["receita"] or 0), _delta(kpi["receita"], kpi["receita_ant"]))
+        c1.caption("o que o CLIENTE pagou — não é o que você recebe")
+        if economia["repasse_medio_pedido"] is not None:
+            c2.metric("💵 Ganho líquido/pedido", _fmt_moeda(economia["repasse_medio_pedido"]))
+            c2.caption(f"média REAL dos {economia['pedidos_liquidados']} pedidos já liquidados no escrow (30d)")
+        else:
+            c2.metric("💵 Ganho líquido/pedido", "—")
+            c2.caption("nenhum escrow liquidado ainda — sincronize pedidos na página 2")
+        c3.metric("📦 Pedidos", int(kpi["pedidos"] or 0), _delta(kpi["pedidos"], kpi["pedidos_ant"]))
+        c4.metric("👀 Visitantes", int(kpi["visitantes"] or 0), _delta(kpi["visitantes"], kpi["visitantes_ant"]))
+        c5.metric("🎯 Conversão média", f"{kpi['conversao'] or 0:.2f}%", _delta(kpi["conversao"], kpi["conversao_ant"]))
+        c6.metric("↩️ Vendas canceladas", _fmt_moeda(kpi["canceladas"] or 0))
+        st.caption(f"Setas comparam os últimos {dias_termo} dias com os {dias_termo} anteriores.")
+        if kpi["ultimo_dia"]:
+            idade = (pd.Timestamp.now().date() - kpi["ultimo_dia"]).days
+            if idade > 2:
+                st.caption(f"⚠️ A planilha de Visão Geral cobre até **{kpi['ultimo_dia']:%d/%m}** ({idade} dias atrás) — os KPIs acima estão defasados; exporte uma nova.")
 
 st.divider()
 
@@ -486,10 +493,11 @@ if dossie:
     por_item = {}
     for d in dossie:
         item = por_item.setdefault(d["item_id"], {
-            "nome": d["nome_produto"], "conv": 0.0, "vendas": 0, "estoque": 0, "lucro": 0.0,
+            "nome": d["nome_produto"], "conv": 0.0, "vendas": 0, "vendas_30d": 0, "estoque": 0, "lucro": 0.0,
         })
         item["conv"] = max(item["conv"], d.get("TRAFEGO_taxa_conversao_perc") or 0)
         item["vendas"] += d.get("vendas_7d_reais") or 0
+        item["vendas_30d"] += d.get("vendas_30d_reais") or d.get("vendas_30d_macro") or 0
         item["estoque"] += d.get("estoque_shopee_hoje") or 0
         item["lucro"] += d.get("lucro_liquido_real_7d") or 0
 
@@ -513,6 +521,7 @@ if dossie:
                 "Produto": m["nome"][:60],
                 "Conversão 7d": f"{m['conv']:.1f}%",
                 "Vendas 7d": m["vendas"],
+                "Vendas 30d": m["vendas_30d"],
                 "Estoque": m["estoque"],
                 "Lucro 7d": _fmt_moeda(m["lucro"]),
             }
@@ -785,27 +794,36 @@ if dossie:
 
     ranking = sorted(dossie, key=lambda d: heuristicas.calcular_score_urgencia(d), reverse=True)
     fotos_plano = carregar_fotos()
-    linhas_plano = []
-    for d in ranking[:10]:
-        score = heuristicas.calcular_score_urgencia(d)
-        conf, detalhe_conf, _ = heuristicas.classificar_confianca_evidencia(d)
-        faixa = heuristicas.intervalo_demanda_exploratorio(d, d.get("previsao_vendas_7d", 0))
-        lucro_previsto = _fmt_moeda(d.get("previsao_lucro_7d", 0))
-        if not d.get("custo_fab_real"):
-            lucro_previsto += " ⚠️ sem custo fab."
-        linhas_plano.append({
-            "Foto": fotos_plano.get(d["item_id"]),
-            "Urgência": score,
-            "Produto": f"{d['nome_produto'][:40]} ({d['nome_variacao'][:20]})",
-            "Cluster": d.get("cluster_mercado", "—"),
-            "Ação recomendada": d.get("recomendacao_executiva", "—"),
-            "Consequência (agir vs não agir)": _consequencia(d),
-            "Previsão 7d (un.)": f"{d.get('previsao_vendas_7d', 0)} (faixa {faixa[0]}–{faixa[1]})",
-            "Lucro previsto 7d": lucro_previsto,
-            "Evidência": f"{conf} — {detalhe_conf}",
-        })
-    st.dataframe(pd.DataFrame(linhas_plano), hide_index=True, use_container_width=True, height=420,
-                 column_config={"Foto": st.column_config.ImageColumn("Foto", width="small")})
+
+    plano7, plano30 = st.tabs(["Foco em 7 dias", "Foco em 30 dias"])
+    for aba_plano, janela_plano in ((plano7, "7d"), (plano30, "30d")):
+        with aba_plano:
+            linhas_plano = []
+            for d in ranking[:10]:
+                score = heuristicas.calcular_score_urgencia(d)
+                conf, detalhe_conf, _ = heuristicas.classificar_confianca_evidencia(d)
+                if janela_plano == "7d":
+                    faixa = heuristicas.intervalo_demanda_exploratorio(d, d.get("previsao_vendas_7d", 0))
+                    previsao_txt = f"{d.get('previsao_vendas_7d', 0)} (faixa {faixa[0]}–{faixa[1]})"
+                    lucro_previsto = _fmt_moeda(d.get("previsao_lucro_7d", 0))
+                else:
+                    previsao_txt = f"{d.get('previsao_vendas_30d', 0)} un."
+                    lucro_previsto = _fmt_moeda(d.get("previsao_lucro_30d", 0))
+                if not d.get("custo_fab_real"):
+                    lucro_previsto += " ⚠️ sem custo fab."
+                linhas_plano.append({
+                    "Foto": fotos_plano.get(d["item_id"]),
+                    "Urgência": score,
+                    "Produto": f"{d['nome_produto'][:40]} ({d['nome_variacao'][:20]})",
+                    "Cluster": d.get("cluster_mercado", "—"),
+                    "Ação recomendada": d.get("recomendacao_executiva", "—"),
+                    "Consequência (agir vs não agir)": _consequencia(d),
+                    f"Previsão {janela_plano} (un.)": previsao_txt,
+                    f"Lucro previsto {janela_plano}": lucro_previsto,
+                    "Evidência": f"{conf} — {detalhe_conf}",
+                })
+            st.dataframe(pd.DataFrame(linhas_plano), hide_index=True, use_container_width=True, height=420,
+                         column_config={"Foto": st.column_config.ImageColumn("Foto", width="small")})
     st.caption(
         "🧮 Tudo acima foi calculado pelas heurísticas locais do pacote `cerebro/` — nenhuma chamada de IA. "
         "As previsões usam elasticidade, tendência semanal e capacidade de material; a coluna Evidência "

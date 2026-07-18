@@ -288,32 +288,32 @@ with aba_lucro:
             "(peso × preço do kg + embalagem) − gasto de ads rateado por produto."
         )
 
-        df_lucro = pd.DataFrame([
-            {
-                "Foto": fotos.get(iid),
-                "Produto": m["nome"][:60],
-                "Vendas 7d": m["vendas_7d"],
-                "Vendas 30d": m["vendas_30d"],
-                "Lucro 7d": round(m["lucro_7d"], 2),
-                "Lucro 30d": round(m["lucro_30d"], 2),
-                "Custo/peça": (
-                    _fmt_moeda(min(m["custos"])) if m["custos"] and min(m["custos"]) == max(m["custos"])
-                    else f"{_fmt_moeda(min(m['custos']))}–{_fmt_moeda(max(m['custos']))}" if m["custos"] else "⚠️ não mapeado"
-                ),
-                "Margem 30d": (
-                    f"{m['lucro_30d'] / m['vendas_30d']:.2f}/un." if m["vendas_30d"] else "—"
-                ),
-            }
-            for iid, m in sorted(por_item.items(), key=lambda x: x[1]["lucro_30d"], reverse=True)
-        ])
-        st.dataframe(
-            df_lucro, hide_index=True, use_container_width=True, height=600,
-            column_config={
-                "Foto": st.column_config.ImageColumn("Foto", width="small"),
-                "Lucro 7d": st.column_config.NumberColumn("Lucro 7d", format="R$ %.2f"),
-                "Lucro 30d": st.column_config.NumberColumn("Lucro 30d", format="R$ %.2f"),
-            },
-        )
+        lucro7, lucro30 = st.tabs(["Últimos 7 dias", "Últimos 30 dias"])
+        for aba_janela, sufixo, rotulo_janela in ((lucro7, "7d", "7 dias"), (lucro30, "30d", "30 dias")):
+            with aba_janela:
+                df_lucro = pd.DataFrame([
+                    {
+                        "Foto": fotos.get(iid),
+                        "Produto": m["nome"][:60],
+                        f"Vendas {rotulo_janela}": m[f"vendas_{sufixo}"],
+                        f"Lucro {rotulo_janela}": round(m[f"lucro_{sufixo}"], 2),
+                        "Custo/peça": (
+                            _fmt_moeda(min(m["custos"])) if m["custos"] and min(m["custos"]) == max(m["custos"])
+                            else f"{_fmt_moeda(min(m['custos']))}–{_fmt_moeda(max(m['custos']))}" if m["custos"] else "⚠️ não mapeado"
+                        ),
+                        "Margem por unidade": (
+                            f"{m[f'lucro_{sufixo}'] / m[f'vendas_{sufixo}']:.2f}/un." if m[f"vendas_{sufixo}"] else "—"
+                        ),
+                    }
+                    for iid, m in sorted(por_item.items(), key=lambda x: x[1][f"lucro_{sufixo}"], reverse=True)
+                ])
+                st.dataframe(
+                    df_lucro, hide_index=True, use_container_width=True, height=600,
+                    column_config={
+                        "Foto": st.column_config.ImageColumn("Foto", width="small"),
+                        f"Lucro {rotulo_janela}": st.column_config.NumberColumn(f"Lucro {rotulo_janela}", format="R$ %.2f"),
+                    },
+                )
         st.caption(
             "📌 Produto com vendas e lucro NEGATIVO = cada venda piora o resultado (taxa + material acima do "
             "preço). Os mesmos números alimentam o plano de ação da 📊 Visão Central e o 🧠 Cérebro."
