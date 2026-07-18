@@ -387,6 +387,14 @@ def chamar_cerebro_openai_preditivo(
                 fallback_sem_reasoning = True
                 continue
             if response.status_code in {401, 403}:
+                # A OpenAI devolve 401 "insufficient permissions" transitório e
+                # esporádico em modelos recém-lançados mesmo com credencial
+                # válida (observado na família gpt-5.6 em 18/07/2026). Uma
+                # repetição curta resolve; se persistir, é credencial real.
+                if tentativa < max_tentativas:
+                    logger.warning("🟠 [OPENAI] 401/403 possivelmente transitório; repetindo uma única vez em 3s.")
+                    time.sleep(3)
+                    continue
                 logger.error("🔴 [OPENAI] Credencial inválida ou sem permissão para o modelo configurado.")
                 break
             if response.status_code == 429:
