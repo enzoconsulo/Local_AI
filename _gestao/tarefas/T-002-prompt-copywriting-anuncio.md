@@ -2,7 +2,7 @@
 id: T-002
 titulo: Prompt de copywriting e schema do anúncio Shopee
 projeto: ia-hibrida-limpa
-status: em-teste
+status: concluida
 prioridade: alta
 dependencias: [T-001]
 areas: [Local_AI/estudio_shopee/gerador_anuncio.py]
@@ -196,5 +196,56 @@ disponível) → `em-teste`.
 
 ## Verificação
 
+### Ciclo 1 (2026-07-28)
+
+Verificação avulsa pedida pelo usuário via painel (fora do disparo normal do
+`/trabalhar`, que tinha parado exatamente aqui por estouro de limite de sessão).
+Testador rodou os 6 critérios de aceite de verdade, via script de verificação
+temporário (rede mockada em `HTTP_SESSION.post`, sem `OPENAI_API_KEY` no ambiente —
+mesma condição do executor no Ciclo 1), apagado ao final.
+
+Critérios — todos **PASSARAM**:
+- [x] `gerar_anuncio_shopee(...)` existe e usa `chamar_openai_visao` internamente.
+- [x] Retorno é dict com exatamente `titulo` (str), `descricao` (str), `palavras_chave` (list).
+- [x] Prompt de sistema instrui explicitamente basear-se no visualmente observável +
+      contexto textual, sem inventar specs não visíveis/informadas (lido no código).
+- [x] Schema malformado (campo faltando, tipo errado, `palavras_chave` não-lista, lista
+      vazia, string só com espaços) sempre levanta `ErroGeracaoAnuncio` — nunca retorna
+      dict incompleto silenciosamente.
+- [x] `construir_data_uri` não está duplicada: única definição em `gerador_anuncio.py`,
+      importada em `app.py` (confirmado via grep, uso presente).
+- [x] `python -m py_compile` de `gerador_anuncio.py` e `app.py` sem erro.
+
+15 cenários no total exercitados (inclui casos de borda: `content=None`, JSON inválido,
+JSON válido não-objeto, `imagem_bytes=b""`, payload multimodal com `image_url`), 0
+falhas. Árvore confirmada limpa após a verificação (`git status --short` em `Local_AI/`
+e na raiz do projeto). Detalhe do submódulo: `Local_AI` é git submodule — commit `9d0d08c`
+já estava lá desde o Ciclo 1 do executor; nada novo foi commitado por esta verificação.
+
+Veredito: aprovada → `em-revisao`.
 
 ## Revisão
+
+### Ciclo 1 (2026-07-28)
+
+Revisão avulsa pedida pelo usuário via painel (fora do disparo normal do `/trabalhar`).
+Revisor cobriu o range de commits do submódulo `Local_AI` que implementa T-001+T-002
+(`ac883d7~1..9d0d08c`, foco em `9d0d08c` que ainda não tinha sido revisado), lendo
+`gerador_anuncio.py` e `app.py` linha a linha: `gerar_anuncio_shopee`,
+`_validar_resposta_anuncio`, `_montar_texto_contexto_produto`, movimentação de
+`construir_data_uri`. `python -m py_compile` de ambos os arquivos sem erro.
+
+Nenhum achado `critica` ou `importante`. Duas observações `menores`, não bloqueantes,
+registradas para quem pegar T-003 (integração da UI):
+1. `contexto_produto`/`historico_estilo` em `gerar_anuncio_shopee` não são validados em
+   runtime — só type hints. Se T-003 passar `contexto_produto` que não seja dict, ou
+   `historico_estilo` não-string, os `.get()`/`.strip()` internos levantam `AttributeError`
+   cru (quebra a promessa do módulo de nunca deixar exceção crua subir). Hoje não é
+   acionável: `gerar_anuncio_shopee` ainda não é chamada de lugar nenhum.
+2. `construir_data_uri` usa `mime_type="image/jpeg"` fixo, independente do formato real
+   dos bytes (comportamento pré-existente, só movido de `app.py` — não é regressão desta
+   tarefa). Se a imagem final alguma vez for PNG (ex.: canal alfa do `rembg`), a data URI
+   fica com mime type incorreto. T-003 deve confirmar o formato real da imagem antes de
+   integrar.
+
+Veredito: **aprovada sem ressalvas bloqueantes** → `concluida`.
