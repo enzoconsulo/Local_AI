@@ -122,13 +122,35 @@ def chamar_openai_visao(mensagens: list[dict], timeout: int = 60) -> dict:
 
     try:
         corpo_resposta = response.json()
-        conteudo = corpo_resposta["choices"][0]["message"]["content"]
+        mensagem = corpo_resposta["choices"][0]["message"]
+        conteudo = mensagem["content"]
     except (ValueError, KeyError, IndexError, TypeError) as e:
         raise ErroGeracaoAnuncio(
             f"Resposta da API OpenAI em formato inesperado: {e}"
         ) from e
 
+    if conteudo is None:
+        # A API OpenAI retorna `message.content = null` quando o modelo
+        # recusa a resposta por política de moderação/segurança — nesse
+        # caso o motivo costuma vir em `message.refusal`. Plausível aqui
+        # porque este módulo lida com imagens de produto (visão).
+        recusa = mensagem.get("refusal") if isinstance(mensagem, dict) else None
+        if recusa:
+            raise ErroGeracaoAnuncio(f"A IA recusou gerar o anúncio: {recusa}")
+        raise ErroGeracaoAnuncio(
+            "A IA não devolveu conteúdo (content nulo), possivelmente por "
+            "recusa de moderação/segurança sem motivo detalhado."
+        )
+
     try:
-        return json.loads(conteudo)
-    except json.JSONDecodeError as e:
+        resultado = json.loads(conteudo)
+    except (json.JSONDecodeError, TypeError) as e:
         raise ErroGeracaoAnuncio(f"A IA não devolveu um JSON válido: {e}") from e
+
+    if not isinstance(resultado, dict):
+        raise ErroGeracaoAnuncio(
+            "A IA devolveu um JSON válido, mas não é um objeto "
+            f"(tipo recebido: {type(resultado).__name__})."
+        )
+
+    return resultado
