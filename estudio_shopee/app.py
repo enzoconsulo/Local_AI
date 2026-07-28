@@ -66,6 +66,10 @@ except ImportError:
     )
     st.stop()
 
+# construir_data_uri mora em gerador_anuncio.py (T-001/T-002, mesma pasta) —
+# reaproveitada aqui em vez de duplicada.
+from gerador_anuncio import construir_data_uri
+
 # ================= 1. TRATAMENTO DE AMBIENTE =================
 CURRENT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = CURRENT_DIR.parent # Aponta para a pasta raiz (IA_Hibrida)
@@ -257,10 +261,9 @@ def montar_instrucao_estilo(estilo, cenario_custom):
                              f"background must NOT be used")
 
 # ================= 4. INTEGRAÇÃO NATIVA FAL.AI =================
-
-def construir_data_uri(imagem_bytes, mime_type="image/jpeg"):
-    img_b64 = base64.b64encode(imagem_bytes).decode('utf-8')
-    return f"data:{mime_type};base64,{img_b64}"
+# construir_data_uri mora em gerador_anuncio.py (T-002) — reaproveitada aqui
+# em vez de duplicada; é a mesma função usada para montar a mensagem
+# multimodal do anúncio.
 
 DIRETRIZES_SISTEMA = """You are an elite E-commerce Art Director writing EDIT INSTRUCTIONS for image-editing AI models. These models receive the actual product photo as a reference image and rewrite it according to your instructions, preserving the subject's identity unless told otherwise.
 MISSION: Translate the user's messy Portuguese request into a precise English editing instruction.
