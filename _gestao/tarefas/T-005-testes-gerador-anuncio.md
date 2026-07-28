@@ -2,14 +2,14 @@
 id: T-005
 titulo: Testes automatizados do motor de geração de anúncio
 projeto: ia-hibrida-limpa
-status: backlog
+status: pronta
 prioridade: media
 dependencias: [T-002]
 areas: [Local_AI/estudio_shopee/tests/]
 tentativas: 0
 agente: ia-integracao
 criada: 2026-07-27
-atualizada: 2026-07-27
+atualizada: 2026-07-28
 ---
 
 ## Objetivo

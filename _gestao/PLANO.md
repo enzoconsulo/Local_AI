@@ -9,7 +9,9 @@ automatizados e documentação.
 Meta: o motor de geração de anúncio (`gerador_anuncio.py`) funciona ponta a ponta — recebe
 imagem + contexto do produto e devolve `{titulo, descricao, palavras_chave}` em JSON
 validado, com erro claro em qualquer falha (chave ausente, rede, schema).
-Marco: pendente
+Marco: aprovado 2026-07-28 (testador em modo marco: 10 cenários ponta a ponta, 10/10, com
+rede mockada e sem gastar API real — inclui os quatro caminhos de erro exigidos pela meta:
+credencial ausente, falha de rede, schema malformado e conteúdo nulo por recusa)
 Tarefas: T-001, T-002
 
 ## Fase 2 — Núcleo

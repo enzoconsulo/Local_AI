@@ -2,7 +2,7 @@
 id: T-003
 titulo: UI — seção "Anúncio Shopee" na aba de criar imagens
 projeto: ia-hibrida-limpa
-status: backlog
+status: pronta
 prioridade: alta
 dependencias: [T-002]
 areas: [Local_AI/estudio_shopee/app.py]
