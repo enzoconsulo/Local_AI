@@ -2,7 +2,7 @@
 id: T-001
 titulo: Cliente OpenAI REST multimodal (plumbing) para o Estúdio
 projeto: ia-hibrida-limpa
-status: em-teste
+status: concluida
 prioridade: alta
 dependencias: []
 areas: [Local_AI/estudio_shopee/gerador_anuncio.py, Local_AI/CHAVES.env.example]
@@ -264,6 +264,86 @@ apagado após a validação — não sobrou na árvore de trabalho.
 
 **Resultado: 8/8 critérios PASSARAM.**
 
+### Ciclo 2 (2026-07-28) — testador
+
+Foco: confirmar a correção do achado "importante" do revisor (Ciclo 1) — `content=None`
+não deve mais deixar `TypeError` cru subir — e reconfirmar os 8 critérios de aceite do
+frontmatter + as duas notas menores endereçadas. Ambiente: Python 3.12.5, `requests`
+2.34.2, `python-dotenv` instalado. Executado a partir de `Local_AI/`, HTTP mockado via
+monkeypatch de `HTTP_SESSION.post` (nenhuma chamada de rede real); nenhum `CHAVES.env`
+real criado.
+
+Script de verificação temporário (`Local_AI/estudio_shopee/_teste_temp_t001_testador_ciclo2.py`,
+rodado com `python -m estudio_shopee._teste_temp_t001_testador_ciclo2`) cobrindo 9
+cenários — todos PASSARAM:
+
+1. `content=None` sem `refusal` (chave presente, valor `None`) → `ErroGeracaoAnuncio`
+   com mensagem genérica de conteúdo nulo. Nenhum `TypeError` subiu.
+2. `content=None` e a mensagem nem tem a chave `"refusal"` (caso mais hostil que o do
+   executor, que usava `refusal=None`) → `ErroGeracaoAnuncio` idem (`mensagem.get("refusal")`
+   trata ausência de chave e valor `None` da mesma forma). Nenhum `TypeError`.
+3. `content=None` **com** `refusal="imagem viola política de conteúdo sexual"` →
+   `ErroGeracaoAnuncio` com a string do motivo presente na mensagem (`"A IA recusou gerar
+   o anúncio: imagem viola política de conteúdo sexual"`) — confirma que o motivo da
+   recusa é exposto, como pedido no foco deste ciclo.
+4. `content` = `"[1, 2, 3]"` (JSON válido, mas lista) → `ErroGeracaoAnuncio` (nota menor 1
+   do revisor, `isinstance(resultado, dict)`).
+5. `content` = `"42"` (JSON válido, número) → `ErroGeracaoAnuncio` idem (caso adicional
+   além do testado pelo executor).
+6. Regressão — `content` = `"isto nao eh json { solto"` → `ErroGeracaoAnuncio` a partir
+   de `JSONDecodeError`, como antes.
+7. Regressão — caminho feliz (`content` = JSON de objeto) → `dict` decodificado
+   corretamente (`resultado["titulo"] == "Produto X"`).
+8. Regressão — `OPENAI_API_KEY` vazia → `ErroGeracaoAnuncio` sem tocar `HTTP_SESSION.post`
+   (flag de chamada de rede permaneceu `False`).
+9. Regressão — resposta HTTP 401 → `ErroGeracaoAnuncio` com `e.__cause__` sendo a
+   instância de `requests.exceptions.HTTPError` original.
+
+Verificação adicional isolada (fora do script, comando único) capturando os argumentos
+reais do `.post`: `url == "https://api.openai.com/v1/chat/completions"`,
+`json["response_format"] == {"type": "json_object"}`, `timeout == 42` (passado
+explicitamente), header `Authorization: Bearer chave-fake-teste` — confirma que o
+critério 3 (URL, JSON mode, timeout, retorno decodificado) continua íntegro após a
+alteração do Ciclo 2.
+
+Recontagem dos 8 critérios do frontmatter, todos PASSOU:
+- [x] `gerador_anuncio.py` existe e não importa `streamlit` — confirmado bloqueando
+  `streamlit` via `sys.meta_path` antes do import e checando `"streamlit" not in
+  sys.modules` depois (`import ok, streamlit em sys.modules: False`).
+- [x] Expõe `ErroGeracaoAnuncio(Exception)` — usada diretamente nos 9 cenários acima.
+- [x] Expõe `chamar_openai_visao(mensagens, timeout=60) -> dict` fazendo POST em JSON
+  mode e devolvendo `choices[0].message.content` decodificado — cenário 7 e verificação
+  de argumentos do POST acima.
+- [x] `OPENAI_API_KEY` ausente/vazia levanta `ErroGeracaoAnuncio` antes de qualquer
+  chamada de rede — cenário 8.
+- [x] HTTP >=400 levanta `ErroGeracaoAnuncio` com causa original anexada — cenário 9.
+- [x] `content` que não é JSON válido levanta `ErroGeracaoAnuncio` — cenário 6.
+- [x] `Local_AI/CHAVES.env.example` existe e documenta as 7 variáveis pedidas — lido o
+  arquivo (25 linhas): `FAL_KEY`, `GROQ`, `RUNPOD_KEY`, `ENDPOINT_ID_RUNPOD_vLLM`,
+  `ENDPOINT_ID_RUNPOD_DADOS`, `OPENAI_API_KEY`, `OPENAI_MODEL_ANUNCIO=gpt-5.6-luna`
+  (default presente) e `OPENAI_API_BASE_URL` (comentário "Opcional") — todas presentes,
+  inalterado desde o Ciclo 1.
+- [x] `python -m py_compile Local_AI/estudio_shopee/gerador_anuncio.py` (a partir da raiz
+  do submódulo) → saída limpa, exit code 0.
+
+Notas adicionais (não geram reprovação):
+- Suíte automatizada formal: continua não existindo para `estudio_shopee/` (T-005, ainda
+  não executada, é quem vai criá-la) — nada a rodar aqui além da validação manual do
+  plumbing, coerente com o que o Ciclo 1 já registrou. `analista_dados_shopee/tests/` é
+  módulo independente fora do `areas` desta tarefa, não tocado pelo diff do Ciclo 2 — não
+  rodado, sem impacto na reprovação.
+- Higiene da árvore: `Local_AI/CHAVES.env` real confirmado inexistente
+  (`ls: cannot access ... No such file or directory`); `git status --short` em ambos os
+  níveis (projeto e submódulo `Local_AI`) confirmado limpo ao final, incluindo remoção do
+  `__pycache__/*.pyc` gerado pelo próprio script de verificação temporário deste ciclo
+  (`Local_AI/estudio_shopee/_teste_temp_t001_testador_ciclo2.py` e seu `.pyc`, ambos
+  apagados após a validação). Ponteiro do submódulo no repositório externo
+  (`160000 75515c0a...`) confirmado igual ao `HEAD` do submódulo — nenhuma pendência de
+  commit deixada por este ciclo de teste.
+
+**Resultado: achado do revisor (Ciclo 1) corrigido e confirmado; 8/8 critérios do
+frontmatter PASSARAM; ambas as notas menores endereçadas e verificadas.**
+
 ## Revisão
 
 ### Ciclo 1 (2026-07-28) — revisor
@@ -321,3 +401,41 @@ grafia) com o que `llm.py` (`GROQ`, `RUNPOD_KEY`, `ENDPOINT_ID_RUNPOD_vLLM`,
 `streamlit`.
 
 **Resultado: 1 achado importante → devolvida para execução.**
+
+### Ciclo 2 (2026-07-28) — revisor
+
+Diff revisado: `git -C Local_AI diff ac883d7 75515c0` (equivalente a `git -C Local_AI show
+75515c0`) — único arquivo tocado neste ciclo: `estudio_shopee/gerador_anuncio.py` (25
+inserções, 3 remoções, todas dentro do bloco final de `chamar_openai_visao`; nenhum outro
+arquivo mudou, incluindo `CHAVES.env.example`, já revisado e aprovado no Ciclo 1). Foco
+exclusivo no que mudou, conforme o despacho.
+
+Tracei manualmente todos os caminhos de exceção do novo trecho (linhas 123-156):
+- `mensagem = corpo_resposta["choices"][0]["message"]` / `conteudo = mensagem["content"]`
+  — qualquer `KeyError`/`IndexError`/`TypeError` aqui continua caindo no mesmo `except`
+  pré-existente (linha 127), comportamento idêntico ao Ciclo 1, só decompôs a extração em
+  duas linhas para reaproveitar `mensagem` depois.
+- `if conteudo is None:` (linha 132) — fecha exatamente o achado do Ciclo 1
+  (`json.loads(None)` levantando `TypeError` cru). Confirmado com `python -m py_compile` e
+  leitura linha a linha: se `mensagem.get("refusal")` truthy, `ErroGeracaoAnuncio` expõe o
+  motivo da recusa; senão, mensagem genérica. `isinstance(mensagem, dict)` antes do `.get`
+  é defesa redundante (na prática `mensagem` só chega até aqui se já suportou
+  `mensagem["content"]` sem lançar, ou seja, é dict), mas não introduz bug — só uma guarda
+  a mais.
+- `except (json.JSONDecodeError, TypeError) as e` (linha 147) — cobre qualquer valor
+  não-string residual que escape da checagem `is None` acima (ex.: a API devolver
+  `content` como número/bool/lista em vez de string), sem deixar `TypeError` cru subir.
+  Testei a hipótese de `conteudo` vir como lista (ex.: bloco de conteúdo multimodal em vez
+  de string) — `json.loads(lista)` levanta `TypeError`, capturado por este `except`,
+  vira `ErroGeracaoAnuncio` normalmente.
+- `if not isinstance(resultado, dict): raise ErroGeracaoAnuncio(...)` (linha 150) — fecha a
+  nota menor 1 do Ciclo 1; reforça em runtime a assinatura `-> dict`.
+
+Não encontrei bug novo introduzido pela correção, nem regressão nos cenários já cobertos
+no Ciclo 1 (validação de credencial antes da rede, `raise ... from e` preservando causa,
+HTTP >= 400, `content` string não-JSON). `python -m py_compile Local_AI/estudio_shopee/gerador_anuncio.py`
+confirmado sem erro nesta revisão. Nenhum arquivo de teste temporário (`_teste_temp_*`)
+ficou na árvore de trabalho.
+
+**Resultado: aprovado sem ressalvas — achado importante do Ciclo 1 corrigido, sem bugs
+remanescentes no diff do Ciclo 2 → `concluida`.**
