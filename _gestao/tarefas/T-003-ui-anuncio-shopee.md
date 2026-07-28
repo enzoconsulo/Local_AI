@@ -9,7 +9,7 @@ areas: [Local_AI/estudio_shopee/app.py]
 tentativas: 0
 agente: streamlit-ui
 criada: 2026-07-27
-atualizada: 2026-07-27
+atualizada: 2026-07-28
 ---
 
 ## Objetivo
@@ -41,6 +41,24 @@ o resultado antes de usar.
   já usado nos outros botões de IA do arquivo (ex. "🚀 Gerar..." e "🛠️ Recalcular Ajuste").
 - Em caso de `ErroGeracaoAnuncio`, mostre `st.error(...)` com a mensagem, sem deixar a
   exceção subir e derrubar a página — o resto da aba deve continuar funcionando.
+- Reforço vindo da revisão de T-002 (Ciclo 1), avaliado na revisão avulsa de 2026-07-28
+  (ver `DECISOES.md`):
+  1. `contexto_produto`/`historico_estilo` NÃO são validados em runtime dentro de
+     `gerar_anuncio_shopee` (só type hints) — monte `contexto` sempre como um `dict`
+     simples com valores `str` (nunca `None`; use `.get(chave, "")` ou `str(...)` ao ler
+     de `st.session_state.dados_atual`) para não arriscar `AttributeError` cru escapando
+     da função. Além disso, capture no handler do botão primeiro `ErroGeracaoAnuncio`
+     (mensagem específica da IA) e, como rede de segurança, também `Exception` genérica
+     (`st.error(f"Erro inesperado ao gerar anúncio: {e}")`) — garante que RF-07 (falha
+     não derruba a aba) vale mesmo diante de um erro imprevisto, não só do erro esperado.
+  2. `construir_data_uri` usa `mime_type="image/jpeg"` fixo — CONFIRMADO nesta revisão que
+     NÃO é um problema para esta tarefa: `imagem_gerada_b64`/`bytes_imagem` vem sempre de
+     `chamar_motor_imagem` (fal.ai), chamado com `payload["output_format"] = "jpeg"`
+     (linha ~331 de `app.py`) — a imagem final é sempre JPEG de fato nesta pipeline, então
+     o mime type fixo está correto para o caso de uso do anúncio. Nenhum ajuste extra
+     necessário por causa disso; a ressalva do revisor era genérica (relevante para
+     `img_recortada_bytes`/canal alfa do `rembg`, usado no fluxo de EDIÇÃO de imagem, fora
+     do escopo desta tarefa).
 - Campos editáveis: `st.text_input` para o título (com contador de caracteres visível, ex.
   `st.caption(f"{len(titulo)} caracteres")`) e `st.text_area` para a descrição, ambos
   pré-preenchidos com `st.session_state.anuncio_atual` e escrevendo de volta nele a cada
@@ -58,12 +76,21 @@ o resultado antes de usar.
 - [ ] Simular uma falha (ex.: rodar sem `OPENAI_API_KEY` configurada) resulta em
       `st.error(...)` visível, e as demais seções da página continuam funcionando
       normalmente (upload, geração de imagem, aprovação do catálogo).
+- [ ] Simular uma exceção INESPERADA (não `ErroGeracaoAnuncio`) no fluxo de geração do
+      anúncio (ex.: monkeypatch temporário de `gerar_anuncio_shopee` para levantar
+      `RuntimeError`) também resulta em `st.error(...)` visível, sem derrubar a página —
+      confirma a rede de segurança pedida no Contexto.
 - [ ] `st.session_state.anuncio_atual` volta a `None` ao trocar de arquivo de upload ou ao
       gerar uma nova imagem (botão "🚀 Gerar...").
 - [ ] `python -m py_compile Local_AI/estudio_shopee/app.py` executa sem erro.
 
 ## Notas de execução
 
+(2026-07-28 — planejador, revisão avulsa pedida via painel, sem gatilho de bloqueio/
+esgotamento: tarefa ainda em `backlog`/0 tentativas, editada diretamente — ver
+`DECISOES.md`. Contexto e critérios de aceite reforçados com as 2 notas da Revisão de
+T-002 Ciclo 1; nenhuma mudança de abordagem, só texto adicional para o executor não
+perder os avisos.)
 
 ## Verificação
 
