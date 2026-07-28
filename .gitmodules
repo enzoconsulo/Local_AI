@@ -1,0 +1,4 @@
+[submodule "Local_AI"]
+	path = Local_AI
+	url = git@github.com:enzoconsulo/Local_AI.git
+	branch = main
