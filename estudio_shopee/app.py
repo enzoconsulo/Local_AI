@@ -246,6 +246,24 @@ def resetar_memoria(tipo):
     if os.path.exists(ARQUIVOS_MEMORIA[tipo]):
         os.remove(ARQUIVOS_MEMORIA[tipo])
 
+def salvar_anuncio_txt(caminho_txt, anuncio):
+    """Salva o anúncio Shopee atual (T-004) em texto simples, mesmo espírito
+    de `memoria_*.txt`. `anuncio` é o dict de `st.session_state.anuncio_atual`
+    ({"titulo": str, "descricao": str, "palavras_chave": list[str]}), já com
+    eventuais edições manuais do usuário nos campos da Etapa 4."""
+    titulo = anuncio.get("titulo", "")
+    descricao = anuncio.get("descricao", "")
+    palavras_chave = anuncio.get("palavras_chave") or []
+    conteudo = (
+        f"Título: {titulo}\n"
+        f"\n"
+        f"Descrição:\n{descricao}\n"
+        f"\n"
+        f"Palavras-chave: {', '.join(palavras_chave)}\n"
+    )
+    with open(caminho_txt, "w", encoding="utf-8") as f:
+        f.write(conteudo)
+
 def resetar_anuncio():
     """Reseta o anúncio Shopee (T-003) — chamado sempre que a imagem final
     atual deixa de ser válida (troca de upload ou nova geração do zero via
@@ -749,11 +767,20 @@ if st.session_state.motor_ia_pronto:
 
                 with col_btn2:
                     if st.button("✅ Aprovar Catálogo", type="primary", use_container_width=True):
-                        nome_arq = str(CURRENT_DIR / "fotos_prontas" / f"render_{int(time.time())}_v{st.session_state.versao}.png")
+                        nome_base = f"render_{int(time.time())}_v{st.session_state.versao}"
+                        nome_arq = str(CURRENT_DIR / "fotos_prontas" / f"{nome_base}.png")
                         with open(nome_arq, "wb") as f:
                             f.write(bytes_imagem)
 
                         salvar_memoria(st.session_state.tipo_memoria_atual, st.session_state.prompt_atual)
+
+                        if st.session_state.anuncio_atual:
+                            try:
+                                nome_arq_anuncio = str(CURRENT_DIR / "fotos_prontas" / f"{nome_base}.txt")
+                                salvar_anuncio_txt(nome_arq_anuncio, st.session_state.anuncio_atual)
+                            except Exception as e:
+                                st.warning(f"⚠️ Imagem salva, mas não foi possível salvar o anúncio junto: {e}")
+
                         st.success("Arte final otimizada salva com sucesso para a empresa!")
 
                 st.divider()
