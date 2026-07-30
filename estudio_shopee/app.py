@@ -681,6 +681,7 @@ if st.session_state.motor_ia_pronto:
                         if st.button(f"✅ Usar v{i+1}", key=f"usar_var_{i}", use_container_width=True):
                             st.session_state.imagem_gerada_b64 = cand_b64
                             st.session_state.imagem_referencia_atual = base64.b64decode(cand_b64)
+                            resetar_anuncio()
                             st.rerun()
 
             elif st.session_state.imagem_gerada_b64:
@@ -690,6 +691,7 @@ if st.session_state.motor_ia_pronto:
                 if len(st.session_state.candidatos_atual) > 1:
                     if st.button("↩️ Ver outras variações desta rodada"):
                         st.session_state.imagem_gerada_b64 = None
+                        resetar_anuncio()
                         st.rerun()
 
                 with st.expander("Ver Roteiro Operacional da IA (Prompt + Descrição)"):
