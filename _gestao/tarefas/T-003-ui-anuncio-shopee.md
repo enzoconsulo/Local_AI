@@ -2,14 +2,14 @@
 id: T-003
 titulo: UI — seção "Anúncio Shopee" na aba de criar imagens
 projeto: ia-hibrida-limpa
-status: pronta
+status: em-teste
 prioridade: alta
 dependencias: [T-002]
 areas: [Local_AI/estudio_shopee/app.py]
-tentativas: 0
+tentativas: 1
 agente: streamlit-ui
 criada: 2026-07-27
-atualizada: 2026-07-28
+atualizada: 2026-07-29
 ---
 
 ## Objetivo
@@ -91,6 +91,112 @@ esgotamento: tarefa ainda em `backlog`/0 tentativas, editada diretamente — ver
 `DECISOES.md`. Contexto e critérios de aceite reforçados com as 2 notas da Revisão de
 T-002 Ciclo 1; nenhuma mudança de abordagem, só texto adicional para o executor não
 perder os avisos.)
+
+### Ciclo 1 (executor genérico, seguindo as orientações do especialista `streamlit-ui`
+indisponível nesta sessão)
+
+**O que foi feito** — em `Local_AI/estudio_shopee/app.py`:
+- Import: `from gerador_anuncio import construir_data_uri, gerar_anuncio_shopee,
+  ErroGeracaoAnuncio` (antes só importava `construir_data_uri`).
+- Novo estado `st.session_state.anuncio_atual` inicializado como `None` no bloco de
+  inicialização único do topo (junto aos demais `if 'x' not in st.session_state`).
+- Nova função `resetar_anuncio()` (perto de `resetar_memoria`): zera
+  `anuncio_atual` e remove as chaves dos widgets `anuncio_titulo_input`/
+  `anuncio_descricao_input` de `st.session_state` (ver "Decisão de arquitetura" abaixo).
+  Chamada em 2 pontos, exatamente os do Contexto da tarefa: (1) no bloco que já reseta
+  `img_recortada_bytes`/`imagem_gerada_b64`/`candidatos_atual`/
+  `imagem_referencia_atual`/`prompt_manual` ao trocar de arquivo de upload; (2) logo após
+  `st.session_state.versao = 1`, dentro do `try` de sucesso do botão "🚀 Gerar...".
+- Nova seção "4. Anúncio Shopee" em `col2` ("Mesa de Refinamento"), dentro do
+  `elif st.session_state.imagem_gerada_b64:` (só aparece com imagem final selecionada) —
+  inserida depois do botão "✅ Aprovar Catálogo", mesmo `elif`:
+  - Botão "📝 Gerar Anúncio Completo" (`st.spinner` em português) monta `contexto_anuncio`
+    como `dict` simples de `str` (nunca `None`, via `str(dados_produto.get(...) or "")`)
+    a partir de `st.session_state.dados_atual`, e chama `gerar_anuncio_shopee(bytes_imagem,
+    contexto_anuncio)` — `bytes_imagem` é a mesma variável já usada para exibir/aprovar o
+    catálogo (linha ~687).
+  - Handler com dois `except`: `ErroGeracaoAnuncio` (mensagem específica da IA) e
+    `Exception` genérica como rede de segurança (RF-07 / reforço da revisão de T-002
+    citado no Contexto) — ambos usam `st.error(...)`, nunca deixam a exceção subir.
+  - Campos editáveis: `st.text_input` (título, com `st.caption` de contador de
+    caracteres) e `st.text_area` (descrição, altura 220), ambos com `key=` fixo
+    (`anuncio_titulo_input`/`anuncio_descricao_input`) e `value=` pré-preenchido de
+    `st.session_state.anuncio_atual`; cada edição escreve de volta em
+    `st.session_state.anuncio_atual[...]` no mesmo rerun (T-004 vai ler sempre o valor
+    mais atual). Palavras-chave exibidas como texto simples via `st.caption`
+    (`", ".join(...)`), conforme sugerido no Contexto como opção mais simples.
+
+**Decisão de arquitetura (registrada aqui, não em DECISOES.md por ser detalhe de
+implementação local, sem impacto em outras tarefas):** como os campos de edição usam
+`key=` (necessário para T-004 conseguir ler `st.session_state.anuncio_atual` sempre
+atualizado a cada edição), o Streamlit ignora o parâmetro `value=` em reruns seguintes
+enquanto a chave já existir em `session_state` — comportamento padrão de widgets com
+`key`. Sem tratar isso, gerar um anúncio NOVO (segunda chamada do botão, ou depois de
+`resetar_anuncio()`) deixaria o texto ANTIGO colado nos campos. Solução: toda vez que
+`anuncio_atual` é substituído por um valor novo (dentro do handler do botão, antes de
+gravar o resultado) ou zerado (`resetar_anuncio()`), as duas chaves de widget
+(`anuncio_titulo_input`/`anuncio_descricao_input`) são removidas de `session_state` via
+`.pop(..., None)` — forçando os widgets a reinicializar com o `value=` novo no próximo
+render, sem perder a capacidade de edição ao vivo entre reruns.
+
+**Como testar/rodar:**
+- Estático: `python -m py_compile Local_AI/estudio_shopee/app.py` — sem erro.
+- Manual real: `cd Local_AI/estudio_shopee && streamlit run app.py` (precisa de
+  `FAL_KEY` em `Local_AI/CHAVES.env`; sem `OPENAI_API_KEY` configurada, o botão "Gerar
+  Anúncio Completo" deve mostrar exatamente o `st.error` de credencial ausente).
+- Automatizado ad hoc (não commitado — `estudio_shopee` não tem suíte de UI ainda, e
+  não é isso que esta tarefa pede): rodei um script à parte com
+  `streamlit.testing.v1.AppTest` (`pip install streamlit` nesta sessão, já era
+  dependência do projeto, só não estava no Python global usado pelo agente — nada novo
+  registrado em DECISOES.md por não ser dependência nova do projeto) que sobe
+  `app.py` de verdade com `rembg`/`fal_client` stubados (não usados pelo fluxo do
+  anúncio) e `gerar_anuncio_shopee` monkeypatchado por cenário, exercitando os 6
+  primeiros critérios de aceite:
+  1. Sem `imagem_gerada_b64`, a seção "4. Anúncio Shopee" NÃO aparece; com
+     `imagem_gerada_b64` setado, aparece — PASSOU.
+  2. Clique em "📝 Gerar Anúncio Completo" sem `OPENAI_API_KEY` (ambiente limpo, sem
+     `CHAVES.env`) → `st.error` com a mensagem de credencial ausente, sem exceção
+     subindo, `anuncio_atual` permanece `None`, botão "✅ Aprovar Catálogo" segue
+     presente na página — PASSOU.
+  3. `gerar_anuncio_shopee` monkeypatchado para levantar `RuntimeError` (exceção
+     INESPERADA) → `st.error("Erro inesperado ao gerar anúncio: ...")`, sem exceção
+     subindo — PASSOU.
+  4. Caminho feliz: `gerar_anuncio_shopee` monkeypatchado retornando dict fixo, chamado
+     de fato com `bytes_imagem` (verificado não-vazio) + `contexto_anuncio["produto"]`
+     igual ao `st.session_state.dados_atual` de teste → `anuncio_atual` preenchido,
+     `st.text_input`/`st.text_area` renderizados com os valores da IA, contador de
+     caracteres e palavras-chave exibidos — PASSOU.
+  5. Editar o `text_input` do título (`.set_value(...)`) e rodar de novo →
+     `st.session_state.anuncio_atual["titulo"]` reflete o texto editado — PASSOU.
+  6. Simular novo upload (`file_uploader[0].upload(...)`) com `anuncio_atual` e as
+     chaves de widget já preenchidas de uma rodada anterior → após o rerun,
+     `arquivo_atual` atualiza, `anuncio_atual` volta a `None` e as duas chaves de
+     widget somem de `session_state` — PASSOU.
+  O reset do botão "🚀 Gerar..." (2º ponto de chamada de `resetar_anuncio()`, mesmo
+  critério de aceite do reset acima) NÃO foi exercitado ponta a ponta pelo mesmo script
+  — chegar até esse botão exigiria simular também a "✂️ Isolar Produtos" (rembg),
+  "🧪 Teste" (autofill) e a geração via LLM local (`gerar_prompt_em_ingles`, porta 8000)
+  + `fal_client.subscribe`, fora de proporção para esta tarefa; a chamada
+  `resetar_anuncio()` nesse ponto é a MESMA função já comprovada correta no cenário 6
+  (mesma implementação, só outro call site) — confirmado por leitura direta do diff.
+  Script de teste era arquivo temporário fora do repositório do projeto
+  (`%TEMP%\validar_t003.py`), apagado ao final — nada ficou fora da árvore do projeto.
+
+**Arquivos alterados:** `Local_AI/estudio_shopee/app.py` (único arquivo tocado; nenhum
+outro fora do escopo de `areas` da tarefa).
+
+**Commit:** submódulo `Local_AI` (branch `main`) — `aecc808`. Repositório externo
+(`ia-hibrida-limpa`, branch `master`) — ponteiro do submódulo + este arquivo de tarefa,
+em commit separado logo em seguida.
+
+**Pendência/sugestão para o orquestrador:** o botão "🛠️ Recalcular Ajuste" (ajuste
+rápido sobre a MESMA imagem) também produz uma imagem nova em
+`st.session_state.imagem_gerada_b64` mas não está entre os 2 pontos de reset pedidos no
+Contexto/Critérios de aceite desta tarefa — depois de um ajuste, um anúncio gerado antes
+do ajuste ficaria "colado" a uma imagem ligeiramente diferente (mesmo produto, luz/cena
+ajustada). Não mexi nisso por estar fora do escopo explícito da tarefa (nem Contexto nem
+Critérios de aceite mencionam esse botão); registrando aqui para o orquestrador avaliar
+se vale uma tarefa nova.
 
 ## Verificação
 
