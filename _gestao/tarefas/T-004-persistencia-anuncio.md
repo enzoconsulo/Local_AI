@@ -2,11 +2,11 @@
 id: T-004
 titulo: Salvar o anúncio junto do render aprovado
 projeto: ia-hibrida-limpa
-status: em-execucao
+status: em-teste
 prioridade: media
 dependencias: [T-003]
 areas: [Local_AI/estudio_shopee/app.py]
-tentativas: 1
+tentativas: 2
 agente: streamlit-ui
 criada: 2026-07-27
 atualizada: 2026-07-30
@@ -76,6 +76,73 @@ imagem em `fotos_prontas/`.
     estrutura de abas, nenhum novo `st.session_state` e nenhuma chave de widget foi tocada.
 - Commit no submódulo `Local_AI` (branch `main`): `0963d60` — "T-004: salvar o anúncio junto
   do render aprovado".
+
+### Ciclo 2
+
+Retrabalho a partir do achado `importante` do revisor (Ciclo 1): o handler do botão
+"✅ Aprovar Catálogo" (`app.py:769-784` no diff revisado) roda ANTES, na ordem do script,
+do bloco que sincroniza `st.session_state.anuncio_atual["titulo"/"descricao"]` a partir dos
+widgets de edição (`app.py:818-833`). Se o clique em "Aprovar Catálogo" chega ao backend no
+MESMO rerun de uma edição feita sem pausa (sem Tab/Enter antes), esse bloco de widgets ainda
+não rodou nesta rodada e `anuncio_atual` está com o valor ANTERIOR à edição.
+
+**Confirmação da causa raiz (antes de corrigir):** reproduzi o cenário exato com
+`streamlit.testing.v1.AppTest` num script isolado (`_repro_t004_ciclo2.py`, descartável,
+removido ao final) que replica a MESMA ordem relativa de blocos de `app.py` (handler do
+botão primeiro, bloco de widgets depois) e a MESMA função `salvar_anuncio_txt` (copiada
+verbatim). Sequência de interação: `at.text_input(key="anuncio_titulo_input").input(...)`
+seguido de `at.button[0].click()` e só então UM `.run()` — isso é o equivalente exato, via
+AppTest, de "editar sem pausa e clicar direto no botão" (as duas mudanças de widget chegam
+juntas no mesmo rerun). Com o código do Ciclo 1, o `.txt` gravado continha o título ANTIGO
+("Titulo original"), não o editado — bug confirmado mecanicamente, não só por leitura.
+
+**Correção aplicada** em `Local_AI/estudio_shopee/app.py` (handler "✅ Aprovar Catálogo",
+dentro do `if st.session_state.anuncio_atual:`): em vez de passar
+`st.session_state.anuncio_atual` direto para `salvar_anuncio_txt`, agora é montado um dict
+cópia (`anuncio_para_salvar = dict(st.session_state.anuncio_atual)`) com `"titulo"` e
+`"descricao"` sobrescritos por `st.session_state.get("anuncio_titulo_input", ...)` /
+`st.session_state.get("anuncio_descricao_input", ...)` — as chaves dos PRÓPRIOS widgets, que
+o Streamlit já sincroniza a partir do estado do frontend antes do script começar a rodar
+(independente de em que ponto do script a linha `st.text_input(key=...)` é executada).
+Fallback para o valor de `anuncio_atual` só como rede de segurança, caso as chaves de widget
+ainda não existam (não deveria acontecer na prática — o dict só fica truthy depois que
+`st.text_input(key="anuncio_titulo_input", ...)` já rodou pelo menos uma vez, na mesma leva
+em que `anuncio_atual` foi setado por `gerar_anuncio_shopee`). `"palavras_chave"` não é
+editável por nenhum widget, então segue vindo direto de `anuncio_atual` sem risco de
+desatualização.
+
+**Validação da correção** com o MESMO harness de AppTest, agora com o código NOVO copiado
+verbatim de `app.py:777-803`:
+- Cenário exato do achado (editar sem pausa + clicar na mesma leva, um único `.run()`
+  combinando as duas mudanças de widget): `.txt` agora grava o valor EDITADO
+  ("Titulo EDITADO sem pausa"), não mais o antigo — achado do revisor confirmado corrigido.
+- Fluxo comum (editar com pausa — `Tab`/`Enter` antes de clicar, ou seja, `.run()`
+  intermediário entre a edição e o clique): continua salvando o valor editado corretamente
+  (sem regressão) — testado editando título E descrição em reruns separados antes do clique.
+- Palavras-chave (não editáveis) seguem preservadas no `.txt` em ambos os fluxos.
+- Critério 1 (mesmo nome-base entre `.png` e `.txt`): confirmado — ambos derivam do mesmo
+  `nome_base` calculado uma única vez no handler.
+- Critério 3 (`anuncio_atual is None`): confirmado — PNG salvo normalmente, nenhum `.txt`
+  criado.
+- Todos os testes escritos em `_test_repro_t004_ciclo2.py` (descartável) reportaram PASSOU;
+  comando: `PYTHONIOENCODING=utf-8 python _test_repro_t004_ciclo2.py` — saída:
+  "RESULTADO: TODAS as checagens PASSARAM." Ambos os scripts (`_repro_t004_ciclo2.py` e
+  `_test_repro_t004_ciclo2.py`) foram removidos após o uso (mesmo padrão do Ciclo 1) — não
+  fazem parte do app final; escreveram só em diretório temporário (`tempfile.TemporaryDirectory`),
+  nunca em `fotos_prontas/`/`memoria_*.txt` reais, para não sujar dados do app de verdade.
+- `python -m py_compile Local_AI/estudio_shopee/app.py`: sem erro (critério 4 reconfirmado).
+- Suíte de regressão `tests/test_gerador_anuncio.py`: 5/5 PASSARAM (módulo não tocado).
+- Lido o arquivo `app.py` completo novamente após a edição: estrutura das duas abas
+  (`aba_auto`/`aba_manual`) intacta, indentação do bloco alterado consistente com o restante
+  do handler `col_btn2`, nenhuma outra chave de widget ou `session_state` nova introduzida.
+- Não foi feito um clique manual real em navegador (sem `FAL_KEY` configurado nesta sessão —
+  `Local_AI/CHAVES.env` não existe no ambiente atual, só `CHAVES.env.example`); a validação
+  via AppTest com o código verbatim do handler é o que efetivamente exercita a mecânica de
+  sincronização de widgets do Streamlit que causava o bug — é uma validação mais forte que
+  um clique manual isolado para este achado específico (a janela de corrida é sutil e não
+  reprodutível de forma confiável só observando manualmente).
+- Commit no submódulo `Local_AI` (branch `main`): ver hash abaixo, criado logo após estas
+  notas.
 
 ## Verificação
 
