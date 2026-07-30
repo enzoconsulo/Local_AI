@@ -97,7 +97,7 @@ chamada real e paga à API OpenAI — a chamada HTTP é mockada.
   outro agente em paralelo) + `git commit -m "T-005: testes offline de
   gerador_anuncio.py (mock HTTP)"`. Hash: `226a325`.
 - Commit no repo externo `ia-hibrida-limpa` (ponteiro do submódulo + este arquivo de
-  tarefa): hash `<preenchido abaixo pelo commit seguinte>`.
+  tarefa): hash `4c0a6e6`.
 - Status deixado como `em-teste` (não pulei teste: a tarefa toca código executável e o
   critério de aceite pede rodar a suíte explicitamente).
 
