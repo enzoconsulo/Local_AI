@@ -777,7 +777,28 @@ if st.session_state.motor_ia_pronto:
                         if st.session_state.anuncio_atual:
                             try:
                                 nome_arq_anuncio = str(CURRENT_DIR / "fotos_prontas" / f"{nome_base}.txt")
-                                salvar_anuncio_txt(nome_arq_anuncio, st.session_state.anuncio_atual)
+                                # T-004 Ciclo 2: não confiar só em
+                                # anuncio_atual["titulo"/"descricao"] aqui — esse dict só
+                                # é resincronizado pelo bloco de widgets da Etapa 4 (mais
+                                # abaixo neste script), que roda DEPOIS deste handler na
+                                # ordem de execução. Se o clique em "Aprovar Catálogo"
+                                # chegar ao backend no MESMO rerun de uma edição feita sem
+                                # pausa (sem Tab/Enter antes de clicar), o bloco de widgets
+                                # ainda não rodou nesta rodada e anuncio_atual estaria com o
+                                # valor anterior à edição. As chaves dos próprios widgets
+                                # (anuncio_titulo_input/anuncio_descricao_input) já vêm
+                                # sincronizadas pelo Streamlit antes do script rodar,
+                                # então lemos direto delas — com fallback para
+                                # anuncio_atual só como rede de segurança, caso os widgets
+                                # ainda não tenham sido instanciados nunca.
+                                anuncio_para_salvar = dict(st.session_state.anuncio_atual)
+                                anuncio_para_salvar["titulo"] = st.session_state.get(
+                                    "anuncio_titulo_input", anuncio_para_salvar.get("titulo", "")
+                                )
+                                anuncio_para_salvar["descricao"] = st.session_state.get(
+                                    "anuncio_descricao_input", anuncio_para_salvar.get("descricao", "")
+                                )
+                                salvar_anuncio_txt(nome_arq_anuncio, anuncio_para_salvar)
                             except Exception as e:
                                 st.warning(f"⚠️ Imagem salva, mas não foi possível salvar o anúncio junto: {e}")
 
