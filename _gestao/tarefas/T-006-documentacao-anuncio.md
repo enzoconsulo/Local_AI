@@ -150,9 +150,12 @@ para o backlog.
   estudio_shopee/requirements.txt` + `git commit -m "T-006: documentar Anuncio Shopee no
   how_to_use.md e adicionar requirements.txt"`. Hash: `67a4b3a`.
 - Repo externo `ia-hibrida-limpa` (ponteiro do submódulo + `CLAUDE.md` + este arquivo de
-  tarefa): feito logo após estas notas — ver hash abaixo, registrado ao final desta seção
-  antes do commit final. *(hash: ver commit seguinte a estas notas — `git log -1` no repo
-  externo)*
+  tarefa): `git add CLAUDE.md Local_AI _gestao/tarefas/T-006-documentacao-anuncio.md` +
+  `git commit -m "T-006: documentacao do Anuncio Shopee (how_to_use.md + CLAUDE.md do
+  projeto)"`. Hash: `915f835`. (`_gestao/PLANO.md` e
+  `_gestao/tarefas/T-004-persistencia-anuncio.md` apareciam modificados no `git status` da
+  árvore antes desta tarefa começar — não são trabalho meu, deixados de fora do `git add`
+  de propósito.)
 
 **Status deixado como `em-execucao`, propositalmente** (instrução explícita do despacho):
 tarefa majoritariamente de documentação, sem código executável novo — o orquestrador vai
