@@ -2,7 +2,7 @@
 id: T-004
 titulo: Salvar o anúncio junto do render aprovado
 projeto: ia-hibrida-limpa
-status: em-teste
+status: em-revisao
 prioridade: media
 dependencias: [T-003]
 areas: [Local_AI/estudio_shopee/app.py]
@@ -79,5 +79,33 @@ imagem em `fotos_prontas/`.
 
 ## Verificação
 
+### Ciclo 1
+
+**Critério 1: Aprovar o catálogo com um anúncio presente cria um arquivo em `fotos_prontas/` com o mesmo timestamp/versão do PNG**
+- **PASSOU**
+- Teste executado: simulação do handler do botão "Aprovar Catálogo" com `st.session_state.anuncio_atual` preenchido
+- Resultado: arquivo .txt criado com nome-base idêntico ao PNG (ex.: `render_1785418267_v1.txt` e `render_1785418267_v1.png`)
+- Comando: `python test_t004_handler.py` (teste local, removido após verificação)
+
+**Critério 2: O arquivo contém título, descrição e palavras-chave, nos valores atuais dos campos editáveis**
+- **PASSOU**
+- Conteúdo verificado no arquivo .txt: formato legível com "Titulo:", "Descricao:" e "Palavras-chave:" separados por quebras de linha
+- Valores ATUAIS confirmados: arquivo salva os valores tal como estão em `st.session_state.anuncio_atual` (incluindo eventuais edições manuais do usuário)
+- Teste extra confirmou: edições manuais nos campos (após geração da IA) são salvos corretamente (não descartados)
+
+**Critério 3: Aprovar o catálogo SEM anúncio gerado (`anuncio_atual is None`) continua funcionando como antes**
+- **PASSOU**
+- Teste executado: handler com `st.session_state.anuncio_atual = None`
+- Resultado: PNG salvo normalmente, `salvar_memoria` chamada, nenhum arquivo .txt criado
+- Não há regressão no fluxo existente (mesmo comportamento de antes de T-004)
+
+**Critério 4: `python -m py_compile Local_AI/estudio_shopee/app.py` executa sem erro**
+- **PASSOU**
+- Comando executado sem erros de sintaxe Python
+- Saída: limpa, sem avisos ou exceções
+
+**Testes existentes do projeto (regressão)**
+- Suíte `tests/test_gerador_anuncio.py`: 5/5 testes **PASSARAM**
+- Sem regressão no módulo `gerador_anuncio.py` (T-004 não tocou este arquivo)
 
 ## Revisão
