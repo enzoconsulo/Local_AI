@@ -2,11 +2,11 @@
 id: T-004
 titulo: Salvar o anúncio junto do render aprovado
 projeto: ia-hibrida-limpa
-status: pronta
+status: em-teste
 prioridade: media
 dependencias: [T-003]
 areas: [Local_AI/estudio_shopee/app.py]
-tentativas: 0
+tentativas: 1
 agente: streamlit-ui
 criada: 2026-07-27
 atualizada: 2026-07-30
@@ -44,6 +44,38 @@ imagem em `fotos_prontas/`.
 
 ## Notas de execução
 
+### Ciclo 1
+- Adicionada `salvar_anuncio_txt(caminho_txt, anuncio)` em `Local_AI/estudio_shopee/app.py`,
+  logo antes de `resetar_anuncio()` (mesma vizinhança de `salvar_memoria`/`carregar_memoria`,
+  seguindo o padrão de texto plano já usado em `memoria_*.txt`). Formata título, descrição e
+  palavras-chave (join por vírgula) num `.txt` legível.
+- No handler do botão "✅ Aprovar Catálogo": o timestamp/versão que já formava o nome do PNG
+  virou uma variável `nome_base` reaproveitada para o `.txt` — garante mesmo
+  nome-base/timestamp entre os dois arquivos na mesma aprovação, como pedia o critério de
+  aceite. Se `st.session_state.anuncio_atual` for `None`, o bloco `if` inteiro é pulado —
+  nenhuma mudança de comportamento no caminho sem anúncio (mesmo PNG, mesma chamada a
+  `salvar_memoria`, nenhum arquivo `.txt` criado).
+- `salvar_anuncio_txt` grava os valores ATUAIS de `st.session_state.anuncio_atual` (que já
+  reflete edição manual do usuário nos campos `anuncio_titulo_input`/`anuncio_descricao_input`
+  de T-003 — a UI já reescreve `anuncio_atual["titulo"/"descricao"]` a cada rerun a partir do
+  texto editado, então não há necessidade de ler os widgets separadamente aqui).
+- A gravação do `.txt` é envolvida em `try/except Exception` com `st.warning` (rede de
+  segurança para I/O de disco — sem exceção própria esperada aqui, ao contrário dos módulos
+  de IA) — se falhar, a aprovação do PNG (que já rodou antes, em `open(nome_arq, "wb")`) não é
+  desfeita nem escondida do usuário; ele só é avisado que o anúncio não foi salvo junto.
+- Validações executadas:
+  - `python -m py_compile Local_AI/estudio_shopee/app.py` — sem erro.
+  - `streamlit run app.py --server.headless true --server.port 8599` em background — subiu
+    sem erro de import/runtime (HTTP 200 em `http://localhost:8599`, log limpo); processo
+    encerrado logo em seguida (não foi feito clique manual no botão "Aprovar Catálogo" via
+    browser real nesta sessão — sem `FAL_KEY`/imagem gerada de ponta a ponta à mão; a lógica
+    de gravação foi revisada por leitura e é trivial o bastante para não exigir mock de
+    IA para validar isoladamente).
+  - Duas abas (Gerador Automático / Modo Gratuito) intactas: a mudança fica inteiramente
+    dentro do handler do botão "Aprovar Catálogo" da aba Gerador Automático; nenhuma
+    estrutura de abas, nenhum novo `st.session_state` e nenhuma chave de widget foi tocada.
+- Commit no submódulo `Local_AI` (branch `main`): `0963d60` — "T-004: salvar o anúncio junto
+  do render aprovado".
 
 ## Verificação
 
