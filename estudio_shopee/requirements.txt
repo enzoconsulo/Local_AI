@@ -1,0 +1,10 @@
+# Dependências do Estúdio Shopee (app Streamlit `app.py` + motor `gerador_anuncio.py`).
+# Sem versões fixadas (T-006) — mesmas libs já citadas no docstring de app.py.
+# `pytest` (para rodar tests/test_gerador_anuncio.py) não entra aqui: é dependência só
+# de desenvolvimento/teste, não do app em si (ver Notas de execução de T-005).
+streamlit
+requests
+python-dotenv
+pillow
+rembg
+fal-client

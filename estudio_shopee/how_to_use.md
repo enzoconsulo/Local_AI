@@ -284,6 +284,68 @@ O código NÃO preserva o nome original do arquivo enviado.
 
 ---
 
+# Anúncio Shopee (Etapa 4 — feature nova)
+
+> Nota: esta seção documenta uma função adicionada depois da v5.0 descrita no resto deste
+> documento (T-001 a T-004 da fábrica de software). Só existe na aba "🎨 Gerador
+> Automático" (com custo de API) — o "📋 Modo Gratuito" não tem essa etapa, porque ali a
+> imagem final é gerada fora do app e o Estúdio nunca recebe seus bytes.
+
+## Quando aparece
+
+Assim que existe uma imagem final na Mesa de Refinamento (Etapa 3) — ou seja, depois de
+pelo menos uma renderização via `🚀 Enviar para Renderização` —, surge a seção
+"4. Anúncio Shopee", logo abaixo dos botões "🛠️ Recalcular Ajuste" / "✅ Aprovar Catálogo".
+
+## O que é gerado
+
+Ao clicar em `📝 Gerar Anúncio Completo`:
+
+1. A MESMA imagem final exibida na Mesa de Refinamento (a que seria salva ao aprovar) é
+   enviada, em base64, junto com o contexto textual já preenchido na Etapa 2 (produto,
+   cor/material, estilo escolhido e eventual instrução/cenário customizado).
+2. Essa imagem + contexto vão para um modelo de IA com visão (chamada HTTP direta à API
+   OpenAI, JSON mode — ver `gerador_anuncio.py`; modelo configurável pela variável
+   `OPENAI_MODEL_ANUNCIO` em `CHAVES.env`, padrão `gpt-5.6-luna`).
+3. A IA devolve três campos: **título** (otimizado para busca e conversão na Shopee),
+   **descrição** estruturada (abertura, benefícios, especificações visíveis, chamada para
+   ação) e **palavras-chave** sugeridas — sempre em português (BR), e sempre baseados
+   apenas no que é visível na foto e no que foi informado no contexto (a IA é instruída a
+   nunca inventar especificação não visível/não informada).
+
+## Como editar
+
+Título e descrição aparecem em campos editáveis (`Título do anúncio` e `Descrição do
+anúncio`, com contador de caracteres no título) logo abaixo do botão — o texto pode ser
+ajustado livremente antes de aprovar. As palavras-chave sugeridas aparecem como legenda,
+somente leitura.
+
+## Onde é salvo
+
+Ao clicar em `✅ Aprovar Catálogo` (o mesmo botão que salva a imagem), se houver um
+anúncio gerado, ele é salvo em `fotos_prontas/` com o MESMO nome-base do render, trocando
+só a extensão:
+
+```text
+fotos_prontas/render_TIMESTAMP_vVERSAO.png   (imagem, como já era)
+fotos_prontas/render_TIMESTAMP_vVERSAO.txt   (anúncio: Título / Descrição / Palavras-chave)
+```
+
+O `.txt` reflete o valor ATUAL dos campos editáveis no momento do clique (ou seja,
+qualquer edição manual feita antes de aprovar é o que vai para o arquivo, não o texto
+originalmente sugerido pela IA). Se nenhum anúncio foi gerado para aquela imagem, só o
+`.png` é salvo — a etapa é opcional, o resto do fluxo (edição/aprovação de imagem)
+funciona normalmente sem ela.
+
+## Erros
+
+Falha ao gerar (rede fora do ar, `OPENAI_API_KEY` ausente/inválida, resposta da IA fora
+do formato esperado) aparece como uma mensagem de erro (`❌ ...`) acima da seção, sem
+derrubar a aba — o restante do fluxo do Estúdio (refinamento, aprovação de imagem)
+continua funcionando normalmente mesmo se o anúncio falhar.
+
+---
+
 # Limpeza de Memória
 
 Na barra lateral:
