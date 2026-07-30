@@ -294,8 +294,10 @@ O código NÃO preserva o nome original do arquivo enviado.
 ## Quando aparece
 
 Assim que existe uma imagem final na Mesa de Refinamento (Etapa 3) — ou seja, depois de
-pelo menos uma renderização via `🚀 Enviar para Renderização` —, surge a seção
-"4. Anúncio Shopee", logo abaixo dos botões "🛠️ Recalcular Ajuste" / "✅ Aprovar Catálogo".
+clicar no botão de gerar as variações (rótulo dinâmico, no formato "🚀 Gerar Nx com
+<motor> (~$custo)", ex.: "🚀 Gerar 2x com Nano Banana Pro (~$0.090)") e a renderização
+concluir —, surge a seção "4. Anúncio Shopee", logo abaixo dos botões "🛠️ Recalcular
+Ajuste" / "✅ Aprovar Catálogo".
 
 ## O que é gerado
 
@@ -340,7 +342,8 @@ funciona normalmente sem ela.
 ## Erros
 
 Falha ao gerar (rede fora do ar, `OPENAI_API_KEY` ausente/inválida, resposta da IA fora
-do formato esperado) aparece como uma mensagem de erro (`❌ ...`) acima da seção, sem
+do formato esperado) aparece como uma mensagem de erro (`❌ ...`) dentro da própria seção
+"4. Anúncio Shopee" (logo abaixo do botão de gerar, antes dos campos editáveis), sem
 derrubar a aba — o restante do fluxo do Estúdio (refinamento, aprovação de imagem)
 continua funcionando normalmente mesmo se o anúncio falhar.
 
