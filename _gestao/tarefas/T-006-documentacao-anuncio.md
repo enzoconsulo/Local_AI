@@ -189,10 +189,10 @@ Nenhum outro trecho tocado. Confirmado com `git -C Local_AI status --porcelain`:
 **Commits:**
 - Submódulo `Local_AI` (branch `main`): `git add estudio_shopee/how_to_use.md` + `git
   commit -m "T-006: corrigir citacao de rotulo de botao inexistente no how_to_use.md
-  (Ciclo 2)"`.
-- Repo externo `ia-hibrida-limpa`: `git add Local_AI
-  _gestao/tarefas/T-006-documentacao-anuncio.md` + `git commit -m "T-006: Ciclo 2 —
-  corrigir achados da revisao no how_to_use.md"`. (`_gestao/PLANO.md` e
+  (Ciclo 2)"`. Hash: `4c91f38`.
+- Repo externo `ia-hibrida-limpa` (ponteiro do submódulo + arquivo da tarefa): `git add
+  Local_AI _gestao/tarefas/T-006-documentacao-anuncio.md` + `git commit -m "T-006: Ciclo 2
+  - corrigir achados da revisao no how_to_use.md"`. Hash: `7ff5a0a`. (`_gestao/PLANO.md` e
   `_gestao/tarefas/T-004-persistencia-anuncio.md` seguem modificados na árvore por outro
   agente — não são trabalho meu, deixados de fora do `git add`, como no Ciclo 1.)
 
