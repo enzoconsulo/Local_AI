@@ -18,7 +18,9 @@ andamento (anúncio completo no Estúdio).
   LiteLLM local → Groq (instrução de edição), e agora também OpenAI REST direto para o
   anúncio (mesmo padrão do app principal, módulo `gerador_anuncio.py`).
 - Sem CI. Sem framework de teste único — `analista_dados_shopee` usa scripts próprios em
-  `tests/`; `estudio_shopee` ainda não tem suíte automatizada (ver Armadilhas).
+  `tests/`; `estudio_shopee` tem uma suíte `pytest` cobrindo o motor do anúncio
+  (`gerador_anuncio.py`) em `tests/` (ver Armadilhas — a UI Streamlit em si continua sem
+  testes automatizados).
 
 ## Como rodar
 - App principal: a partir de `Local_AI/`, `powershell -ExecutionPolicy Bypass -File
@@ -33,9 +35,15 @@ andamento (anúncio completo no Estúdio).
 - `analista_dados_shopee`: testes offline em `Local_AI/analista_dados_shopee/tests/`
   (camada determinística — heurísticas, importação de CSV; não toca banco/OpenAI/Shopee
   reais). Ambiente Python isolado próprio do módulo (não assuma `pytest` global instalado).
-- `estudio_shopee`/`gerador_anuncio.py`: sem suíte automatizada ainda (T-005, backlog).
-  Validação até aqui é manual, com a chamada HTTP sempre mockada (nunca gaste
-  `OPENAI_API_KEY` real em teste) — ver Notas de execução de T-001/T-002.
+- `estudio_shopee`/`gerador_anuncio.py`: `python -m pytest Local_AI/estudio_shopee/tests/ -v`
+  (suíte offline pura, T-005 — 5 testes, chamada HTTP sempre mockada via
+  `monkeypatch.setattr(gerador_anuncio.HTTP_SESSION, "post", ...)`, nunca gasta
+  `OPENAI_API_KEY` real). Cobre `chamar_openai_visao`/`gerar_anuncio_shopee`: credencial
+  ausente, erro HTTP, resposta fora de JSON, schema incompleto e caminho feliz. `app.py`
+  (a UI Streamlit em si — botões, `session_state`, o handler de "✅ Aprovar Catálogo") não
+  tem suíte automatizada própria; validação de UI é manual (`streamlit run app.py` +
+  clique real, ou `streamlit.testing.v1.AppTest` para cenários pontuais — ver Notas de
+  execução de T-004 Ciclo 2 para um exemplo).
 
 ## Arquitetura em 1 minuto
 - **`Local_AI/`** — submódulo git PRÓPRIO (repo separado, branch `main`,
@@ -49,10 +57,13 @@ andamento (anúncio completo no Estúdio).
     das planilhas do Seller Center; `utils/` tem o pool de conexão e o motor da Shopee API
     (`shopee_core.py`); `init_db/` traz 17 migrações + runner idempotente.
   - **`estudio_shopee/`** — módulo de imagens à parte. `app.py` é a UI Streamlit inteira
-    (upload, canvas, edição via fal.ai, aprovação); `gerador_anuncio.py` é o motor (sem
-    Streamlit, testável isolado) da feature nova de anúncio: `chamar_openai_visao`
-    (plumbing HTTP, T-001) e `gerar_anuncio_shopee` (prompt de copywriting + validação de
-    schema, T-002) — ainda não chamado por nenhum botão da UI (T-003 pendente).
+    (upload, canvas, edição via fal.ai, aprovação, e agora também a Etapa 4 "Anúncio
+    Shopee" na aba Gerador Automático); `gerador_anuncio.py` é o motor (sem Streamlit,
+    testável isolado) do anúncio: `chamar_openai_visao` (plumbing HTTP, T-001) e
+    `gerar_anuncio_shopee` (prompt de copywriting + validação de schema, T-002) — chamado
+    pelo botão "📝 Gerar Anúncio Completo" em `app.py` (T-003), com título/descrição
+    editáveis e persistência junto do render aprovado em `fotos_prontas/*.txt` (T-004).
+    `tests/test_gerador_anuncio.py` (T-005) cobre o motor com HTTP mockado.
 - **`_gestao/`** (neste repo externo) — especificação/plano/decisões/tarefas da fábrica.
 
 ## Convenções
@@ -80,12 +91,19 @@ andamento (anúncio completo no Estúdio).
   Acoplamento rígido a 17 migrações; `dossie.py` lança `MigracaoPendenteError` se faltar
   alguma — rode `aplicar_migrations.py` (o `run_local.ps1` já faz isso).
 - **Cobertura de testes é parcial:** `analista_dados_shopee/tests/` só cobre a camada
-  determinística offline; nada toca banco/OpenAI/Shopee/UI real, e não há CI. A feature de
-  anúncio do Estúdio (`gerador_anuncio.py`) ainda não tem NENHUMA suíte automatizada — só
-  validação manual registrada nas tarefas T-001/T-002.
-- **Feature de anúncio incompleta:** o backend (`gerar_anuncio_shopee`) já existe e foi
-  validado manualmente, mas não está integrado à UI — não documente/anuncie a feature como
-  utilizável de ponta a ponta até T-003/T-004 saírem do backlog.
+  determinística offline; nada toca banco/OpenAI/Shopee/UI real, e não há CI.
+  `estudio_shopee/gerador_anuncio.py` (o motor do anúncio, sem Streamlit) tem suíte
+  `pytest` própria (T-005, HTTP sempre mockado) — mas `app.py` (a UI Streamlit em si:
+  botões, `session_state`, canvas, os handlers de aprovação/edição) segue sem NENHUM teste
+  automatizado; validação de UI é manual ou pontual via `AppTest` (ver T-004 Ciclo 2).
+- **Anúncio Shopee é feature completa e integrada** (T-001 a T-005 concluídas): na aba
+  "🎨 Gerador Automático", com uma imagem final gerada, o botão "📝 Gerar Anúncio Completo"
+  chama a IA de visão, preenche título/descrição editáveis, e ao clicar em
+  "✅ Aprovar Catálogo" o anúncio (com eventuais edições manuais) é salvo em
+  `fotos_prontas/render_<timestamp>_v<versao>.txt`, junto do `.png` — ver
+  `Local_AI/estudio_shopee/how_to_use.md` (seção "Anúncio Shopee") para o fluxo completo do
+  usuário. Só existe na aba Gerador Automático (com custo); o "📋 Modo Gratuito" não tem
+  essa etapa (a imagem final nasce fora do app nesse fluxo).
 - **Segredos em disco:** `CHAVES.env`/`CHAVES_DADOS.env` reais nunca são versionados (só
   os `.example`) mas existem localmente na árvore — não vazar em log/print/commit.
 - **Ambiente "futuro/fictício":** modelos `gpt-5.6-*` e datas em 2026 são coerentes com a
