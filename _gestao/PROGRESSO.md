@@ -5,6 +5,28 @@ Diário do projeto, entradas mais recentes NO TOPO. Formato:
 ## AAAA-MM-DD
 <o que avançou, estado atual, próximos passos visíveis — 3–6 linhas>
 
+## 2026-07-30
+**Escopo desta rodada FECHADO: T-001 a T-006 todas `concluida` e as três fases do
+`PLANO.md` com `Marco: aprovado`** (Fase 1 em 28/07; Fases 2 e 3 em 30/07). Entraram nesta
+data T-003 (UI "Anúncio Shopee" na aba Gerador Automático), T-004 (persistência do anúncio
+junto do render aprovado) e T-006 (documentação) — as três passaram por um ciclo corretivo
+em que a REVISÃO achou bug real que o teste tinha deixado passar: troca de variação sem
+`resetar_anuncio()`, leitura de `session_state` desatualizado ao salvar, e um rótulo de
+botão inexistente citado no `how_to_use.md`. Estado atual: a feature de anúncio é
+utilizável ponta a ponta no Estúdio, com suíte offline (5/5, HTTP mockado) e documentação
+conferida contra o código. Nenhuma tarefa `pronta` ou `backlog` — sem trabalho pendente.
+
+**Pendência que sobrou, fora do pipeline:** o submódulo `Local_AI` tem **26 commits não
+enviados** (`main` ahead 26 de `origin/main`, remoto `git@github.com:enzoconsulo/Local_AI.git`).
+O ponteiro do repo externo está correto e bate com o HEAD `4c91f38`, mas esse commit só
+existe nesta máquina — quem clonar `ia-hibrida-limpa` e rodar `git submodule update` FALHA,
+e é dentro do `Local_AI` que vive todo o código das T-003..T-006. Correção é um
+`git -C Local_AI push origin main`; por ser rede/irreversível, aguarda decisão do usuário.
+
+**Registrado e NÃO executado** (fora do escopo desta rodada, candidato a tarefa futura se o
+usuário priorizar): o restante do `how_to_use.md` — o fluxo antigo v5.0/RunPod — segue
+desatualizado; só a seção "Anúncio Shopee" foi reescrita.
+
 ## 2026-07-28
 Fase 1 do plano (motor de geração do anúncio) concluída: T-001 (cliente OpenAI REST
 multimodal, `Local_AI/estudio_shopee/gerador_anuncio.py`) e T-002 (prompt de copywriting +
