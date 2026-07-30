@@ -16,12 +16,17 @@ botão inexistente citado no `how_to_use.md`. Estado atual: a feature de anúnci
 utilizável ponta a ponta no Estúdio, com suíte offline (5/5, HTTP mockado) e documentação
 conferida contra o código. Nenhuma tarefa `pronta` ou `backlog` — sem trabalho pendente.
 
-**Pendência que sobrou, fora do pipeline:** o submódulo `Local_AI` tem **26 commits não
-enviados** (`main` ahead 26 de `origin/main`, remoto `git@github.com:enzoconsulo/Local_AI.git`).
-O ponteiro do repo externo está correto e bate com o HEAD `4c91f38`, mas esse commit só
-existe nesta máquina — quem clonar `ia-hibrida-limpa` e rodar `git submodule update` FALHA,
-e é dentro do `Local_AI` que vive todo o código das T-003..T-006. Correção é um
-`git -C Local_AI push origin main`; por ser rede/irreversível, aguarda decisão do usuário.
+**Risco de clone quebrado — RESOLVIDO no fim do dia** (autorizado pelo usuário): o submódulo
+`Local_AI` tinha 26 commits que só existiam nesta máquina, entre eles todo o código das
+T-003..T-006. Como o repo externo já apontava para o HEAD `4c91f38`, um clone novo com
+`git submodule update` FALHARIA. `git -C Local_AI push origin main` enviou tudo
+(`3d76584..4c91f38`) — o par pai+submódulo está consistente e a árvore em dia com o remoto.
+
+**Documentação alinhada ao código:** o `README.md` da raiz tinha ficado em 28/07 e ainda
+descrevia a feature como "EM CONSTRUÇÃO", com T-003/T-004/T-005/T-006 em `backlog` — a T-006
+tinha escopo declarado só sobre `how_to_use.md` e `CLAUDE.md`, e o README ficou de fora.
+Corrigido pelo documentador (commit `ea4ab8c`), com os rótulos de botão conferidos
+literalmente contra `app.py`. `CLAUDE.md` do projeto não precisou de mudança.
 
 **Registrado e NÃO executado** (fora do escopo desta rodada, candidato a tarefa futura se o
 usuário priorizar): o restante do `how_to_use.md` — o fluxo antigo v5.0/RunPod — segue
