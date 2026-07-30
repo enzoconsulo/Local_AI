@@ -17,13 +17,18 @@ Tarefas: T-001, T-002
 ## Fase 2 — Núcleo
 Meta: dentro do Estúdio, o usuário consegue gerar o anúncio a partir da imagem final, editar
 título/descrição na tela, e ter tudo salvo junto do render ao aprovar o catálogo.
-Marco: pendente
+Marco: aprovado 2026-07-30 (testador em modo marco: fluxo ponta a ponta com
+streamlit.testing.v1.AppTest — geração mockada, edição de título/descrição refletida no
+`.txt` salvo com o mesmo nome-base do `.png`, fluxo sem anúncio sem regressão; suíte
+`tests/test_gerador_anuncio.py` 5/5 e `py_compile` limpos)
 Tarefas: T-003, T-004
 
 ## Fase 3 — Refinamento
 Meta: motor de geração coberto por testes automatizados (sem custo de API real) e
 documentação do Estúdio e do projeto refletindo a função nova.
-Marco: pendente
+Marco: aprovado 2026-07-30 (testador em modo marco: suíte `test_gerador_anuncio.py` 5/5,
+0.25s, sem custo de API real; documentação de `how_to_use.md` e `CLAUDE.md` do projeto
+conferida contra o código real — 14 afirmações checadas, todas batendo)
 Tarefas: T-005, T-006
 
 <!-- Linha "Marco:": o orquestrador registra ali o resultado da verificação de fase —

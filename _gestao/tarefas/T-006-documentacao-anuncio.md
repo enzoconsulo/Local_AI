@@ -2,7 +2,7 @@
 id: T-006
 titulo: Documentação — Anúncio Shopee no how_to_use e no CLAUDE.md do projeto
 projeto: ia-hibrida-limpa
-status: em-execucao
+status: concluida
 prioridade: baixa
 dependencias: [T-004, T-005]
 areas: [Local_AI/estudio_shopee/how_to_use.md, projetos/ia-hibrida-limpa/CLAUDE.md, Local_AI/estudio_shopee/requirements.txt]
@@ -209,6 +209,9 @@ lógica executável). Nada aqui exige execução de software para validar — se
 revisão, conforme a regra do CLAUDE.md ("tarefas triviais... podem pular em-teste... só
 quando a tarefa não toca código executável").
 
+**Ciclo 2:** mesma dispensa mantida — retrabalho tocou só `how_to_use.md` (texto),
+confirmado via `git -C Local_AI show --stat 4c91f38`. Direto para revisão.
+
 ## Revisão
 
 ### Ciclo 1
@@ -275,3 +278,39 @@ divirgiu do código real; nenhum `.py` foi tocado (confirmado via `git -C Local_
 
 **Veredito: REPROVADA** — achado `[importante]` único, correção de uma linha em
 `how_to_use.md`.
+
+### Ciclo 2
+
+Lidos antes de revisar: esta tarefa (Notas de execução Ciclo 2, Revisão Ciclo 1), `CLAUDE.md`
+do projeto. Revisado o diff do commit do submódulo `Local_AI` (`git -C Local_AI show
+4c91f38`, branch `main` — único arquivo tocado: `estudio_shopee/how_to_use.md`) e o commit
+correspondente no repo externo `ia-hibrida-limpa` (`git show 7ff5a0a`, ponteiro do submódulo
++ arquivo da tarefa).
+
+**Achado `[importante]` do Ciclo 1 — confirmado corrigido.** A frase em
+`how_to_use.md:296-300` não cita mais um rótulo fixo entre crases. Novo texto: "depois de
+clicar no botão de gerar as variações (rótulo dinâmico, no formato "🚀 Gerar Nx com <motor>
+(~$custo)", ex.: "🚀 Gerar 2x com Nano Banana Pro (~$0.090)") e a renderização concluir".
+Reli `app.py:610-633`: o botão é `st.button(f"🚀 Gerar {num_variacoes}x com
+{nome_motor_valor} (~${custo_estimado:.3f})", ...)` — o formato genérico "Gerar Nx com
+<motor> (~$custo)" e o exemplo concreto batem exatamente com a f-string real
+(`num_variacoes` → N, `nome_motor_valor` → motor, `custo_estimado` → custo). Não há mais
+citação de texto literal fixo inexistente; a nova frase é precisa e verificável.
+
+**Achado `[menor]` do Ciclo 1 — confirmado corrigido.** `how_to_use.md:344-348` agora diz
+que o `st.error` aparece "dentro da própria seção "4. Anúncio Shopee" (logo abaixo do botão
+de gerar, antes dos campos editáveis)". Reli `app.py:807-854`: `st.subheader("4. Anúncio
+Shopee")` (808) → `st.button("📝 Gerar Anúncio Completo", ...)` (814) → dentro do mesmo
+bloco `try/except`, `st.error(...)` nas linhas 835/837 → só depois, condicionado a
+`st.session_state.anuncio_atual`, os campos "Título do anúncio"/"Descrição do anúncio"
+(839-854). Posição descrita bate exatamente com o código.
+
+Nenhuma regressão introduzida: diff do Ciclo 2 é só a reescrita dessas duas frases; nenhum
+outro trecho da seção nova, do `CLAUDE.md` ou do `requirements.txt` foi tocado (já
+aprovados no Ciclo 1 e não fazem parte deste diff). Confirmado via `git -C Local_AI status
+--porcelain` (limpo, exceto o ponteiro já commitado) que nenhum `.py` foi alterado nos dois
+ciclos.
+
+**Veredito: APROVADA sem ressalvas.** Ambos os achados do Ciclo 1 foram corrigidos com
+precisão, confirmados linha a linha contra `app.py`. Critérios de aceite 1, 2 e 3
+permanecem satisfeitos (verificados no Ciclo 1, não afetados por este diff).

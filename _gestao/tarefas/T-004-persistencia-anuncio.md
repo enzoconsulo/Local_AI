@@ -2,7 +2,7 @@
 id: T-004
 titulo: Salvar o anúncio junto do render aprovado
 projeto: ia-hibrida-limpa
-status: em-teste
+status: concluida
 prioridade: media
 dependencias: [T-003]
 areas: [Local_AI/estudio_shopee/app.py]
@@ -146,6 +146,55 @@ verbatim de `app.py:777-803`:
 
 ## Verificação
 
+### Ciclo 2
+
+**Cenário: Edição sem pausa + Clique no mesmo rerun (achado do revisor Ciclo 1)**
+- **PASSOU**
+- Teste criado: `test_t004_correccao.py` (reproduz o cenário exato do achado)
+- Sequência: usuário edita título no campo `anuncio_titulo_input` e clica em "Aprovar Catálogo" no MESMO rerun (ambas mudanças de widget chegam ao backend juntas)
+- Resultado esperado: arquivo .txt gravado deve conter o título EDITADO, não o valor antigo
+- Resultado obtido: arquivo .txt contém "Titulo EDITADO sem pausa" (não "Titulo ORIGINAL"), confirmando que a correção funciona
+- Conteúdo do arquivo verificado:
+  ```
+  Título: Titulo EDITADO sem pausa
+
+  Descrição:
+  Descricao EDITADA sem pausa
+
+  Palavras-chave: tag1, tag2
+  ```
+- Isso prova que a lógica de ler de `st.session_state.get("anuncio_titulo_input", ...)` funciona corretamente e resolve o achado do revisor
+
+**Critério 1: Aprovar o catálogo com um anúncio presente cria um arquivo em `fotos_prontas/` com o mesmo timestamp/versão do PNG**
+- **PASSOU**
+- Teste validou: PNG e TXT criados com o mesmo `nome_base` (ex: `render_1234567890_v1.png` e `render_1234567890_v1.txt`)
+- Confirmado que `nome_base` é calculado UMA ÚNICA VEZ (app.py linha 770) e reaproveitado para ambos os arquivos
+
+**Critério 2: O arquivo contém título, descrição e palavras-chave, nos valores atuais dos campos editáveis**
+- **PASSOU**
+- Arquivo .txt contém:
+  - Rótulo "Título:" com valor "Suporte de Celular XYZ"
+  - Rótulo "Descrição:" com valor "Suporte articulado para mesa e carro"
+  - Rótulo "Palavras-chave:" com valores "suporte, celular, mesa"
+- Formato legível confirmado (texto plano com quebras de linha, mesmo espírito de `memoria_*.txt`)
+
+**Critério 3: Aprovar o catálogo SEM anúncio gerado (`anuncio_atual is None`) continua funcionando como antes**
+- **PASSOU**
+- Lógica condicional confirmada: `if st.session_state.anuncio_atual:` (app.py linha 777) pula todo o bloco de gravação de .txt quando `anuncio_atual` é `None`
+- Nenhum arquivo .txt é criado neste caso
+- PNG seria salvo normalmente (via `open(nome_arq, "wb")` linha 771-773, fora do bloco condicional)
+- Nenhuma regressão no fluxo existente
+
+**Critério 4: `python -m py_compile Local_AI/estudio_shopee/app.py` executa sem erro**
+- **PASSOU**
+- Comando executado: `python -m py_compile Local_AI/estudio_shopee/app.py`
+- Resultado: sem erro de sintaxe ou compilação
+- App subiu via `streamlit run app.py --server.headless true --server.port 8599` sem erros de import ou runtime
+
+**Testes existentes (regressão)**
+- Suíte `tests/test_gerador_anuncio.py`: 5/5 testes **PASSARAM**
+- Sem regressão no módulo `gerador_anuncio.py` (T-004 não tocou este arquivo, testes continuam passando 100%)
+
 ### Ciclo 1
 
 **Critério 1: Aprovar o catálogo com um anúncio presente cria um arquivo em `fotos_prontas/` com o mesmo timestamp/versão do PNG**
@@ -176,6 +225,70 @@ verbatim de `app.py:777-803`:
 - Sem regressão no módulo `gerador_anuncio.py` (T-004 não tocou este arquivo)
 
 ## Revisão
+
+### Ciclo 2
+
+Diff revisado: commit `0f31e5b` no submódulo `Local_AI` (branch `main`) — único arquivo
+tocado: `estudio_shopee/app.py` (+21/-1, todo dentro do handler "✅ Aprovar Catálogo",
+linhas 777-803). Li o diff inteiro e reli o arquivo completo em torno do trecho alterado
+(handler do botão, `salvar_anuncio_txt`, `resetar_anuncio` e o bloco de widgets da Etapa 4
+em 839-854) para julgar a correção no contexto real de execução do Streamlit, não isolada.
+
+**Correção do achado `importante` do Ciclo 1 — confirmada.** A mudança troca a fonte do
+título/descrição gravados no `.txt`: em vez de usar `st.session_state.anuncio_atual`
+diretamente (que só é resincronizado pelo bloco de widgets em 839-854, que roda DEPOIS do
+handler do botão na ordem do script), agora lê direto de
+`st.session_state.get("anuncio_titulo_input"/"anuncio_descricao_input", ...)` — as chaves
+dos próprios widgets `key=`. Isso é correto porque no modelo de execução do Streamlit o
+`session_state` de um widget com `key` é sincronizado a partir do valor mais recente do
+frontend ANTES do script começar a rodar do topo, independente de em que linha do script
+o `st.text_input(key=...)` está posicionado nesta rodada — ou seja, a leitura deixa de
+depender da ordem relativa entre o handler do botão (linha 769) e o bloco de widgets
+(linha 839), que era exatamente a causa raiz do achado. Validei o raciocínio lendo o
+próprio código: as únicas duas formas de `anuncio_titulo_input`/`anuncio_descricao_input`
+mudarem de valor são (a) edição do usuário no widget — sincronizada pelo Streamlit antes do
+rerun, e (b) `resetar_anuncio()`/geração de novo anúncio, que faz `pop()` das duas chaves
+ANTES de setar `anuncio_atual` (linhas 273-275 e 831-833) — nos dois casos o par
+`anuncio_atual`/chaves de widget nunca fica sem correspondência ambígua na hora em que o
+handler do botão roda.
+- Testei a alegação central (sincronização pré-execução) contra o próprio texto do código,
+  não apenas contra o relato do executor: `resetar_anuncio()` (chamado ao trocar de
+  variação/gerar do zero) faz `pop` das duas chaves de widget junto com
+  `anuncio_atual = None` — não há cenário em que `anuncio_atual` seja truthy com as chaves
+  de widget ainda contendo valor de uma imagem/anúncio anterior (o fallback
+  `anuncio_para_salvar.get(...)` cobre só o caso teórico de a chave nunca ter existido,
+  como já era esperado pelo executor).
+- O fallback em si não introduz risco: `anuncio_para_salvar = dict(st.session_state.anuncio_atual)`
+  é cópia rasa — não muta `st.session_state.anuncio_atual` original, então o bloco de
+  widgets em 839-854 (que roda logo depois, na mesma rerun) não é afetado por essa cópia.
+- Reexecutei `python -m py_compile estudio_shopee/app.py` de forma independente nesta
+  revisão: sem erro (critério 4 confirmado outra vez).
+- Cenário de regressão que testei mentalmente e não encontrei problema: usuário nunca edita
+  os campos, só gera o anúncio e aprova direto — nesse caso os widgets em 839-854 já
+  populam `anuncio_titulo_input`/`anuncio_descricao_input` com o valor da IA na MESMA rerun
+  em que `anuncio_atual` foi setado (antes de qualquer clique em "Aprovar Catálogo"
+  subsequente), então a leitura via chave de widget bate exatamente com o valor gerado —
+  sem diferença de comportamento face ao Ciclo 1 para o caso comum.
+- Critérios 1, 3 e 4 permanecem exatamente como confirmados na revisão do Ciclo 1 (nenhuma
+  dessas partes do código foi tocada neste diff — `nome_base` calculado uma vez, `if
+  st.session_state.anuncio_atual:` intacto, `try/except` só ao redor da gravação do `.txt`).
+- Working tree do submódulo `Local_AI` limpo (`git status --porcelain` vazio) — nenhum
+  arquivo de teste descartável (`test_t004_correccao.py`, `_repro_t004_ciclo2.py`,
+  `_test_repro_t004_ciclo2.py`) ficou para trás, como o executor registrou.
+
+Nenhum achado `critica` ou `importante` neste ciclo. A correção resolve a causa raiz
+apontada (dependência de ordem de execução), não é um remendo que só cobre o caso de teste
+específico — a leitura pela chave do widget é order-independent por construção, cobrindo
+qualquer variação de timing entre edição e clique, não só o cenário exato replicado pelo
+AppTest.
+
+**[menor]** O fallback `anuncio_para_salvar.get("titulo"/"descricao", ...)` dentro do
+próprio `.get(chave_widget, fallback)` é, pela análise acima, código morto na prática (não
+há caminho de execução em que `anuncio_atual` seja truthy e a chave de widget correspondente
+não exista) — mas é uma rede de segurança barata e inofensiva, não uma falha; deixo
+registrado só como observação, não como reprovação.
+
+Aprovado sem ressalvas quanto a correção, segurança e integração.
 
 ### Ciclo 1
 
