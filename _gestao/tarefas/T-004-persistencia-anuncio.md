@@ -2,14 +2,14 @@
 id: T-004
 titulo: Salvar o anúncio junto do render aprovado
 projeto: ia-hibrida-limpa
-status: backlog
+status: pronta
 prioridade: media
 dependencias: [T-003]
 areas: [Local_AI/estudio_shopee/app.py]
 tentativas: 0
 agente: streamlit-ui
 criada: 2026-07-27
-atualizada: 2026-07-27
+atualizada: 2026-07-30
 ---
 
 ## Objetivo
