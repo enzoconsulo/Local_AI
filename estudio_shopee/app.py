@@ -67,8 +67,9 @@ except ImportError:
     st.stop()
 
 # construir_data_uri mora em gerador_anuncio.py (T-001/T-002, mesma pasta) —
-# reaproveitada aqui em vez de duplicada.
-from gerador_anuncio import construir_data_uri
+# reaproveitada aqui em vez de duplicada. gerar_anuncio_shopee/ErroGeracaoAnuncio
+# (T-003) alimentam a seção "Anúncio Shopee" da aba Gerador Automático.
+from gerador_anuncio import construir_data_uri, gerar_anuncio_shopee, ErroGeracaoAnuncio
 
 # ================= 1. TRATAMENTO DE AMBIENTE =================
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -173,6 +174,7 @@ if 'tipo_memoria_atual' not in st.session_state: st.session_state.tipo_memoria_a
 if 'img_recortada_bytes' not in st.session_state: st.session_state.img_recortada_bytes = None
 if 'arquivo_atual' not in st.session_state: st.session_state.arquivo_atual = ""
 if 'motor_ia_pronto' not in st.session_state: st.session_state.motor_ia_pronto = False
+if 'anuncio_atual' not in st.session_state: st.session_state.anuncio_atual = None
 
 # ================= 2. PERFORMANCE: SESSÕES REUTILIZÁVEIS =================
 
@@ -243,6 +245,16 @@ def salvar_memoria(tipo, prompt):
 def resetar_memoria(tipo):
     if os.path.exists(ARQUIVOS_MEMORIA[tipo]):
         os.remove(ARQUIVOS_MEMORIA[tipo])
+
+def resetar_anuncio():
+    """Reseta o anúncio Shopee (T-003) — chamado sempre que a imagem final
+    atual deixa de ser válida (troca de upload ou nova geração do zero via
+    botão "🚀 Gerar..."). Também limpa as chaves dos widgets de edição para
+    que, na próxima geração, os campos sejam repopulados com o texto novo em
+    vez de reter o que foi digitado para a imagem anterior."""
+    st.session_state.anuncio_atual = None
+    st.session_state.pop("anuncio_titulo_input", None)
+    st.session_state.pop("anuncio_descricao_input", None)
 
 def checar_porta_8000():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -464,6 +476,7 @@ if st.session_state.motor_ia_pronto:
                     st.session_state.candidatos_atual = []
                     st.session_state.imagem_referencia_atual = None
                     st.session_state.prompt_manual = ""
+                    resetar_anuncio()
 
                 neutralizar_cor = st.checkbox(
                     "Neutralizar cor original (escala de cinza)",
@@ -643,6 +656,7 @@ if st.session_state.motor_ia_pronto:
                                     st.session_state.candidatos_atual = candidatos
                                     st.session_state.descricao_ia = descricao
                                     st.session_state.versao = 1
+                                    resetar_anuncio()
 
                                     if len(candidatos) == 1:
                                         st.session_state.imagem_gerada_b64 = candidatos[0]
@@ -739,6 +753,61 @@ if st.session_state.motor_ia_pronto:
 
                         salvar_memoria(st.session_state.tipo_memoria_atual, st.session_state.prompt_atual)
                         st.success("Arte final otimizada salva com sucesso para a empresa!")
+
+                st.divider()
+                st.subheader("4. Anúncio Shopee")
+                st.caption(
+                    "Gera título, descrição e palavras-chave a partir desta imagem final "
+                    "e do contexto do produto preenchido na Etapa 2."
+                )
+
+                if st.button("📝 Gerar Anúncio Completo", use_container_width=True):
+                    dados_produto = st.session_state.dados_atual or {}
+                    contexto_anuncio = {
+                        "produto": str(dados_produto.get("produto") or ""),
+                        "cor": str(dados_produto.get("cor") or ""),
+                        "estilo": str(dados_produto.get("estilo") or ""),
+                        "instrucao": str(dados_produto.get("instrucao") or ""),
+                        "produtos_formatados": str(dados_produto.get("produtos_formatados") or ""),
+                    }
+                    try:
+                        with st.spinner("📝 Gerando anúncio completo (título, descrição e palavras-chave)..."):
+                            resultado_anuncio = gerar_anuncio_shopee(bytes_imagem, contexto_anuncio)
+                        # Limpa as chaves dos widgets ANTES de gravar o novo
+                        # resultado — senão os campos abaixo (que usam `key=`)
+                        # ignoram o `value=` novo e mantêm o texto editado da
+                        # geração anterior (comportamento padrão de widgets
+                        # com key no Streamlit).
+                        st.session_state.pop("anuncio_titulo_input", None)
+                        st.session_state.pop("anuncio_descricao_input", None)
+                        st.session_state.anuncio_atual = resultado_anuncio
+                    except ErroGeracaoAnuncio as e:
+                        st.error(f"❌ Não foi possível gerar o anúncio: {e}")
+                    except Exception as e:
+                        st.error(f"❌ Erro inesperado ao gerar anúncio: {e}")
+
+                if st.session_state.anuncio_atual:
+                    titulo_atual = st.session_state.anuncio_atual.get("titulo", "")
+                    titulo_editado = st.text_input(
+                        "Título do anúncio", value=titulo_atual, key="anuncio_titulo_input"
+                    )
+                    st.caption(f"{len(titulo_editado)} caracteres")
+                    st.session_state.anuncio_atual["titulo"] = titulo_editado
+
+                    descricao_atual = st.session_state.anuncio_atual.get("descricao", "")
+                    descricao_editada = st.text_area(
+                        "Descrição do anúncio",
+                        value=descricao_atual,
+                        height=220,
+                        key="anuncio_descricao_input",
+                    )
+                    st.session_state.anuncio_atual["descricao"] = descricao_editada
+
+                    palavras_chave = st.session_state.anuncio_atual.get("palavras_chave") or []
+                    if palavras_chave:
+                        st.caption("🔑 Palavras-chave sugeridas: " + ", ".join(palavras_chave))
+                    else:
+                        st.caption("🔑 Nenhuma palavra-chave sugerida.")
             else:
                 st.info("A Renderização Profissional aparecerá aqui.")
 
