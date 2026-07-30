@@ -2,7 +2,7 @@
 id: T-003
 titulo: UI — seção "Anúncio Shopee" na aba de criar imagens
 projeto: ia-hibrida-limpa
-status: em-revisao
+status: concluida
 prioridade: alta
 dependencias: [T-002]
 areas: [Local_AI/estudio_shopee/app.py]
@@ -366,6 +366,59 @@ Recalcular Ajuste" não resetar `anuncio_atual` é da mesma família do achado a
 um caminho adicional e distinto (troca de variação já geradas, não recálculo de ajuste).
 Ambos podem valer uma tarefa única de reset mais abrangente (ex.: um único ponto central
 que dispara sempre que `imagem_gerada_b64` muda de valor), decisão do orquestrador.
+
+### Ciclo 2 (revisor, 2026-07-30)
+
+**Método:** leitura integral do diff do commit `dca8c68` (submódulo `Local_AI`, branch
+`main`, `git -C Local_AI show dca8c68` — 2 inserções / 0 remoções em `estudio_shopee/app.py`)
+e leitura do arquivo resultante (`app.py` em `HEAD` do submódulo, que é o mesmo `dca8c68`)
+nos trechos ao redor das duas mudanças e na definição de `resetar_anuncio()`.
+
+**Verificado e correto:**
+- O diff toca exatamente os 2 pontos apontados no achado `importante` do Ciclo 1, nada mais:
+  - `app.py:684` — dentro do loop da galeria de variações (`for i, cand_b64 in
+    enumerate(st.session_state.candidatos_atual)`), botão `"✅ Usar v{i+1}"`: a chamada
+    `resetar_anuncio()` foi inserida depois de `imagem_gerada_b64 = cand_b64` e
+    `imagem_referencia_atual = base64.b64decode(cand_b64)`, e antes de `st.rerun()`.
+  - `app.py:694` — botão `"↩️ Ver outras variações desta rodada"` (dentro do `if
+    len(candidatos_atual) > 1:`): a chamada `resetar_anuncio()` foi inserida depois de
+    `imagem_gerada_b64 = None` e antes de `st.rerun()`.
+- **Ordem relativa a `st.rerun()`:** correta nos dois casos — `resetar_anuncio()` roda
+  ANTES de `st.rerun()`. Como `st.rerun()` interrompe a execução do script (levanta
+  `RerunException` internamente, nada depois dele no mesmo bloco chega a rodar), colocar a
+  chamada depois teria sido um bug silencioso (o reset nunca aconteceria); os dois pontos
+  seguem o padrão já usado nos 2 pontos aprovados no Ciclo 1 (`app.py:479` e `app.py:659`).
+- **Indentação:** as duas linhas novas casam exatamente com o nível de indentação das linhas
+  vizinhas (`st.session_state...`/`st.rerun()` no mesmo bloco) — confirmado lendo o hunk do
+  diff coluna a coluna, não é só inspeção visual solta.
+- **`resetar_anuncio()` em si não foi alterada** neste commit (só o Ciclo 1 a definiu) —
+  continua zerando `anuncio_atual` e removendo `anuncio_titulo_input`/
+  `anuncio_descricao_input` de `session_state`, mesmo contrato já revisado e aprovado no
+  Ciclo 1.
+- **Nenhum outro ponto de chamada foi tocado ou duplicado:** confirmei por leitura direta do
+  arquivo resultante que os 4 pontos de chamada de `resetar_anuncio()` agora existentes
+  (troca de upload `app.py:479`, botão "🚀 Gerar..." `app.py:659`, "✅ Usar v{i+1}"
+  `app.py:684`, "↩️ Ver outras variações" `app.py:694`) aparecem uma única vez cada, sem
+  reset duplo nem chamada órfã fora de contexto.
+- **Resolve o cenário concreto do achado do Ciclo 1:** gerar 2+ variações → "✅ Usar v1" →
+  gerar anúncio para v1 → "↩️ Ver outras variações desta rodada" (zera `anuncio_atual`) →
+  "✅ Usar v2" (zera de novo, redundante mas inofensivo) — em nenhum ponto do fluxo
+  `anuncio_atual` da v1 sobrevive até a v2 ser exibida. O caminho que causava o "anúncio
+  colado a imagem errada" está fechado.
+- **Pendência do botão "🛠️ Recalcular Ajuste":** confirmei por leitura direta
+  (`app.py:704-743`) que esse botão de fato ainda não chama `resetar_anuncio()` — é a
+  pendência já registrada pelo executor no Ciclo 1/2 e pela minha nota menor do Ciclo 1,
+  um caminho DIFERENTE (recálculo de ajuste sobre a mesma imagem, não troca de variação) e
+  fora do escopo do achado que motivou esta reprovação — não é motivo de reprovação aqui.
+  Mantenho a sugestão de uma tarefa futura de reset centralizado cobrindo os 3 caminhos
+  residuais (recalcular ajuste é o único que resta, já que este ciclo fechou os outros 2).
+
+**Achados neste ciclo:** nenhum. O achado `importante` do Ciclo 1 foi corrigido de forma
+precisa e mínima (2 linhas, exatamente nos 2 pontos certos, ordem correta em relação a
+`st.rerun()`), sem reintroduzir regressão nos 3 outros pontos de reset nem nos demais
+critérios de aceite (já reconfirmados pelo testador no Ciclo 2, seção Verificação).
+
+**Veredito:** Aprovada sem ressalvas adicionais.
 
 ### Ciclo 2 (testador, 2026-07-29)
 
