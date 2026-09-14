@@ -49,7 +49,7 @@ if ($LASTEXITCODE -ne 0) {
     Falha "O Docker esta instalado mas o motor nao esta rodando. Abra o Docker Desktop, espere o icone ficar verde e rode de novo."
 }
 
-Write-Host "[1/5] Subindo PostgreSQL + pgAdmin (Docker)..." -ForegroundColor Cyan
+Write-Host "[1/6] Subindo PostgreSQL + pgAdmin (Docker)..." -ForegroundColor Cyan
 docker compose --env-file CHAVES_DADOS.env up -d
 if ($LASTEXITCODE -ne 0) { Falha "docker compose falhou - veja a mensagem acima." }
 
@@ -67,7 +67,7 @@ Write-Host "      Banco pronto em localhost:5433 (pgAdmin em localhost:5050)." -
 # -----------------------------------------------------------------------------
 # 3) PYTHON - cria o venv na primeira vez; depois so reutiliza.
 # -----------------------------------------------------------------------------
-Write-Host "[2/5] Ambiente Python..." -ForegroundColor Cyan
+Write-Host "[2/6] Ambiente Python..." -ForegroundColor Cyan
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
     Write-Host "      [PRIMEIRA VEZ] Criando ambiente virtual..." -ForegroundColor Yellow
     py -3 -m venv .venv
@@ -96,17 +96,56 @@ if ($hashAtual -ne $hashSalvo) {
 # 4) BANCO - migracoes pendentes (idempotente: na rotina so confere e segue)
 #            + teste real de conexao.
 # -----------------------------------------------------------------------------
-Write-Host "[3/5] Aplicando migracoes pendentes (seguro rodar sempre)..." -ForegroundColor Cyan
+Write-Host "[3/6] Aplicando migracoes pendentes (seguro rodar sempre)..." -ForegroundColor Cyan
 & $python init_db\aplicar_migrations.py
 if ($LASTEXITCODE -ne 0) { Falha "As migracoes falharam - veja a mensagem acima." }
 
-Write-Host "[4/5] Validando a conexao com o banco..." -ForegroundColor Cyan
+Write-Host "[4/6] Validando a conexao com o banco..." -ForegroundColor Cyan
 & $python test_db.py
 if ($LASTEXITCODE -ne 0) { Falha "Conexao com o banco falhou. Confira DB_PORT/senha no CHAVES_DADOS.env." }
 
 # -----------------------------------------------------------------------------
-# 5) APLICACAO
+# 5) SHOPEE - tunel de IP fixo (confere o IP que a Shopee vai ver) + token.
+#             Token emprestado pelo BTT Pi (TOKEN_VIA_PI) ou token proprio com
+#             tarefa diaria que o mantem vivo com o app fechado. So avisa em
+#             caso de problema: banco e planilhas funcionam sem a API.
 # -----------------------------------------------------------------------------
-Write-Host "[5/5] Abrindo a aplicacao: http://localhost:8501 (Ctrl+C encerra)" -ForegroundColor Cyan
+Write-Host "[5/6] Conexao com a Shopee (tunel de IP fixo + token)..." -ForegroundColor Cyan
+& $python utils\tunel_shopee.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "      [AVISO] Tunel de IP fixo com problema: a sincronizacao com a Shopee vai falhar ate resolver (veja acima e tunel_shopee.log)." -ForegroundColor Yellow
+}
+
+& $python manter_token.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "      [AVISO] Sem token valido da Shopee: a sincronizacao vai falhar ate resolver (veja acima)." -ForegroundColor Yellow
+}
+
+$tokenViaPi = Select-String -Path "CHAVES_DADOS.env" -Pattern '^\s*TOKEN_VIA_PI\s*=\s*\S' -Quiet
+$tarefaToken = "Shopee - manter token vivo"
+$tarefaExiste = [bool](Get-ScheduledTask -TaskName $tarefaToken -ErrorAction SilentlyContinue)
+if ($tokenViaPi) {
+    # O Pi e o dono do token e o renova 24/7: a tarefa diaria so criaria risco.
+    if ($tarefaExiste) {
+        Unregister-ScheduledTask -TaskName $tarefaToken -Confirm:$false
+        Write-Host "      Token emprestado pelo Pi: tarefa diaria '$tarefaToken' removida (nao e mais necessaria)." -ForegroundColor Green
+    }
+} elseif (-not $tarefaExiste) {
+    try {
+        $acao = New-ScheduledTaskAction -Execute (Join-Path $raiz ".venv\Scripts\pythonw.exe") -Argument "manter_token.py" -WorkingDirectory $raiz
+        $gatilho = New-ScheduledTaskTrigger -Daily -At 9am
+        # StartWhenAvailable: PC desligado as 9h = roda assim que ligar.
+        $ajustes = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+        Register-ScheduledTask -TaskName $tarefaToken -Action $acao -Trigger $gatilho -Settings $ajustes -Description "Renova o refresh_token da Shopee (vence em 30 dias sem uso). Log: manter_token.log" | Out-Null
+        Write-Host "      Tarefa diaria '$tarefaToken' registrada (renova o token mesmo com o app fechado)." -ForegroundColor Green
+    } catch {
+        Write-Host "      [AVISO] Nao consegui registrar a tarefa '$tarefaToken': $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+# -----------------------------------------------------------------------------
+# 6) APLICACAO
+# -----------------------------------------------------------------------------
+Write-Host "[6/6] Abrindo a aplicacao: http://localhost:8501 (Ctrl+C encerra)" -ForegroundColor Cyan
 Write-Host ""
 & $python -m streamlit run data_app.py

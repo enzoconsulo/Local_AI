@@ -1,6 +1,8 @@
 import contextlib
+import json
 import os
 import secrets
+import subprocess
 import threading
 import time
 import hmac
@@ -9,6 +11,9 @@ import requests
 from dotenv import load_dotenv, set_key
 from loguru import logger
 from pathlib import Path
+from datetime import datetime
+
+from utils import tunel_shopee
 
 # Carrega chaves da raiz
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -19,6 +24,17 @@ PARTNER_ID = int(os.getenv("SHOPEE_PARTNER_ID", 0))
 PARTNER_KEY = os.getenv("SHOPEE_PARTNER_KEY", "").encode('utf-8')
 SHOP_ID = int(os.getenv("SHOPEE_SHOP_ID", 0))
 BASE_URL = "https://partner.shopeemobile.com"
+# Túnel de IP fixo (None = chamada direta). Ver utils/tunel_shopee.py.
+PROXIES_SHOPEE = tunel_shopee.proxies_shopee()
+
+# Dono do token: com TOKEN_VIA_PI preenchido (ex.: biqu@192.168.2.112), o serviço 24/7
+# do auto-boost no BTT Pi é o único que renova, e este app só pega emprestado um
+# access_token por SSH (scripts/emprestar_token.py no Pi). Uma autorização, uma cadeia de
+# refresh_token: os dois apps não se atrapalham e este pode ficar meses sem rodar.
+TOKEN_VIA_PI = os.getenv("TOKEN_VIA_PI", "").strip()
+TOKEN_VIA_PI_COMANDO = os.getenv("TOKEN_VIA_PI_COMANDO", "").strip() or (
+    "cd ~/shopee-rodizio && .venv/bin/python scripts/emprestar_token.py config.toml --minutos 60"
+)
 
 # ==============================================================================
 # MOTOR DE AUTENTICAÇÃO INTELIGENTE (Auto-Renovação de Token)
@@ -72,6 +88,53 @@ def _trava_renovacao_entre_processos():
             handle.close()
 
 
+def _emprestar_token_do_pi():
+    """Pede ao BTT Pi (dono do token) um access_token válido por 1h+. Ver TOKEN_VIA_PI."""
+    global _CACHE_ACCESS_TOKEN, _CACHE_EXPIRATION
+
+    comando = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        "-o", "StrictHostKeyChecking=accept-new", TOKEN_VIA_PI, TOKEN_VIA_PI_COMANDO,
+    ]
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        proc = subprocess.run(
+            comando, capture_output=True, encoding="utf-8", errors="replace",
+            timeout=120, creationflags=flags,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.error(f"Não consegui pedir o token ao Pi ({TOKEN_VIA_PI}): {exc}")
+        return None
+
+    if proc.returncode != 0:
+        linhas = (proc.stderr or proc.stdout or "").strip().splitlines()
+        detalhe = linhas[-1] if linhas else f"código de saída {proc.returncode}"
+        logger.error(f"O Pi ({TOKEN_VIA_PI}) não emprestou o token: {detalhe}")
+        return None
+
+    try:
+        dados = json.loads(proc.stdout.strip().splitlines()[-1])
+        token = dados["access_token"]
+        expira_em = datetime.fromisoformat(dados["expira_em"]).timestamp()
+    except (ValueError, KeyError, IndexError) as exc:
+        logger.error(f"Resposta inesperada do Pi ao emprestar o token: {exc}")
+        return None
+
+    if int(dados.get("shop_id", 0)) != SHOP_ID or int(dados.get("partner_id", 0)) != PARTNER_ID:
+        logger.error(
+            f"O Pi cuida de outra loja/app (shop_id={dados.get('shop_id')}, "
+            f"partner_id={dados.get('partner_id')}): confira SHOPEE_SHOP_ID e "
+            "SHOPEE_PARTNER_ID no CHAVES_DADOS.env."
+        )
+        return None
+
+    _CACHE_ACCESS_TOKEN = token
+    # Para de usar 15 min antes de vencer: nessa janela o Pi pode renovar.
+    _CACHE_EXPIRATION = expira_em - 900
+    logger.success(f"🔑 Token emprestado pelo Pi (válido até {datetime.fromtimestamp(expira_em):%H:%M}).")
+    return _CACHE_ACCESS_TOKEN
+
+
 def obter_access_token():
     """Gera e renova o access_token de forma autônoma usando o refresh_token."""
     global _CACHE_ACCESS_TOKEN, _CACHE_EXPIRATION
@@ -85,6 +148,9 @@ def obter_access_token():
         if _CACHE_ACCESS_TOKEN and time.time() < _CACHE_EXPIRATION:
             return _CACHE_ACCESS_TOKEN
 
+        if TOKEN_VIA_PI:
+            return _emprestar_token_do_pi()
+
         with _trava_renovacao_entre_processos():
             # Outro PROCESSO pode ter renovado: relê o .env para pegar o
             # refresh_token mais novo antes de gastar o nosso (uso único!).
@@ -93,6 +159,9 @@ def obter_access_token():
 
             if not refresh_token:
                 logger.error("Refresh Token não encontrado no CHAVES_DADOS.env")
+                return None
+
+            if not tunel_shopee.garantir_tunel():
                 return None
 
             path = "/api/v2/auth/access_token/get"
@@ -108,10 +177,15 @@ def obter_access_token():
             }
 
             try:
-                res = requests.post(url, json=payload, timeout=20).json()
+                res = requests.post(url, json=payload, timeout=20, proxies=PROXIES_SHOPEE).json()
 
                 if res.get("error"):
-                    logger.error(f"Falha ao gerar Token na Shopee: {res.get('message')}")
+                    mensagem = str(res.get("message") or res.get("error"))
+                    logger.error(f"Falha ao gerar Token na Shopee: {mensagem}")
+                    if "refresh_token" in mensagem:
+                        logger.error("👉 A autorização da loja venceu: rode `python pegar_token.py` (ele grava o token novo sozinho).")
+                    elif "IP" in mensagem:
+                        logger.error("👉 IP fora da whitelist da Shopee: preencha TUNEL_SSH_HOST no CHAVES_DADOS.env (túnel até a VM de IP fixo).")
                     return None
 
                 _CACHE_ACCESS_TOKEN = res.get("access_token")
@@ -144,6 +218,7 @@ def gerar_assinatura(path, access_token):
 # Sessão compartilhada: reaproveita a conexão TLS entre as centenas de chamadas
 # sequenciais de um backfill (escrow chama a API 1 vez por pedido).
 _HTTP_SESSION = requests.Session()
+_HTTP_SESSION.proxies.update(PROXIES_SHOPEE or {})
 
 
 def _espera_retry(response, tentativa):
@@ -153,6 +228,25 @@ def _espera_retry(response, tentativa):
     except (TypeError, ValueError):
         sugerido = 0
     return min(15, max(sugerido, 2 ** tentativa))
+
+
+def _erro_de_token(response):
+    """A Shopee recusou o access_token (vencido, ou invalidado por uma renovação)."""
+    try:
+        corpo = response.json()
+    except ValueError:
+        return False
+    if not isinstance(corpo, dict) or not corpo.get("error"):
+        return False
+    texto = f"{corpo.get('error')} {corpo.get('message')}".lower()
+    return "token" in texto and "refresh" not in texto
+
+
+def _descartar_token_em_cache():
+    global _CACHE_ACCESS_TOKEN, _CACHE_EXPIRATION
+    with _TOKEN_THREAD_LOCK:
+        _CACHE_ACCESS_TOKEN = None
+        _CACHE_EXPIRATION = 0
 
 
 def chamar_shopee_api(path, params=None, method="GET", payload=None, max_tentativas=3):
@@ -176,6 +270,8 @@ def chamar_shopee_api(path, params=None, method="GET", payload=None, max_tentati
     for tentativa in range(1, max_tentativas + 1):
         access_token = obter_access_token()
         if not access_token:
+            return None
+        if not tunel_shopee.garantir_tunel():
             return None
 
         timestamp, sign = gerar_assinatura(path, access_token)
@@ -219,6 +315,13 @@ def chamar_shopee_api(path, params=None, method="GET", payload=None, max_tentati
             espera = _espera_retry(response, tentativa)
             logger.warning(f"Shopee respondeu {response.status_code} em {path} (tentativa {tentativa}/{max_tentativas}); aguardando {espera}s.")
             time.sleep(espera)
+            continue
+
+        # Token recusado: descarta o cache e repete com um token novo. A Shopee não
+        # processou nada, então é seguro repetir até em POST.
+        if tentativa < max_tentativas and _erro_de_token(response):
+            logger.warning(f"Shopee recusou o access_token em {path} (tentativa {tentativa}/{max_tentativas}); pegando um token novo.")
+            _descartar_token_em_cache()
             continue
 
         try:

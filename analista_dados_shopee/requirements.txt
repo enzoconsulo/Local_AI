@@ -8,4 +8,6 @@ pandas
 openpyxl
 loguru
 requests
+# socks5h:// no requests: túnel de IP fixo das chamadas à Shopee (utils/tunel_shopee.py)
+PySocks
 tabulate
