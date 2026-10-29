@@ -4,11 +4,11 @@ cerebro/orquestrador.py
 Fluxo completo de uma auditoria por horizonte:
 
     dossiê → avaliação de ações maduras → checkpoint/retomada →
-    cache semântico → lotes OpenAI (só os SKUs pendentes) →
-    finalização + persistência em banco e em disco.
+    cache semântico → lotes de IA (só os SKUs pendentes; plano Claude ou
+    API OpenAI, ver provedor_ia.py) → finalização + persistência em banco e em disco.
 
 A ordem das economias importa: primeiro o checkpoint da janela corrente,
-depois o cache semântico entre execuções, e só então a API paga.
+depois o cache semântico entre execuções, e só então o modelo de IA.
 """
 
 import json
@@ -20,7 +20,7 @@ import streamlit as st
 from loguru import logger
 
 from utils.db_pool import get_connection
-from cerebro import config, memoria, motor_ia
+from cerebro import config, memoria, motor_ia, provedor_ia
 from cerebro.dossie import gerar_dossie_produtos_com_memoria
 from cerebro.memoria import enriquecer_dossie_com_memoria
 
@@ -132,12 +132,13 @@ def executar_auditoria_por_horizonte(horizonte: str, status_boot, modo_economico
     novos_resultados = []
     if pendentes:
         status_boot.write(
-            f"Enviando somente {len(pendentes)} de {len(dossie)} variações para análise {descricao}..."
+            f"Enviando somente {len(pendentes)} de {len(dossie)} variações para análise {descricao} "
+            f"({provedor_ia.descricao_modelo(horizonte)})..."
         )
-        config_ok, motivo_config = motor_ia.configuracao_openai_valida()
+        config_ok, motivo_config = motor_ia.configuracao_ia_valida()
         if not config_ok:
-            st.error(motivo_config)
-            status_boot.update(label="Configuração OpenAI pendente", state="error", expanded=True)
+            st.error(f"{motivo_config} Ajuste em ⚙️ Motor de IA, no topo desta página.")
+            status_boot.update(label="Motor de IA não configurado", state="error", expanded=True)
             st.stop()
 
         def confirmar_lote(lote: list[dict]) -> None:
@@ -146,7 +147,7 @@ def executar_auditoria_por_horizonte(horizonte: str, status_boot, modo_economico
 
         # O núcleo (motor_ia) não conhece Streamlit: a barra de progresso é
         # injetada daqui, e o mesmo pipeline roda em CLI/testes/página 4.
-        barra_progresso = st.progress(0.0, text="🚀 Preparando lotes para a API OpenAI...")
+        barra_progresso = st.progress(0.0, text=f"🚀 Preparando lotes para {provedor_ia.descricao_modelo(horizonte)}...")
         try:
             novos_resultados = motor_ia.processar_em_lotes(
                 pendentes,
@@ -159,7 +160,7 @@ def executar_auditoria_por_horizonte(horizonte: str, status_boot, modo_economico
         finally:
             barra_progresso.empty()
     else:
-        status_boot.write("Nenhum fato mudou; nenhuma chamada à OpenAI foi necessária.")
+        status_boot.write("Nenhum fato mudou; nenhuma chamada de IA foi necessária.")
 
     resultados = resultados_iniciais + novos_resultados
     resultados.sort(key=lambda r: int(r.get("score_urgencia", 0) or 0), reverse=True)
@@ -170,6 +171,7 @@ def executar_auditoria_por_horizonte(horizonte: str, status_boot, modo_economico
     extras_resumo = {
         "telemetria_ia": {
             **telemetria,
+            "provedor": provedor_ia.provedor(),
             "modelo": config.modelo_para(horizonte),
             "reasoning_effort": config.reasoning_para(horizonte),
             "modo_economico": modo_economico,
@@ -179,9 +181,21 @@ def executar_auditoria_por_horizonte(horizonte: str, status_boot, modo_economico
         "avisos_frescor": avisos_frescor,
     }
     if telemetria["chamadas"]:
+        if provedor_ia.usando_claude():
+            status_boot.write(
+                f"🟣 Consumo no seu plano Claude: {telemetria['chamadas']} chamada(s), "
+                f"{telemetria['prompt_tokens']:,} tokens de entrada e {telemetria['completion_tokens']:,} de saída "
+                "— sem custo por uso (conta no limite do plano)."
+            )
+        else:
+            status_boot.write(
+                f"💰 Custo desta auditoria: {telemetria['chamadas']} chamada(s) à OpenAI, "
+                f"{telemetria['prompt_tokens']:,} tokens de entrada e {telemetria['completion_tokens']:,} de saída."
+            )
+    if telemetria.get("motivo_adiamento"):
         status_boot.write(
-            f"💰 Custo desta auditoria: {telemetria['chamadas']} chamada(s) à OpenAI, "
-            f"{telemetria['prompt_tokens']:,} tokens de entrada e {telemetria['completion_tokens']:,} de saída."
+            f"⏸️ {telemetria['motivo_adiamento']} {telemetria.get('lotes_adiados', 0)} lote(s) ficaram para "
+            "depois — ao rodar de novo, só os produtos que ficaram de fora são analisados."
         )
     if telemetria["skus_analise_local"]:
         status_boot.write(

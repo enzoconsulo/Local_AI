@@ -27,7 +27,8 @@ sys.path.append(str(ROOT_DIR))
 
 from utils.db_pool import get_connection
 from utils.padronizar_texto import padronizar_texto
-from cerebro import config, orquestrador
+from utils.painel_ia import painel_motor_ia
+from cerebro import config, orquestrador, provedor_ia
 from cerebro.atuador import processar_acao_api, verificar_status_promocao
 from cerebro.config import classificar_modo_execucao, explicar_acao, rotulo_acao
 from cerebro.heuristicas import (
@@ -242,14 +243,25 @@ def _painel_status_horizonte(horizonte: str, ultima_sync: datetime | None) -> No
     if telemetria.get("chamadas"):
         tokens_in = int(telemetria.get("prompt_tokens", 0) or 0)
         tokens_out = int(telemetria.get("completion_tokens", 0) or 0)
-        precos = PRECOS_MODELO_USD_1M.get(str(telemetria.get("modelo", "")))
-        custo_txt = (
-            f" ≈ **US$ {(tokens_in * precos[0] + tokens_out * precos[1]) / 1_000_000:.2f}**"
-            if precos else ""
-        )
+        if telemetria.get("provedor") == "claude_code":
+            linhas.append(
+                f"Consumo do plano Claude: {telemetria['chamadas']} chamada(s) · "
+                f"{_fmt_milhar(tokens_in)} tokens de entrada · {_fmt_milhar(tokens_out)} de saída (sem custo por uso)"
+            )
+        else:
+            precos = PRECOS_MODELO_USD_1M.get(str(telemetria.get("modelo", "")))
+            custo_txt = (
+                f" ≈ **US$ {(tokens_in * precos[0] + tokens_out * precos[1]) / 1_000_000:.2f}**"
+                if precos else ""
+            )
+            linhas.append(
+                f"Custo real: {telemetria['chamadas']} chamada(s) · "
+                f"{_fmt_milhar(tokens_in)} tokens de entrada · {_fmt_milhar(tokens_out)} de saída{custo_txt}"
+            )
+    if telemetria.get("motivo_adiamento"):
         linhas.append(
-            f"Custo real: {telemetria['chamadas']} chamada(s) · "
-            f"{_fmt_milhar(tokens_in)} tokens de entrada · {_fmt_milhar(tokens_out)} de saída{custo_txt}"
+            f"⏸️ {telemetria.get('lotes_adiados', 0)} lote(s) adiado(s): {telemetria['motivo_adiamento']} "
+            "Rode de novo para analisar só o que ficou de fora."
         )
     elif telemetria:
         linhas.append("Custo real: R$ 0 — tudo foi resolvido por cache, checkpoint ou análise local.")
@@ -1037,6 +1049,7 @@ with st.container(border=True):
         "leitura — de um dia para o outro entra pouco dado novo. O painel abaixo mostra quando "
         "cada análise rodou, quanto custou e se vale a pena rodar agora."
     )
+    painel_motor_ia("cerebro")
 
     ultima_sync_dw = _ultima_sincronizacao_dw()
     col_7d, col_30d = st.columns(2, gap="medium")
@@ -1078,7 +1091,7 @@ with st.container(border=True):
 1. **🏜️ Sem atividade ("fantasmas")** — produto com cobertura de dados e ≤ 10 visitas, R$ 0 de ads e 0 vendas em 30 dias: recebe parecer local completo (SEO, foto de capa, impulso gratuito, teste mínimo de descoberta). **Nunca vai à IA, em nenhum modo** — não há dado para o modelo interpretar.
 2. **💸 Modo econômico** — SKU de evidência **baixa** e urgência **< 40**: parecer determinístico local (a execução automática já seria bloqueada para ele de qualquer forma). Controlado pelo seletor acima. **Urgência ≥ 40 sempre vai à IA, mesmo com evidência baixa** — produto indo mal com sinal real (prejuízo, ads sem retorno, queda forte de vendas) nunca fica de fora.
 3. **♻️ Cache semântico + checkpoint** — SKU cujos dados não mudaram desde a última auditoria reutiliza a análise anterior; auditoria interrompida retoma de onde parou. Só o produto que **mudou** gera custo.
-4. **🧠 IA de verdade** — apenas o restante é enviado (7d: `{config.OPENAI_MODEL_7D}` · 30d: `{config.OPENAI_MODEL_30D}`). Custo típico: ~US$ 0,004/SKU no 7d e ~US$ 0,03/SKU no 30d.
+4. **🧠 IA de verdade** — apenas o restante é enviado (7d: {provedor_ia.descricao_modelo('7d')} · 30d: {provedor_ia.descricao_modelo('30d')}). Pelo plano Claude não há custo por uso (conta no limite do plano, com teto de chamadas por auditoria); pela API OpenAI, custo típico de ~US$ 0,004/SKU no 7d e ~US$ 0,03/SKU no 30d.
         """)
 
     horizonte_escolhido = "7d" if executar_7d else "30d" if executar_30d else None

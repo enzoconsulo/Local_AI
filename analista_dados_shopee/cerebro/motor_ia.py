@@ -1,7 +1,8 @@
 """
 cerebro/motor_ia.py
 ===================
-Comunicação com a API OpenAI e disciplina de custo:
+Comunicação com o motor de IA (seu plano Claude pelo Claude Code, ou a API
+OpenAI — ver provedor_ia.py) e disciplina de custo:
 
   - Gatekeeper: produtos sem atividade nem gasto são resolvidos localmente,
     sem gastar um único token.
@@ -20,7 +21,7 @@ import time
 import requests
 from loguru import logger
 
-from cerebro import config
+from cerebro import config, provedor_ia
 from cerebro.heuristicas import (
     calcular_dias_estoque,
     calcular_score_urgencia,
@@ -73,6 +74,14 @@ def configuracao_openai_valida() -> tuple[bool, str]:
     if not config.OPENAI_MODEL_7D or not config.OPENAI_MODEL_30D:
         return False, "Defina OPENAI_MODEL_7D e OPENAI_MODEL_30D no CHAVES_DADOS.env."
     return True, ""
+
+
+def configuracao_ia_valida() -> tuple[bool, str]:
+    """Valida o motor de IA escolhido (plano Claude ou API OpenAI) antes de gastar qualquer chamada."""
+    if provedor_ia.usando_claude():
+        status = provedor_ia.status_claude_code(forcar=True)
+        return status["ok"], "" if status["ok"] else status["mensagem"]
+    return configuracao_openai_valida()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -318,6 +327,25 @@ def normalizar_saida_modelo(recomendacao: dict, dados: dict) -> dict:
 # CHAMADA À API OPENAI
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _conferir_completude(lote_json: list[dict], resultado: list[dict]) -> None:
+    """A resposta precisa trazer exatamente um objeto por SKU enviado, ou o lote é rejeitado."""
+    chaves_esperadas = {
+        (int(p["item_id"]), int(v["model_id"]))
+        for p in lote_json for v in p.get("variacoes_ativas", [])
+        if p.get("item_id") is not None and v.get("model_id") is not None
+    }
+    chaves_recebidas = {
+        (int(r["item_id"]), int(r["model_id"]))
+        for r in resultado
+        if isinstance(r, dict) and r.get("item_id") is not None and r.get("model_id") is not None
+    }
+    if chaves_recebidas != chaves_esperadas or len(resultado) != len(chaves_esperadas):
+        raise ValueError(
+            f"Resposta incompleta: esperados {len(chaves_esperadas)} SKUs, "
+            f"recebidos {len(chaves_recebidas)} pares válidos de produto/SKU."
+        )
+
+
 def _limite_tokens_saida(horizonte: str, total_variacoes: int) -> int:
     """Teto de segurança da resposta — não é gasto garantido (paga-se só o usado).
 
@@ -417,21 +445,7 @@ def chamar_cerebro_openai_preditivo(
             corpo_resposta = response.json()
             texto = corpo_resposta["choices"][0]["message"]["content"].strip()
             resultado = extrair_array_json_resposta(texto)
-            chaves_esperadas = {
-                (int(p["item_id"]), int(v["model_id"]))
-                for p in lote_json for v in p.get("variacoes_ativas", [])
-                if p.get("item_id") is not None and v.get("model_id") is not None
-            }
-            chaves_recebidas = {
-                (int(r["item_id"]), int(r["model_id"]))
-                for r in resultado
-                if isinstance(r, dict) and r.get("item_id") is not None and r.get("model_id") is not None
-            }
-            if chaves_recebidas != chaves_esperadas or len(resultado) != len(chaves_esperadas):
-                raise ValueError(
-                    f"Resposta incompleta: esperados {len(chaves_esperadas)} SKUs, "
-                    f"recebidos {len(chaves_recebidas)} pares válidos de produto/SKU."
-                )
+            _conferir_completude(lote_json, resultado)
             uso = corpo_resposta.get("usage") or {}
             if telemetria is not None:
                 telemetria["chamadas"] = telemetria.get("chamadas", 0) + 1
@@ -465,6 +479,79 @@ def chamar_cerebro_openai_preditivo(
     if telemetria is not None:
         telemetria["lotes_falhos"] = telemetria.get("lotes_falhos", 0) + 1
     return gerar_fallback_lote(lote_json, horizonte, mensagem_critica)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CHAMADA PELO PLANO CLAUDE (Claude Code)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def chamar_cerebro_claude(
+    lote_json: list[dict], horizonte: str = "7d", max_tentativas: int = 2,
+    telemetria: dict | None = None,
+) -> list[dict]:
+    """Mesma análise do Conselho, pelo SEU plano Claude (Claude Code).
+
+    Mesmo prompt, mesmo payload compactado e mesma validação de completude da
+    rota OpenAI. LimiteDoPlanoAtingido NÃO é tratado aqui: sobe para o
+    pipeline parar a auditoria na hora (repetir só bateria no mesmo limite).
+    """
+    config.horizonte_em_dias(horizonte)  # valida o horizonte
+
+    lote_compacto = compactar_lote_por_horizonte(lote_json, horizonte)
+    total_variacoes = sum(len(p.get("variacoes_ativas", [])) for p in lote_compacto)
+    prompt_sistema = construir_prompt_otimizado(horizonte)
+    auditoria_json = json.dumps(lote_compacto, ensure_ascii=False, separators=(",", ":"), default=str)
+    modelo = provedor_ia.modelo_claude(horizonte)
+    timeout = 420 if horizonte == "7d" else 900
+
+    for tentativa in range(1, max_tentativas + 1):
+        try:
+            logger.info(
+                f"🧠 [CLAUDE:{modelo}] Processando {total_variacoes} SKU(s) em {len(lote_json)} produto(s) "
+                f"(tentativa {tentativa}/{max_tentativas})..."
+            )
+            resposta = provedor_ia.chamar_claude(
+                prompt_sistema, f"Auditoria:{auditoria_json}", uso=horizonte, timeout=timeout,
+            )
+            if telemetria is not None:
+                telemetria["chamadas"] = telemetria.get("chamadas", 0) + 1
+                telemetria["prompt_tokens"] = telemetria.get("prompt_tokens", 0) + resposta.tokens_entrada
+                telemetria["completion_tokens"] = telemetria.get("completion_tokens", 0) + resposta.tokens_saida
+            resultado = extrair_array_json_resposta(resposta.texto)
+            _conferir_completude(lote_json, resultado)
+            logger.success(
+                f"✅ [CLAUDE:{modelo}] Lote concluído. "
+                f"Tokens entrada/saída: {resposta.tokens_entrada}/{resposta.tokens_saida}."
+            )
+            return resultado
+        except provedor_ia.LimiteDoPlanoAtingido:
+            raise
+        except provedor_ia.TempoEsgotadoIA as exc:
+            # Sem repetir o mesmo lote: o pipeline divide em lotes menores.
+            logger.error(f"🔴 [CLAUDE] {exc}")
+            break
+        except provedor_ia.ErroProvedorIA as exc:
+            logger.error(f"🔴 [CLAUDE] {exc} (tentativa {tentativa}).")
+        except (ValueError, KeyError, TypeError) as exc:  # JSON inválido ou incompleto
+            logger.error(f"🔴 [CLAUDE] Resposta fora do formato na tentativa {tentativa}: {exc}")
+
+        if tentativa < max_tentativas:
+            time.sleep(3)
+
+    mensagem_critica = "O Claude não concluiu o lote; ele será reanalisado na próxima execução."
+    logger.error(mensagem_critica)
+    if telemetria is not None:
+        telemetria["lotes_falhos"] = telemetria.get("lotes_falhos", 0) + 1
+    return gerar_fallback_lote(lote_json, horizonte, mensagem_critica)
+
+
+def chamar_cerebro_preditivo(
+    lote_json: list[dict], horizonte: str = "7d", telemetria: dict | None = None,
+) -> list[dict]:
+    """Envia o lote ao motor de IA escolhido (⚙️ Motor de IA / IA_PROVEDOR)."""
+    if provedor_ia.usando_claude():
+        return chamar_cerebro_claude(lote_json, horizonte, telemetria=telemetria)
+    return chamar_cerebro_openai_preditivo(lote_json, horizonte, telemetria=telemetria)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -695,7 +782,8 @@ def _executar_lote_adaptativo(
     convertendo uma falha dura em duas requisições menores que cabem no
     orçamento de tokens e no tempo de resposta.
     """
-    resultado = chamar_cerebro_openai_preditivo(lote, horizonte, telemetria=telemetria)
+    # LimiteDoPlanoAtingido sobe sem dividir: metade de um lote bate no mesmo limite.
+    resultado = chamar_cerebro_preditivo(lote, horizonte, telemetria=telemetria)
     total_vars = sum(len(p.get("variacoes_ativas", [])) for p in lote)
     lote_falhou = bool(resultado) and all(r.get("falha_modelo_externo") for r in resultado)
     if lote_falhou and total_vars > 1 and profundidade < 2:
@@ -754,7 +842,14 @@ def processar_em_lotes(
     progresso; sem callback, o módulo roda igualmente (CLI, testes, página 4).
     """
     config.horizonte_em_dias(horizonte)  # valida o horizonte
-    max_vars_por_lote = 5 if horizonte == "7d" else 2
+    # Plano Claude: lotes maiores = menos chamadas contra o limite do plano (o
+    # contexto do modelo comporta 8/4 SKUs com folga). OpenAI mantém os originais.
+    if provedor_ia.usando_claude():
+        max_vars_por_lote = 8 if horizonte == "7d" else 4
+    else:
+        max_vars_por_lote = 5 if horizonte == "7d" else 2
+    if telemetria is None:
+        telemetria = {}
     originais_por_chave = {
         (int(d["item_id"]), int(d["model_id"])): d
         for d in dossie_completo
@@ -831,17 +926,45 @@ def processar_em_lotes(
             logger.debug(f"Callback de progresso falhou (ignorado): {exc}")
 
     if lotes:
-        _notificar_progresso(0.0, "🚀 Iniciando auditoria C-Level por API OpenAI...")
+        _notificar_progresso(0.0, f"🚀 Iniciando auditoria C-Level com {provedor_ia.descricao_modelo(horizonte)}...")
         lotes_concluidos = 0
 
+        # Motivo para parar de chamar a IA nesta auditoria (teto de chamadas ou
+        # limite do plano). Os lotes seguintes viram fallback marcado e são
+        # analisados na próxima execução, sem repetir os já concluídos.
+        adiamento = None
         for lote in lotes:
-            try:
-                resultado_lote = _executar_lote_adaptativo(lote, horizonte, telemetria)
-            except Exception as e:
-                # Uma falha inesperada não pode abortar a auditoria inteira:
-                # o lote vira fallback marcado e será reanalisado na retomada.
-                logger.error(f"Erro inesperado no lote; aplicando fallback local: {e}")
-                resultado_lote = gerar_fallback_lote(lote, horizonte, f"Erro interno no lote: {e}")
+            if (
+                adiamento is None and provedor_ia.usando_claude()
+                and telemetria.get("chamadas", 0) >= provedor_ia.max_chamadas_auditoria()
+            ):
+                adiamento = (
+                    f"Teto de {provedor_ia.max_chamadas_auditoria()} chamadas ao plano Claude por "
+                    "auditoria atingido."
+                )
+                telemetria["motivo_adiamento"] = adiamento
+            if adiamento:
+                telemetria["lotes_adiados"] = telemetria.get("lotes_adiados", 0) + 1
+                resultado_lote = gerar_fallback_lote(
+                    lote, horizonte, f"{adiamento} Este produto será analisado na próxima execução.",
+                )
+            else:
+                try:
+                    resultado_lote = _executar_lote_adaptativo(lote, horizonte, telemetria)
+                except provedor_ia.LimiteDoPlanoAtingido as e:
+                    # Para na hora: cada nova chamada só bateria no mesmo limite.
+                    adiamento = str(e)
+                    telemetria["motivo_adiamento"] = adiamento
+                    telemetria["lotes_adiados"] = telemetria.get("lotes_adiados", 0) + 1
+                    logger.warning(f"⏸️ {e} Os lotes restantes ficam para a próxima execução.")
+                    resultado_lote = gerar_fallback_lote(
+                        lote, horizonte, f"{adiamento} Este produto será analisado na próxima execução.",
+                    )
+                except Exception as e:
+                    # Uma falha inesperada não pode abortar a auditoria inteira:
+                    # o lote vira fallback marcado e será reanalisado na retomada.
+                    logger.error(f"Erro inesperado no lote; aplicando fallback local: {e}")
+                    resultado_lote = gerar_fallback_lote(lote, horizonte, f"Erro interno no lote: {e}")
 
             resultados_do_lote = []
             for rec in resultado_lote:

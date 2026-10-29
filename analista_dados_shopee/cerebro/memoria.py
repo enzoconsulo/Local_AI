@@ -201,8 +201,9 @@ def calcular_fingerprint_entrada(dados: dict, horizonte: str) -> str:
         }
     else:
         selecionados = {k: dados.get(k) for k in sorted(CAMPOS_FINGERPRINT_7D)}
+    from cerebro import provedor_ia  # import tardio, como em config.modelo_para
     selecionados["CONFIGURACAO_IA"] = {
-        "provedor": "openai",
+        "provedor": provedor_ia.provedor(),
         "modelo": config.modelo_para(horizonte),
         "reasoning_effort": config.reasoning_para(horizonte),
         "versao_prompt": config.VERSAO_PROMPT,

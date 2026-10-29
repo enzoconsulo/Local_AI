@@ -2,7 +2,8 @@
 cerebro/consultor.py
 ====================
 Motor do Assistente de Dados (página 4): text-to-SQL somente leitura sobre o
-Data Warehouse + resposta executiva, via API OpenAI direta.
+Data Warehouse + resposta executiva, pelo motor de IA escolhido (seu plano
+Claude pelo Claude Code, ou a API OpenAI — ver provedor_ia.py).
 
 Sem Streamlit: a página injeta um callback de eventos (ao_evento) para exibir
 SQL, tabelas e erros; o mesmo motor roda em CLI e testes.
@@ -23,7 +24,7 @@ import requests
 from loguru import logger
 
 from utils.db_pool import get_connection
-from cerebro import config
+from cerebro import config, provedor_ia
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SCHEMA APRESENTADO AO MODELO (atualizado até a migração 14)
@@ -213,12 +214,40 @@ SCHEMA DO BANCO:
 MAX_MENSAGENS_HISTORICO = 12
 
 
+def _chamar_chat_claude(mensagens: list[dict], telemetria: dict | None) -> str:
+    """Turno do chat pelo plano Claude. `claude -p` responde a UMA mensagem,
+    então a conversa recente vai transcrita, na ordem, dentro dela."""
+    sistema = next((m["content"] for m in mensagens if m.get("role") == "system"), "")
+    conversa = [m for m in mensagens if m.get("role") != "system"][-MAX_MENSAGENS_HISTORICO:]
+    rotulos = {"user": "USUÁRIO", "assistant": "CONSULTOR"}
+    transcricao = "\n\n".join(
+        f"[{rotulos.get(m['role'], str(m['role']).upper())}]\n{m['content']}" for m in conversa
+    )
+    mensagem = (
+        f"Conversa até agora:\n\n{transcricao}\n\n"
+        "Responda como CONSULTOR à última mensagem do USUÁRIO, seguindo as regras do sistema."
+    )
+    try:
+        resposta = provedor_ia.chamar_claude(sistema, mensagem, uso="chat", timeout=240)
+    except provedor_ia.LimiteDoPlanoAtingido as exc:
+        return f"❌ {exc} Tente de novo mais tarde."
+    except provedor_ia.ErroProvedorIA as exc:
+        return f"❌ {exc}"
+    if telemetria is not None:
+        telemetria["chamadas"] = telemetria.get("chamadas", 0) + 1
+        telemetria["prompt_tokens"] = telemetria.get("prompt_tokens", 0) + resposta.tokens_entrada
+        telemetria["completion_tokens"] = telemetria.get("completion_tokens", 0) + resposta.tokens_saida
+    return resposta.texto
+
+
 def chamar_chat(mensagens: list[dict], telemetria: dict | None = None) -> str:
     """Chamada única ao modelo de chat, preservando SEMPRE o prompt de sistema.
 
     Retorna o texto do modelo ou uma mensagem iniciada por '❌' em falha —
     quem decide como exibir é a interface.
     """
+    if provedor_ia.usando_claude():
+        return _chamar_chat_claude(mensagens, telemetria)
     if not config.OPENAI_API_KEY or config.OPENAI_API_KEY.lower().startswith("sua_chave"):
         return "❌ OPENAI_API_KEY não configurada no CHAVES_DADOS.env."
 

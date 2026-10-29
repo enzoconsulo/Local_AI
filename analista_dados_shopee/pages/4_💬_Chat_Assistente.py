@@ -17,8 +17,8 @@ import streamlit as st
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
 
-from cerebro import consultor
-from cerebro.config import OPENAI_MODEL_CHAT
+from cerebro import consultor, provedor_ia
+from utils.painel_ia import painel_motor_ia
 
 st.set_page_config(page_title="Assistente IA", page_icon="💬", layout="wide")
 
@@ -27,6 +27,7 @@ aplicar_estilo()
 
 cabecalho("💬", "Assistente de Dados",
            "Pergunte em português; o consultor traduz para SQL somente-leitura, executa com segurança e responde de forma executiva.")
+painel_motor_ia("chat")
 
 # ─── Análises rápidas ─────────────────────────────────────────────────────────
 st.markdown("**⚡ Análises prontas** — um clique e a pergunta certa já vai para a IA:")
@@ -103,6 +104,6 @@ if input_final:
 telemetria = st.session_state.telemetria_chat
 if telemetria["chamadas"]:
     st.caption(
-        f"💰 Sessão: {telemetria['chamadas']} chamada(s) ao modelo {OPENAI_MODEL_CHAT} · "
+        f"💰 Sessão: {telemetria['chamadas']} chamada(s) a {provedor_ia.descricao_modelo('chat')} · "
         f"{telemetria['prompt_tokens']:,} tokens de entrada · {telemetria['completion_tokens']:,} de saída."
     )

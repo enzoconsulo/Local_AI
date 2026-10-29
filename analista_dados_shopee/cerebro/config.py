@@ -113,10 +113,17 @@ ACOES_VALIDAS = {
 
 
 def modelo_para(horizonte: str) -> str:
+    # Import tardio: provedor_ia não depende deste módulo para carregar.
+    from cerebro import provedor_ia
+    if provedor_ia.usando_claude():
+        return f"claude-code:{provedor_ia.modelo_claude(horizonte)}"
     return OPENAI_MODEL_7D if horizonte == "7d" else OPENAI_MODEL_30D
 
 
 def reasoning_para(horizonte: str) -> str:
+    from cerebro import provedor_ia
+    if provedor_ia.usando_claude():
+        return provedor_ia.esforco_claude(horizonte)
     return OPENAI_REASONING_7D if horizonte == "7d" else OPENAI_REASONING_30D
 
 

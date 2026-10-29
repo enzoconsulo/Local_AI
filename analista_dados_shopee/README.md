@@ -40,7 +40,9 @@ Para encerrar: `Ctrl+C` no terminal. O banco continua de pé no Docker (não per
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | ✅ | Banco local (qualquer valor seu — é criado do zero). |
 | `DB_HOST=localhost` / `DB_PORT=5433` | ✅ | Onde o app encontra o banco do Docker. |
 | `SHOPEE_PARTNER_ID` / `SHOPEE_PARTNER_KEY` / `SHOPEE_SHOP_ID` / `SHOPEE_REFRESH_TOKEN` | ✅ | Shopee Open API v2 (app *seller in-house* em open.shopee.com). O refresh token é renovado e regravado automaticamente. |
-| `OPENAI_API_KEY` | ✅ para Cérebro e Chat | Análise estratégica (pág. 3) e assistente de dados (pág. 4). |
+| `IA_PROVEDOR` | ✅ | Quem faz as análises do Cérebro e do Chat: `claude_code` (seu plano Claude pelo Claude Code instalado e logado — sem custo por uso) ou `openai` (API paga). Editável na tela **⚙️ Motor de IA** (páginas 3 e 4). |
+| `CLAUDE_MODEL_*` / `CLAUDE_EFFORT_*` / `CLAUDE_MAX_CHAMADAS_AUDITORIA` | ⬜ | Modelo e raciocínio por uso (7D, 30D, CHAT) e teto de chamadas por auditoria. Padrão: Sonnet em tudo, raciocínio alto só no 30d, teto de 25. |
+| `OPENAI_API_KEY` | só com `IA_PROVEDOR=openai` | Análise estratégica (pág. 3) e assistente de dados (pág. 4) pela API OpenAI. |
 | `OPENAI_MODEL_7D` / `OPENAI_MODEL_30D` | ✅ | Modelos por horizonte (padrão `gpt-5.6-luna` / `gpt-5.6-terra` — melhor custo/qualidade em jul/2026). |
 | `GROQ_API_KEY` | ⬜ | Legado do chat antigo; não é mais necessária para o fluxo principal. |
 | `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD` | ⬜ | Só se for usar o pgAdmin em `localhost:5050`. |
@@ -67,8 +69,8 @@ A Shopee só aceita chamadas de IPs cadastrados em **Open Platform Console > App
 | **📊 Visão Central** | Tudo num lugar: KPIs (bruto vs líquido real), funil com gargalo, saúde da conta (API), **boost grátis** (5 itens/4h), **voucher de checkout**, radar de views/curtidas e plano de ação com consequências e previsões. | **R$ 0** (100% local) |
 | **🏭 Engenharia de Fábrica** | Cadastro fino de materiais, máquinas, tempo de impressão e refugo (opcional — o mapeamento rápido fica na pág. 💰). | R$ 0 |
 | **🔄 Sincronização** | API (catálogo + pedidos + escrow) e upload das planilhas do Seller Center, com proteção contra arquivo repetido e períodos sobrepostos. | R$ 0 |
-| **🧠 Cérebro IA** | Auditoria estratégica via OpenAI com cache semântico (só paga pelo produto que MUDOU), previsões determinísticas como âncora e execução de ações aprovadas. | Pago por uso |
-| **💬 Chat Assistente** | Perguntas livres sobre seus dados (text-to-SQL read-only via OpenAI). | Pago por uso |
+| **🧠 Cérebro IA** | Auditoria estratégica com cache semântico (só analisa o produto que MUDOU), previsões determinísticas como âncora e execução de ações aprovadas. | Plano Claude (sem custo por uso) ou OpenAI (por uso) |
+| **💬 Chat Assistente** | Perguntas livres sobre seus dados (text-to-SQL read-only). | Plano Claude (sem custo por uso) ou OpenAI (por uso) |
 | **🧵 Mapeamento Insumos** | Vínculo detalhado insumo ↔ produto. | R$ 0 |
 | **💰 Lucro Real** | Mapeie custo em 2 passos (filamentos com preço do kg + peso por produto, com foto) e veja o lucro líquido real de cada produto com 1 botão de sync. | R$ 0 |
 
@@ -96,7 +98,8 @@ A página 2 avisa se o período novo cruzar um antigo.
 |---|---|
 | Script para em "Banco nao ficou saudavel" | Porta 5433 ocupada ou Docker sem recursos. Diagnóstico: `docker logs cofre_shopee`. |
 | `Falha ao conectar no PostgreSQL` nas páginas | Docker parado (`docker compose ps`) ou `DB_PORT`/senha do env não batem com o container. |
-| Páginas 3/4 pedem chave | Preencha `OPENAI_API_KEY` no `CHAVES_DADOS.env` e reinicie o script. |
+| Páginas 3/4 pedem chave ou login | Com `IA_PROVEDOR=claude_code`: rode `claude` no terminal e entre com a conta do plano (confira com `claude auth status`: `authMethod` precisa ser `claude.ai`). Com `openai`: preencha `OPENAI_API_KEY`. |
+| Auditoria com "⏸️ lote(s) adiado(s)" | O limite do plano Claude acabou ou o teto de chamadas por auditoria foi atingido. Rode de novo mais tarde: só os produtos que ficaram de fora são analisados. |
 | "As views de pré-agregação não existem" | Rode `python init_db/aplicar_migrations.py` (o `run_local.ps1` já faz isso a cada início). |
 | Log `Your refresh_token expired` | A autorização da loja morreu. Token próprio: rode `.\.venv\Scripts\python.exe pegar_token.py`. Com `TOKEN_VIA_PI`: reautorize no Pi (`bash scripts/atalhos/gerar_token.sh`). |
 | Log `O Pi (...) não emprestou o token` / `Não consegui pedir o token ao Pi` | `Permission denied` = chave SSH deste PC não autorizada no Pi; `timed out` = Pi desligado ou com outro IP na rede (fixe o IP no roteador ou use o IP do Tailscale). |
