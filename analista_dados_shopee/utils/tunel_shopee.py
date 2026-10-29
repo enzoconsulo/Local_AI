@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import requests
@@ -142,6 +143,45 @@ def ip_de_saida():
     return requests.get("https://api.ipify.org", proxies=proxies_shopee(), timeout=15).text.strip()
 
 
+# ==============================================================================
+# RELÓGIO — a assinatura da Shopee leva o horário do PC, e ela recusa ("Timestamp
+# is expired") quando ele está a mais de ~5 min do horário dela. Flagrado em
+# 29/10/2026: serviço de horário do Windows desativado, PC 12 min atrasado.
+# ==============================================================================
+URL_RELOGIO = "https://partner.shopeemobile.com"
+TOLERANCIA_RELOGIO_S = 120
+COMO_ACERTAR_RELOGIO = (
+    "Num PowerShell aberto como administrador:\n"
+    "    Set-Service w32time -StartupType Automatic\n"
+    "    Start-Service w32time\n"
+    '    w32tm /config /manualpeerlist:"a.st1.ntp.br b.st1.ntp.br pool.ntp.org" /syncfromflags:manual /update\n'
+    "    w32tm /resync /force"
+)
+
+
+def desvio_pelo_cabecalho(cabecalhos):
+    """Segundos que o relógio do PC está À FRENTE do servidor (negativo = atrasado),
+    pelo cabeçalho Date da resposta. None = cabeçalho ausente ou ilegível."""
+    try:
+        servidor = parsedate_to_datetime(cabecalhos.get("Date") or "")
+    except (TypeError, ValueError, IndexError):
+        return None
+    if servidor is None:
+        return None
+    return time.time() - servidor.timestamp()
+
+
+def medir_desvio_relogio():
+    """Desvio do relógio do PC em relação à Shopee, em segundos (ver desvio_pelo_cabecalho)."""
+    resposta = requests.head(URL_RELOGIO, proxies=proxies_shopee(), timeout=15, allow_redirects=False)
+    return desvio_pelo_cabecalho(resposta.headers)
+
+
+def descrever_desvio(desvio):
+    sentido = "atrasado" if desvio < 0 else "adiantado"
+    return f"o relógio deste PC está {abs(desvio) / 60:.0f} min {sentido} em relação à Shopee"
+
+
 if __name__ == "__main__":
     if not HOST:
         print("Túnel de IP fixo desligado (TUNEL_SSH_HOST vazio): a Shopee vê o IP da sua internet, que muda sozinho.")
@@ -157,3 +197,15 @@ if __name__ == "__main__":
         logger.warning(f"A Shopee vai ver o IP {ip}, não {HOST}: cadastre {ip} na IP Address Whitelist ou confira TUNEL_SSH_HOST.")
         sys.exit(1)
     logger.success(f"A Shopee vai ver o IP fixo {ip} (o cadastrado na whitelist).")
+
+    # Só avisa: o app compensa o desvio sozinho (shopee_core), então não é falha do túnel.
+    try:
+        desvio = medir_desvio_relogio()
+    except requests.exceptions.RequestException as exc:
+        logger.warning(f"Não consegui conferir o relógio com a Shopee: {exc}")
+        desvio = None
+    if desvio is not None and abs(desvio) >= TOLERANCIA_RELOGIO_S:
+        logger.warning(
+            f"⏰ {descrever_desvio(desvio).capitalize()}. O app compensa sozinho, "
+            f"mas acerte o horário do Windows:\n{COMO_ACERTAR_RELOGIO}"
+        )

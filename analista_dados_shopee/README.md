@@ -105,6 +105,7 @@ A página 2 avisa se o período novo cruzar um antigo.
 | Log `O Pi (...) não emprestou o token` / `Não consegui pedir o token ao Pi` | `Permission denied` = chave SSH deste PC não autorizada no Pi; `timed out` = Pi desligado ou com outro IP na rede (fixe o IP no roteador ou use o IP do Tailscale). |
 | Log `Request Source IP (...) is undeclared` | A chamada saiu por um IP fora da whitelist. Preencha `TUNEL_SSH_HOST`; se já está preenchido, confira se o IP da VM está na whitelist. |
 | Lucro de um produto parece errado | Abra **💰 Lucro Real › 🔍 Raio-X**: a conta mostra o custo por peça e cada desconto da Shopee até o lucro. Lucro = repasse + recarga de anúncios − fabricação − gasto real de anúncios (a recarga é saldo de anúncios, não custo). Se a regra do repasse mudar: `python workers/sync_pedidos.py --reprocessar-repasses` (recalcula sem API). |
+| `Timestamp is expired` / aviso ⏰ de relógio | O relógio do PC está fora do horário da Shopee (ela recusa acima de ~5 min). O app mede o desvio e compensa sozinho, mas acerte o Windows: num PowerShell de administrador, `Set-Service w32time -StartupType Automatic; Start-Service w32time; w32tm /resync /force`. |
 | Log `Túnel de IP fixo não subiu` | Veja `tunel_shopee.log`: `Permission denied` = chave errada ou não autorizada na VM; `bad permissions` = chave acessível por outros usuários; `timed out` = VM desligada ou porta 22 bloqueada. |
 
 ---

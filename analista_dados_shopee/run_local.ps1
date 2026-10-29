@@ -116,6 +116,17 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "      [AVISO] Tunel de IP fixo com problema: a sincronizacao com a Shopee vai falhar ate resolver (veja acima e tunel_shopee.log)." -ForegroundColor Yellow
 }
 
+# Relogio: a Shopee recusa chamadas com o horario do PC errado ("Timestamp is
+# expired"). Com o servico de horario do Windows desativado, o relogio atrasa
+# sem nunca acertar. O tunel_shopee.py acima ja avisa se o desvio estiver alto.
+$servicoHorario = Get-Service w32time -ErrorAction SilentlyContinue
+if ($servicoHorario -and ($servicoHorario.StartType -eq 'Disabled' -or $servicoHorario.Status -ne 'Running')) {
+    Write-Host "      [AVISO] O servico de horario do Windows (w32time) esta $($servicoHorario.Status)/$($servicoHorario.StartType): o relogio do PC vai se perder." -ForegroundColor Yellow
+    Write-Host "      O app compensa sozinho, mas acerte. Num PowerShell aberto como administrador:" -ForegroundColor Yellow
+    Write-Host "        Set-Service w32time -StartupType Automatic; Start-Service w32time" -ForegroundColor Yellow
+    Write-Host "        w32tm /config /manualpeerlist:`"a.st1.ntp.br b.st1.ntp.br pool.ntp.org`" /syncfromflags:manual /update; w32tm /resync /force" -ForegroundColor Yellow
+}
+
 & $python manter_token.py
 if ($LASTEXITCODE -ne 0) {
     Write-Host "      [AVISO] Sem token valido da Shopee: a sincronizacao vai falhar ate resolver (veja acima)." -ForegroundColor Yellow

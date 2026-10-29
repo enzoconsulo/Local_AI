@@ -36,6 +36,33 @@ TOKEN_VIA_PI_COMANDO = os.getenv("TOKEN_VIA_PI_COMANDO", "").strip() or (
     "cd ~/shopee-rodizio && .venv/bin/python scripts/emprestar_token.py config.toml --minutos 60"
 )
 
+# Relógio: quando a Shopee recusa o timestamp da assinatura, o desvio do PC é
+# medido pelo cabeçalho Date da própria resposta e as assinaturas seguintes usam
+# o horário corrigido (agora_shopee). aviso_relogio() leva o desvio para a UI.
+_DESVIO_RELOGIO_S = 0.0
+# Causa da última falha de chamar_shopee_api, em português, para a UI mostrar.
+_ULTIMO_ERRO = None
+
+
+def agora_shopee():
+    """Timestamp para assinar chamadas: o horário do PC corrigido pelo desvio medido."""
+    return int(time.time() - _DESVIO_RELOGIO_S)
+
+
+def aviso_relogio():
+    """Texto de aviso quando o relógio do PC está fora do horário da Shopee (None = em dia)."""
+    if abs(_DESVIO_RELOGIO_S) < tunel_shopee.TOLERANCIA_RELOGIO_S:
+        return None
+    return (
+        f"⏰ {tunel_shopee.descrever_desvio(_DESVIO_RELOGIO_S).capitalize()}. O app compensou "
+        "sozinho e as chamadas seguiram, mas acerte o horário do Windows para não depender disso."
+    )
+
+
+def ultimo_erro_shopee():
+    """Causa da última chamada à Shopee que falhou (None = nenhuma falha registrada)."""
+    return _ULTIMO_ERRO
+
 # ==============================================================================
 # MOTOR DE AUTENTICAÇÃO INTELIGENTE (Auto-Renovação de Token)
 #
@@ -165,7 +192,7 @@ def obter_access_token():
                 return None
 
             path = "/api/v2/auth/access_token/get"
-            timestamp = int(time.time())
+            timestamp = agora_shopee()
             base_string = f"{PARTNER_ID}{path}{timestamp}".encode('utf-8')
             sign = hmac.new(PARTNER_KEY, base_string, hashlib.sha256).hexdigest()
 
@@ -206,7 +233,7 @@ def obter_access_token():
 
 def gerar_assinatura(path, access_token):
     """Gera a assinatura criptografada obrigatória da Shopee v2."""
-    timestamp = int(time.time())
+    timestamp = agora_shopee()
     base_string = f"{PARTNER_ID}{path}{timestamp}{access_token}{SHOP_ID}".encode('utf-8')
     sign = hmac.new(PARTNER_KEY, base_string, hashlib.sha256).hexdigest()
     return timestamp, sign
@@ -249,6 +276,41 @@ def _descartar_token_em_cache():
         _CACHE_EXPIRATION = 0
 
 
+def _corpo_json(response):
+    try:
+        corpo = response.json()
+    except ValueError:
+        return {}
+    return corpo if isinstance(corpo, dict) else {}
+
+
+def _timestamp_recusado(corpo):
+    return bool(corpo.get("error")) and "timestamp" in str(corpo.get("message", "")).lower()
+
+
+def _corrigir_relogio(response):
+    """Mede o desvio pela resposta que recusou o timestamp. True = desvio novo
+    aplicado, vale repetir; False = sem cabeçalho Date ou já estava corrigido."""
+    global _DESVIO_RELOGIO_S
+    desvio = tunel_shopee.desvio_pelo_cabecalho(response.headers)
+    if desvio is None or abs(desvio - _DESVIO_RELOGIO_S) < 5:
+        return False
+    _DESVIO_RELOGIO_S = desvio
+    logger.warning(
+        f"⏰ A Shopee recusou o horário da assinatura: {tunel_shopee.descrever_desvio(desvio)}. "
+        "Compensando nas próximas chamadas; acerte o horário do Windows."
+    )
+    return True
+
+
+def _falhar(mensagem):
+    """Registra a causa da falha para a UI (ultimo_erro_shopee) e devolve None."""
+    global _ULTIMO_ERRO
+    _ULTIMO_ERRO = mensagem
+    logger.error(mensagem)
+    return None
+
+
 def chamar_shopee_api(path, params=None, method="GET", payload=None, max_tentativas=3):
     """
     Motor centralizado de chamadas para a Shopee API v2, com retry disciplinado:
@@ -262,17 +324,16 @@ def chamar_shopee_api(path, params=None, method="GET", payload=None, max_tentati
     """
     metodo = method.upper()
     if metodo not in {"GET", "POST"}:
-        logger.error(f"Método HTTP não suportado: {method}")
-        return None
+        return _falhar(f"Método HTTP não suportado: {method}")
 
     url = f"{BASE_URL}{path}"
 
     for tentativa in range(1, max_tentativas + 1):
         access_token = obter_access_token()
         if not access_token:
-            return None
+            return _falhar("Sem token válido da Shopee (o motivo está no log do terminal, logo acima).")
         if not tunel_shopee.garantir_tunel():
-            return None
+            return _falhar("O túnel de IP fixo está fora do ar (detalhes em tunel_shopee.log).")
 
         timestamp, sign = gerar_assinatura(path, access_token)
         params_completos = dict(params or {})
@@ -295,8 +356,7 @@ def chamar_shopee_api(path, params=None, method="GET", payload=None, max_tentati
                 logger.warning(f"Falha de rede em {path} (tentativa {tentativa}/{max_tentativas}); nova tentativa em {espera}s: {e}")
                 time.sleep(espera)
                 continue
-            logger.error(f"Falha de Rede ao tentar {metodo} em {path}: {e}")
-            return None
+            return _falhar(f"Falha de rede ao tentar {metodo} em {path}: {e}")
 
         # 🤫 SILENCIADOR DE MÓDULOS OPCIONAIS — Insight, Ads e Account Health
         # dependem de permissão marcada no console da Open Platform (apps
@@ -324,20 +384,28 @@ def chamar_shopee_api(path, params=None, method="GET", payload=None, max_tentati
             _descartar_token_em_cache()
             continue
 
+        # Horário recusado: a Shopee não processou nada, então é seguro repetir até
+        # em POST, já com o relógio corrigido pelo horário da própria resposta.
+        corpo = _corpo_json(response)
+        if _timestamp_recusado(corpo):
+            if tentativa < max_tentativas and _corrigir_relogio(response):
+                continue
+            desvio = tunel_shopee.desvio_pelo_cabecalho(response.headers)
+            causa = tunel_shopee.descrever_desvio(desvio) if desvio is not None else "o relógio deste PC está errado"
+            return _falhar(f"A Shopee recusou o horário da chamada ({path}): {causa}. Acerte o horário do Windows.")
+
         try:
             response.raise_for_status()
             data = response.json()
         except (requests.exceptions.RequestException, ValueError) as e:
-            logger.error(f"Resposta inválida da Shopee em {metodo} {path}: {e}")
-            return None
+            return _falhar(f"Resposta inválida da Shopee em {metodo} {path}: {e}")
 
         if data.get("error"):
-            logger.error(f"Shopee API Erro ({path}): {data.get('error')} - {data.get('message')}")
-            return None
+            return _falhar(f"Shopee API Erro ({path}): {data.get('error')} - {data.get('message')}")
 
         return data.get("response", {})
 
-    return None
+    return _falhar(f"A Shopee não respondeu {path} depois de {max_tentativas} tentativas.")
     
 # ==============================================================================
 # FUNÇÕES ATUADORAS (Usadas pelo Cérebro IA para manipular a loja)

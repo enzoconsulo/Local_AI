@@ -41,7 +41,12 @@ def obter_lista_itens():
         if not response.get("has_next_page"): break
         offset += page_size
 
-    logger.success(f"Foram encontrados {len(item_ids)} anúncios raiz.")
+    if listagem_completa:
+        logger.success(f"Foram encontrados {len(item_ids)} anúncios raiz.")
+    elif item_ids:
+        logger.warning(f"Listagem incompleta: só {len(item_ids)} anúncios raiz lidos antes da falha.")
+    else:
+        logger.error("A listagem do catálogo falhou antes do primeiro anúncio (causa no erro acima).")
     return item_ids, listagem_completa
 
 def obter_detalhes_e_variacoes(item_ids):

@@ -30,6 +30,8 @@ from workers.sync_catalogo import sincronizar_catalogo
 from workers.sync_pedidos import detalhar_repasses_pendentes, sincronizar_pedidos
 from workers.sync_pos_venda import sincronizar_pos_venda
 from utils.db_pool import get_connection
+from utils.shopee_core import aviso_relogio, ultimo_erro_shopee
+from utils.tunel_shopee import COMO_ACERTAR_RELOGIO
 
 st.set_page_config(page_title="Sincronização do DW", page_icon="🔄", layout="wide")
 
@@ -132,6 +134,12 @@ with aba_principal:
                 "O rateio diário dos dias em comum será sobrescrito pelo novo arquivo — prefira períodos consistentes (ex.: sempre semanas fechadas ou sempre 1 dia)."
             )
 
+    def mostrar_aviso_relogio():
+        aviso = aviso_relogio()
+        if aviso:
+            st.warning(aviso)
+            st.code(COMO_ACERTAR_RELOGIO, language="powershell")
+
     if st.button("🚀 3. Iniciar sincronização completa (API + planilha)", type="primary", use_container_width=True, disabled=not datas_validas):
 
         agora = datetime.now()
@@ -143,7 +151,12 @@ with aba_principal:
             if res_cat["status"] == "sucesso":
                 status.update(label=f"Catálogo atualizado! ({res_cat['produtos']} mapeados)", state="complete")
             else:
-                status.update(label="Falha na API de catálogo.", state="error"); st.stop()
+                causa = ultimo_erro_shopee() or "veja o log do terminal"
+                status.update(label=f"Falha na API de catálogo: {causa}", state="error")
+                st.error(f"Falha na API de catálogo: {causa}")
+                if "horário" in causa:
+                    st.code(COMO_ACERTAR_RELOGIO, language="powershell")
+                st.stop()
 
         with st.status("2. Conectando API: Pedidos e Lucro (Escrow)...", expanded=True) as status:
             if ultima_sync_pedidos:
@@ -166,7 +179,8 @@ with aba_principal:
                         ultimo_fim_ok = fim_bloco
                     else:
                         st.error(
-                            f"Erro na API de Pedidos no bloco {inicio_bloco:%d/%m} a {fim_bloco:%d/%m}. "
+                            f"Erro na API de Pedidos no bloco {inicio_bloco:%d/%m} a {fim_bloco:%d/%m}: "
+                            f"{ultimo_erro_shopee() or 'veja o log do terminal'}. "
                             "O avanço até o último bloco concluído foi preservado — rode novamente para continuar de onde parou."
                         )
                         break
@@ -232,6 +246,7 @@ with aba_principal:
                 else:
                     status.update(label=f"Falha no CSV: {msg}", state="error"); st.stop()
 
+        mostrar_aviso_relogio()
         st.balloons()
         st.success("🎉 Sincronização API finalizada! Sua base operacional e financeira está atualizada.")
 
@@ -325,6 +340,7 @@ with aba_global:
     st.markdown("### 📈 Saúde Geral da Loja (Dashboard Macro)")
     st.markdown("Captura as métricas totais da loja para comparar o faturamento geral com os custos e o tráfego total.")
     st.caption("🛡️ Se subir os mesmos dias de novo, o Data Warehouse apenas sobrescreve com os dados mais consolidados.")
+    st.caption("📅 Aqui não tem calendário: a planilha de Visão Geral traz a data em cada linha, então o período é lido do próprio arquivo. Escolha o período no calendário da Shopee, na hora de exportar.")
 
     with st.expander("📥 Como extrair a Visão Geral (passo a passo)"):
         st.markdown("""
