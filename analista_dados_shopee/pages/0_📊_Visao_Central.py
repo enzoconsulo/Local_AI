@@ -163,29 +163,41 @@ def carregar_radar_api():
 @st.cache_data(ttl=120, show_spinner=False)
 def carregar_economia_real():
     """Números que são SEUS de verdade: cesta que o cliente paga (itens do
-    pedido) e repasse líquido do escrow — nada de 'Vendas (BRL)' bruto da
-    planilha, que embute taxas que você nunca recebe."""
+    pedido), repasse que a Shopee paga e lucro por pedido — nada de 'Vendas
+    (BRL)' bruto da planilha, que embute taxas que você nunca recebe.
+
+    Tudo por PEDIDO a partir de vw_financeiro_item_pedido (migração 19): a
+    média antiga juntava o repasse com os itens e pesava em dobro os pedidos
+    com vários itens. Lucro antes de anúncios = repasse + recarga de anúncios
+    − custo de fabricação."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
+                WITH pedidos AS (
+                    SELECT order_sn,
+                           SUM(valor_item)                 AS cesta,
+                           BOOL_AND(origem_repasse = 'REAL') AS pago,
+                           SUM(repasse)                    AS repasse,
+                           SUM(lucro_antes_ads)            AS lucro_antes_ads
+                    FROM vw_financeiro_item_pedido
+                    WHERE data >= CURRENT_DATE - 30
+                    GROUP BY order_sn
+                )
                 SELECT
-                    COUNT(DISTINCT p.order_sn)                                     AS pedidos_30d,
-                    SUM(i.preco_praticado * i.quantidade)
-                        / NULLIF(COUNT(DISTINCT p.order_sn), 0)                    AS cesta_media_cliente,
-                    COUNT(DISTINCT r.order_sn)                                     AS pedidos_liquidados,
-                    AVG(r.lucro_liquido_absoluto)                                  AS repasse_medio_pedido
-                FROM fato_pedidos_venda p
-                JOIN fato_itens_pedido i  ON i.order_sn = p.order_sn
-                LEFT JOIN fato_repasse_escrow r ON r.order_sn = p.order_sn
-                WHERE p.data_hora_criacao >= CURRENT_DATE - 30
-                  AND p.status_pedido NOT IN ('CANCELLED','CANCELED','CANCELLED_BY_BUYER','IN_CANCEL');
+                    COUNT(*)                                   AS pedidos_30d,
+                    AVG(cesta)                                 AS cesta_media_cliente,
+                    COUNT(*) FILTER (WHERE pago)               AS pedidos_liquidados,
+                    AVG(repasse) FILTER (WHERE pago)           AS repasse_medio_pedido,
+                    AVG(lucro_antes_ads) FILTER (WHERE pago)   AS lucro_medio_pedido
+                FROM pedidos;
             """)
-            pedidos_30d, cesta, liquidados, repasse_medio = cur.fetchone()
+            pedidos_30d, cesta, liquidados, repasse_medio, lucro_medio = cur.fetchone()
     return {
         "pedidos_30d": int(pedidos_30d or 0),
         "cesta_media_cliente": float(cesta) if cesta is not None else None,
         "pedidos_liquidados": int(liquidados or 0),
         "repasse_medio_pedido": float(repasse_medio) if repasse_medio is not None else None,
+        "lucro_medio_pedido": float(lucro_medio) if lucro_medio is not None else None,
     }
 
 
@@ -293,11 +305,14 @@ for aba_termo, dias_termo in ((termo7, 7), (termo30, 30)):
         c1.metric("🛍️ Vendas BRUTAS", _fmt_moeda(kpi["receita"] or 0), _delta(kpi["receita"], kpi["receita_ant"]))
         c1.caption("o que o CLIENTE pagou — não é o que você recebe")
         if economia["repasse_medio_pedido"] is not None:
-            c2.metric("💵 Ganho líquido/pedido", _fmt_moeda(economia["repasse_medio_pedido"]))
-            c2.caption(f"média REAL dos {economia['pedidos_liquidados']} pedidos já liquidados no escrow (30d)")
+            c2.metric("💵 Repasse/pedido", _fmt_moeda(economia["repasse_medio_pedido"]))
+            c2.caption(
+                f"o que a Shopee pagou, média dos {economia['pedidos_liquidados']} pedidos pagos em 30d — "
+                "ainda sem fabricação e anúncios (conta aberta em 💰 Lucro Real)"
+            )
         else:
-            c2.metric("💵 Ganho líquido/pedido", "—")
-            c2.caption("nenhum escrow liquidado ainda — sincronize pedidos na página 2")
+            c2.metric("💵 Repasse/pedido", "—")
+            c2.caption("nenhum repasse pago ainda — sincronize pedidos na página 2")
         c3.metric("📦 Pedidos", int(kpi["pedidos"] or 0), _delta(kpi["pedidos"], kpi["pedidos_ant"]))
         c4.metric("👀 Visitantes", int(kpi["visitantes"] or 0), _delta(kpi["visitantes"], kpi["visitantes_ant"]))
         c5.metric("🎯 Conversão média", f"{kpi['conversao'] or 0:.2f}%", _delta(kpi["conversao"], kpi["conversao_ant"]))
@@ -567,38 +582,41 @@ visível no checkout é o empurrão clássico para quem parou na última etapa.
 
 **Dois números diferentes comandam a conta (não confundir):**
 o **gasto mínimo** do cupom é sobre o que o **cliente paga** na cesta; já o **desconto sai do
-SEU repasse** — então quem limita o tamanho do desconto é o seu ganho líquido por pedido,
-não o preço de venda.
+SEU lucro** — então quem limita o tamanho do desconto é o seu lucro por pedido (repasse da
+Shopee + recarga de anúncios − custo de fabricação), não o preço de venda nem o repasse.
 """)
 
-# Base 100% real: cesta média vinda dos itens de pedido; ganho líquido vindo do
-# escrow liquidado. Nada de "Vendas (BRL)" bruto da planilha da Shopee.
+# Base 100% real: cesta média vinda dos itens de pedido; lucro por pedido vindo
+# do repasse pago + recarga de anúncios − fabricação. Nada de "Vendas (BRL)"
+# bruto da planilha da Shopee.
 cesta_real = economia["cesta_media_cliente"]
 repasse_real = economia["repasse_medio_pedido"]
+lucro_real = economia["lucro_medio_pedido"]
 base_confiavel = economia["pedidos_liquidados"] >= 10
 
 col_e1, col_e2 = st.columns(2)
 col_e1.metric("🛒 Cesta média (o que o cliente paga)",
               _fmt_moeda(cesta_real) if cesta_real is not None else "—")
 col_e1.caption(f"média real dos {economia['pedidos_30d']} pedidos de 30d (soma dos itens, sem frete)")
-col_e2.metric("💵 Ganho líquido médio por pedido",
-              _fmt_moeda(repasse_real) if repasse_real is not None else "—")
+col_e2.metric("💵 Lucro médio por pedido (antes de anúncios)",
+              _fmt_moeda(lucro_real) if lucro_real is not None else "—")
 col_e2.caption(
-    f"repasse REAL do escrow — {economia['pedidos_liquidados']} pedidos liquidados em 30d"
+    (f"repasse de {_fmt_moeda(repasse_real)} + recarga de anúncios − fabricação — " if repasse_real is not None else "")
+    + f"{economia['pedidos_liquidados']} pedidos pagos em 30d"
     + ("" if base_confiavel else " ⚠️ amostra pequena, confira o valor abaixo")
 )
 
-if repasse_real is None or not base_confiavel:
+if lucro_real is None or not base_confiavel:
     st.warning(
-        "Poucos pedidos liquidados no escrow para calcular seu ganho médio com segurança. "
+        "Poucos pedidos pagos pela Shopee para calcular seu lucro médio com segurança. "
         "Informe abaixo o valor que você conhece da sua operação — nada será assumido."
     )
 ganho_liquido_pedido = st.number_input(
-    "Seu ganho líquido médio por pedido (R$) — usado em toda a conta abaixo:",
+    "Seu lucro médio por pedido antes de anúncios (R$) — usado em toda a conta abaixo:",
     min_value=0.5,
-    value=float(round(repasse_real, 2)) if repasse_real else 9.0,
+    value=float(round(lucro_real, 2)) if lucro_real and lucro_real >= 0.5 else 9.0,
     step=0.5,
-    help="Pré-preenchido com a média real do escrow quando ela existe; ajuste se souber melhor.",
+    help="Pré-preenchido com a média real (repasse + recarga de anúncios − fabricação) quando ela existe; ajuste se souber melhor.",
 )
 
 vouchers_ativos = listar_vouchers("ongoing")

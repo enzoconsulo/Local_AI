@@ -72,7 +72,7 @@ A Shopee só aceita chamadas de IPs cadastrados em **Open Platform Console > App
 | **🧠 Cérebro IA** | Auditoria estratégica com cache semântico (só analisa o produto que MUDOU), previsões determinísticas como âncora e execução de ações aprovadas. | Plano Claude (sem custo por uso) ou OpenAI (por uso) |
 | **💬 Chat Assistente** | Perguntas livres sobre seus dados (text-to-SQL read-only). | Plano Claude (sem custo por uso) ou OpenAI (por uso) |
 | **🧵 Mapeamento Insumos** | Vínculo detalhado insumo ↔ produto. | R$ 0 |
-| **💰 Lucro Real** | Mapeie custo em 2 passos (filamentos com preço do kg + peso por produto, com foto) e veja o lucro líquido real de cada produto com 1 botão de sync. | R$ 0 |
+| **💰 Lucro Real** | Mapeie custo em 2 passos (filamentos com preço do kg + peso por produto, com foto), veja o lucro real de cada produto e abra a conta no **🔍 Raio-X**: custo por peça (material, máquina, embalagem, perda), cada desconto da Shopee linha a linha até o lucro, e pedido a pedido. | R$ 0 |
 
 ---
 
@@ -104,6 +104,7 @@ A página 2 avisa se o período novo cruzar um antigo.
 | Log `Your refresh_token expired` | A autorização da loja morreu. Token próprio: rode `.\.venv\Scripts\python.exe pegar_token.py`. Com `TOKEN_VIA_PI`: reautorize no Pi (`bash scripts/atalhos/gerar_token.sh`). |
 | Log `O Pi (...) não emprestou o token` / `Não consegui pedir o token ao Pi` | `Permission denied` = chave SSH deste PC não autorizada no Pi; `timed out` = Pi desligado ou com outro IP na rede (fixe o IP no roteador ou use o IP do Tailscale). |
 | Log `Request Source IP (...) is undeclared` | A chamada saiu por um IP fora da whitelist. Preencha `TUNEL_SSH_HOST`; se já está preenchido, confira se o IP da VM está na whitelist. |
+| Lucro de um produto parece errado | Abra **💰 Lucro Real › 🔍 Raio-X**: a conta mostra o custo por peça e cada desconto da Shopee até o lucro. Lucro = repasse + recarga de anúncios − fabricação − gasto real de anúncios (a recarga é saldo de anúncios, não custo). Se a regra do repasse mudar: `python workers/sync_pedidos.py --reprocessar-repasses` (recalcula sem API). |
 | Log `Túnel de IP fixo não subiu` | Veja `tunel_shopee.log`: `Permission denied` = chave errada ou não autorizada na VM; `bad permissions` = chave acessível por outros usuários; `timed out` = VM desligada ou porta 22 bloqueada. |
 
 ---
@@ -123,7 +124,7 @@ analista_dados_shopee/
 │   ├── 3_🧠_Cerebro_IA.py
 │   ├── 4_💬_Chat_Assistente.py
 │   ├── 5_🧵_Mapeamento_Insumos.py
-│   └── 6_💰_Lucro_Real.py     # mapeamento de custo em 2 passos + lucro por produto
+│   └── 6_💰_Lucro_Real.py     # custo em 2 passos + lucro por produto + Raio-X (conta aberta)
 ├── cerebro/                   # núcleo analítico (sem Streamlit): dossiê, heurísticas,
 │   │                          # motor OpenAI, cache semântico, atuador, consultor SQL
 ├── workers/
@@ -132,7 +133,8 @@ analista_dados_shopee/
 │   ├── sync_saude_conta.py    # saúde da conta + views/curtidas via API
 │   └── importar_planilhas.py  # processadores das planilhas do Seller Center
 ├── utils/                     # pool de conexões, motor da Shopee API v2, túnel de IP fixo
-├── init_db/                   # migrações 01..15 + aplicar_migrations.py (idempotente)
+├── init_db/                   # migrações 01..19 + aplicar_migrations.py (idempotente)
+│                              # 18: repasse detalhado · 19: custo por peça e financeiro por item (views)
 └── requirements.txt
 ```
 

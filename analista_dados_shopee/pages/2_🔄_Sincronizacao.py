@@ -27,7 +27,7 @@ load_dotenv(ROOT_DIR / "CHAVES_DADOS.env")
 
 # Importação dos módulos da API
 from workers.sync_catalogo import sincronizar_catalogo
-from workers.sync_pedidos import sincronizar_pedidos
+from workers.sync_pedidos import detalhar_repasses_pendentes, sincronizar_pedidos
 from workers.sync_pos_venda import sincronizar_pos_venda
 from utils.db_pool import get_connection
 
@@ -179,10 +179,18 @@ with aba_principal:
                     registrar_sincronizacao('PEDIDOS', ultima_sync_pedidos or dt_inicio_pedidos, ultimo_fim_ok, 'SUCESSO', total_pedidos)
 
                 sync_completo = bool(blocos) and ultimo_fim_ok == blocos[-1][1]
+                # Pedidos antigos, gravados antes do detalhamento do repasse
+                # (migração 18), não voltam na janela por update_time: busca o
+                # detalhe deles aqui. Sem pendentes, não chama a API.
+                res_detalhe = detalhar_repasses_pendentes()
+                sufixo_detalhe = (
+                    f", {res_detalhe['detalhados']} repasse(s) antigo(s) detalhado(s)"
+                    if res_detalhe["pendentes"] else ""
+                )
                 if sync_completo:
-                    status.update(label=f"Motor Financeiro atualizado! ({total_pedidos} pedidos consolidados)", state="complete")
+                    status.update(label=f"Motor Financeiro atualizado! ({total_pedidos} pedidos consolidados{sufixo_detalhe})", state="complete")
                 else:
-                    status.update(label=f"Sincronização de pedidos parcial ({total_pedidos} pedidos salvos). Rode novamente para completar.", state="error")
+                    status.update(label=f"Sincronização de pedidos parcial ({total_pedidos} pedidos salvos{sufixo_detalhe}). Rode novamente para completar.", state="error")
 
         with st.status("3. Pós-venda via API: comprador, preparo, entrega, devoluções e promoções...", expanded=True) as status:
             barra_pos_venda = st.progress(0.0, text="Iniciando pós-venda...")

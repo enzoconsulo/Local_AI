@@ -32,6 +32,8 @@ def _linha_base(**overrides) -> dict:
         "vendas_semana_passada": 5, "pedidos_7d": 7, "cancelamentos_7d": 0,
         "pedidos_30d": 15, "cancelamentos_30d": 1, "vendas_30d_item_total": 30,
         "receita_liquida_7d": 150.0, "receita_liquida_30d": 500.0, "taxa_shopee_unitaria": 9.0,
+        "lucro_antes_ads_7d": 100.0, "lucro_antes_ads_30d": 300.0,
+        "recarga_ads_7d": 8.0, "recarga_ads_30d": 25.0, "ads_importados_recentes": True,
         "impressoes_org": 400, "registros_impressoes_org": 7,
         "cliques_org": 40, "registros_cliques_org": 7,
         "rejeicao_media": 25.0, "impressoes_ads": 300, "registros_impressoes_ads": 7,
@@ -106,6 +108,22 @@ def test_derivados_de_correlacao_profunda():
     assert d["POSVENDA_devolucoes_90d"] == 1
     assert d["PROMO_ativa_tipo"] == "DESCONTO"
     assert d["PROMO_ativa_fim"] == "2026-07-25T23:59:00"
+
+
+def test_anuncios_entram_uma_vez_no_lucro():
+    # lucro_antes_ads já devolveu a recarga; o custo de anúncio é o gasto real
+    # rateado (peso 0,5 → 12 × 0,5 = 6 em 7d; 40 × 0,5 = 20 em 30d).
+    d = _montar_dados_variacao(_linha_base())
+    assert d["lucro_liquido_real_7d"] == 94.0
+    assert d["lucro_liquido_real_30d"] == 280.0
+    assert d["FINANCEIRO_custo_ads_30d"] == 20.0
+    assert d["FINANCEIRO_fonte_custo_ads"] == "gasto_importado"
+
+    # Sem planilha de anúncios recente, a recarga descontada do repasse é o custo
+    sem_planilha = _montar_dados_variacao(_linha_base(ads_importados_recentes=False))
+    assert sem_planilha["lucro_liquido_real_7d"] == 92.0
+    assert sem_planilha["lucro_liquido_real_30d"] == 275.0
+    assert sem_planilha["FINANCEIRO_fonte_custo_ads"] == "recarga_do_repasse"
 
 
 def test_pos_venda_sem_dados_fica_none():
@@ -237,6 +255,7 @@ def test_payload_7d_compacto_com_sinais():
 
 if __name__ == "__main__":
     test_derivados_de_correlacao_profunda()
+    test_anuncios_entram_uma_vez_no_lucro()
     test_escudo_api_com_um_snapshot()
     test_item_sem_correlacoes_fica_none()
     test_pos_venda_sem_dados_fica_none()

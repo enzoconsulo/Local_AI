@@ -40,6 +40,22 @@ VIEWS DE AGREGAÇÃO (prefira-as para janelas de tempo — já tratam cancelamen
   taxa_rejeicao, granularidade_trafego, impressoes_ads, cliques_ads, investimento_ads, gmv_ads,
   conversoes_ads, itens_vendidos_ads, granularidade_ads)
   → funil diário orgânico + pago por item (anúncio).
+- vw_custo_fabricacao_variacao (item_id, model_id, produto, variacao, material, unidade_material, preco_material,
+  preco_material_por_grama, peso_gramas, maquina, custo_maquina_hora, tempo_impressao_minutos, perda_percentual,
+  custo_material, custo_maquina, custo_embalagem, custo_perda, custo_total)
+  → custo de fabricação por PEÇA, UMA linha por variação mapeada. É a fonte única do custo: não recalcule.
+- vw_financeiro_item_pedido (order_sn, data DATE, data_hora_criacao, status_pedido, item_id, model_id, quantidade,
+  preco_unitario, valor_item, repasse_liquidado, repasse_detalhado, origem_repasse, comissao_shopee, taxa_servico,
+  taxa_transacao, comissao_afiliado, cupom_vendedor, seguro_frete, frete_liquido_vendedor, reembolso_devolucao,
+  custo_frete_reverso, outros_ajustes, ajuste_pos_venda, recarga_ads, repasse, retido_shopee, houve_devolucao,
+  custo_mapeado, custo_fabricacao_unitario, custo_fabricacao, lucro_antes_ads)
+  → UMA linha por item de pedido não cancelado: descontos da Shopee já rateados pelo valor do item, repasse e
+    custo de fabricação já multiplicado pela quantidade. Pode somar qualquer coluna livremente (não há duplicação).
+    origem_repasse: 'REAL' (a Shopee já pagou) ou 'ESTIMADO_PELO_PRODUTO' / 'ESTIMADO_PELA_LOJA' /
+    'ESTIMADO_PADRAO' (pedido não liquidado: descontos detalhados ficam NULL e retido_shopee é estimado).
+    recarga_ads = parte do preço descontada para o SALDO de anúncios (não é o custo do anúncio).
+    retido_shopee = valor_item − repasse − recarga_ads (taxas, descontos, reembolsos).
+    lucro_antes_ads = repasse + recarga_ads − custo_fabricacao.
 
 DIMENSÕES:
 1. dim_produtos (item_id BIGINT PK, nome_atual, category_id, status_shopee, data_criacao,
@@ -53,8 +69,12 @@ DIMENSÕES:
 FATOS:
 6. fato_pedidos_venda (order_sn PK, data_hora_criacao TIMESTAMP, uf_destino, status_pedido, motivo_cancelamento_devolucao)
 7. fato_itens_pedido (order_sn FK, model_id FK, quantidade, preco_praticado)
-8. fato_repasse_escrow (order_sn PK/FK, comissao_shopee, taxa_servico, taxa_transacao,
-   custo_frete_reverso, lucro_liquido_absoluto) — repasse REAL da Shopee, nível do PEDIDO inteiro.
+8. fato_repasse_escrow (order_sn PK/FK, preco_produtos, comissao_shopee, taxa_servico, taxa_transacao,
+   comissao_afiliado, cupom_vendedor, recarga_ads, seguro_frete, frete_liquido_vendedor, reembolso_devolucao,
+   custo_frete_reverso, outros_ajustes, ajuste_pos_venda, lucro_liquido_absoluto, escrow_bruto JSONB, detalhado_em)
+   — repasse REAL da Shopee, nível do PEDIDO inteiro (prefira vw_financeiro_item_pedido, já rateada por item).
+   Conta exata: preco_produtos + frete_liquido_vendedor − (todos os descontos, incluindo recarga_ads)
+   + ajuste_pos_venda − outros_ajustes = lucro_liquido_absoluto. ajuste_pos_venda < 0 = a Shopee tirou dinheiro depois.
 9. fato_trafego_diario (item_id FK, data DATE, impressoes NULL, cliques NULL, visitantes_unicos,
    taxa_rejeicao, adicoes_carrinho, granularidade_origem)
 10. fato_ads_performance_produto (item_id FK, data_registro DATE, tipo_campanha 'GMV_MAX'|'PADRAO',
@@ -81,8 +101,11 @@ SEMÂNTICA IMPORTANTE:
 - item_id = 0 em dim_produtos/ads é a entidade 'LOJA GLOBAL' (gasto de ads da loja, não de um produto).
 - NULL em impressoes/cliques significa "dado não coletado", NUNCA zero medido.
 - granularidade_origem: 'DIARIA' = observação real do dia; 'AGREGADA_PERIODO' = rateio de período maior.
-- Custo de fabricação de uma variação = (peso_gramas convertido pela unidade_medida × custo_por_unidade)
-  + (tempo_impressao_minutos × custo_energia_hora / 60) + custo_embalagem, tudo × (1 + taxa_perda_percentual/100).
+- Pedido UNPAID ainda não é venda (vw_financeiro_item_pedido já o exclui).
+- Custo de fabricação por peça = vw_custo_fabricacao_variacao.custo_total (material + máquina + embalagem,
+  × (1 + perda/100)). dim_materiais.custo_por_unidade é o preço por unidade_medida (normalmente R$/kg).
+- lucro_liquido_absoluto / repasse é o que a Shopee paga — NÃO é lucro: ainda faltam custo de fabricação e anúncios.
+- reembolso_devolucao > 0 = pedido devolvido/reembolsado (o repasse fica perto de zero ou negativo).
 - fato_ads_palavras_chave existe mas é legada e normalmente vazia — prefira fato_ads_performance_produto.
 """
 
@@ -198,9 +221,18 @@ REGRAS DE FUNCIONAMENTO:
 4. Sempre termine a query com LIMIT 50 e use aliases claros em português nas colunas.
 5. Nunca invente tabelas ou colunas fora do schema; se o dado não existe, diga isso ao usuário.
 6. NULL em impressões/cliques é "não coletado" — não trate como zero nem calcule CTR sobre NULL.
-7. Lucro líquido real = lucro_liquido_absoluto do escrow − custo de fabricação (map_engenharia_produto
-   + dim_materiais + dim_maquinas); o escrow é do pedido inteiro, cuidado ao atribuí-lo por item.
-8. Na resposta final, seja executivo: número primeiro, contexto depois, sem citar SQL.
+7. Lucro, taxas e margem: use vw_financeiro_item_pedido (repasse e custo prontos por item) e
+   vw_custo_fabricacao_variacao (custo por peça). NUNCA junte map_engenharia_produto com vendas ou pedidos
+   para somar custo: cada linha de venda repete a engenharia e multiplica material, tempo e embalagem.
+   Lucro = SUM(lucro_antes_ads) − gasto real de anúncios (fato_ads_performance_produto.investimento na mesma
+   janela, agregado numa CTE à parte). Não subtraia recarga_ads de novo: ela já volta no lucro_antes_ads.
+8. Agregação: agregue cada fato (vendas, pedidos, ads) numa CTE própria ANTES de juntar com outras tabelas.
+   Custo de N unidades = custo_total × unidades já somadas.
+9. Sanidade antes de concluir: tempo de impressão acima de 24h, custo por peça acima do preço de venda ou
+   embalagem acima de R$ 5 quase sempre são linhas duplicadas na SUA query. Refaça a consulta antes de responder.
+10. Ao explicar margem ou lucro, mostre a decomposição por unidade: preço → cada desconto da Shopee → repasse →
+    custo (material, máquina, embalagem, perda) → anúncios → lucro. Diga se o repasse é REAL ou ESTIMADO.
+11. Na resposta final, seja executivo: número primeiro, contexto depois, sem citar SQL.
 
 SCHEMA DO BANCO:
 {SCHEMA_DO_BANCO}

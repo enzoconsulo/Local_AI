@@ -57,6 +57,8 @@ def _schema_dossie_disponivel() -> bool:
                 cur.execute("""
                     SELECT to_regclass('public.vw_vendas_diarias_variacao') IS NOT NULL
                        AND to_regclass('public.vw_funil_diario_item') IS NOT NULL
+                       AND to_regclass('public.vw_custo_fabricacao_variacao') IS NOT NULL
+                       AND to_regclass('public.vw_financeiro_item_pedido') IS NOT NULL
                        AND to_regclass('public.fato_promocoes_shopee') IS NOT NULL
                        AND to_regclass('public.fato_devolucoes') IS NOT NULL
                        AND EXISTS (
@@ -118,58 +120,27 @@ WITH vendas_janelas AS (
     WHERE data >= CURRENT_DATE - 30
     GROUP BY model_id
 ),
-lucro_rateado AS (
-    -- Escrow é do PEDIDO: rateia por participação de valor de cada item para
-    -- não somar o lucro do pedido inteiro em cada variação (dupla contagem).
-    -- Pedido ainda sem escrow: estimativa sobre o preço PRATICADO na venda —
-    -- usar o preço ATUAL da variação enviesava a estimativa a cada ajuste de
-    -- preço feito depois da venda (exatamente o que o Atuador faz).
-    SELECT
-        i.model_id,
-        p.data_hora_criacao::date AS data,
-        SUM(
-            COALESCE(
-                r.lucro_liquido_absoluto
-                    * (i.preco_praticado * i.quantidade) / NULLIF(tot.valor_pedido, 0),
-                ((i.preco_praticado * 0.80) - 3.00) * i.quantidade
-            )
-        ) AS lucro_liquido,
-        SUM(
-            COALESCE(
-                (r.comissao_shopee + r.taxa_servico + r.taxa_transacao)
-                    * (i.preco_praticado * i.quantidade) / NULLIF(tot.valor_pedido, 0),
-                ((i.preco_praticado * 0.20) + 3.00) * i.quantidade
-            )
-        ) AS taxas_shopee_total,
-        SUM(i.quantidade) AS unidades
-    FROM fato_itens_pedido i
-    JOIN fato_pedidos_venda p ON p.order_sn = i.order_sn
-    LEFT JOIN fato_repasse_escrow r ON r.order_sn = i.order_sn
-    JOIN (
-        -- Total do pedido calculado apenas para a janela de 30 dias: sem o
-        -- filtro, este agregado varria TODO o histórico de itens a cada
-        -- auditoria e crescia sem limite junto com a base.
-        SELECT i2.order_sn, SUM(i2.preco_praticado * i2.quantidade) AS valor_pedido
-        FROM fato_itens_pedido i2
-        JOIN fato_pedidos_venda p2 ON p2.order_sn = i2.order_sn
-        WHERE p2.data_hora_criacao >= CURRENT_DATE - INTERVAL '30 days'
-        GROUP BY i2.order_sn
-    ) tot ON tot.order_sn = i.order_sn
-    WHERE p.data_hora_criacao >= CURRENT_DATE - INTERVAL '30 days'
-      AND p.status_pedido NOT IN {STATUS_CANCELADOS}
-    GROUP BY i.model_id, p.data_hora_criacao::date
-),
 lucro_janelas AS (
+    -- Fonte única do financeiro por item (migração 19): repasse rateado pelo
+    -- valor do item e detalhado; pedido ainda não liquidado com repasse
+    -- ESTIMADO pela fração real que a própria variação costuma receber (a
+    -- estimativa fixa antiga, 80% − R$ 3, era otimista em vários produtos);
+    -- custo de fabricação já multiplicado pela quantidade de cada item.
     SELECT
         model_id,
-        COALESCE(SUM(lucro_liquido) FILTER (WHERE data >= CURRENT_DATE - 7), 0) AS receita_liquida_7d,
-        COALESCE(SUM(lucro_liquido), 0)                                         AS receita_liquida_30d,
-        -- Taxa unitária PONDERADA pelas unidades (total de taxas ÷ total de
-        -- unidades): a média de médias antiga pesava igual dias de 1 venda e
-        -- dias de 10 vendas.
-        SUM(taxas_shopee_total) FILTER (WHERE data >= CURRENT_DATE - 7)
-            / NULLIF(SUM(unidades) FILTER (WHERE data >= CURRENT_DATE - 7), 0)  AS taxa_shopee_7d
-    FROM lucro_rateado
+        COALESCE(SUM(repasse) FILTER (WHERE data >= CURRENT_DATE - 7), 0)         AS receita_liquida_7d,
+        COALESCE(SUM(repasse), 0)                                                 AS receita_liquida_30d,
+        COALESCE(SUM(lucro_antes_ads) FILTER (WHERE data >= CURRENT_DATE - 7), 0) AS lucro_antes_ads_7d,
+        COALESCE(SUM(lucro_antes_ads), 0)                                         AS lucro_antes_ads_30d,
+        COALESCE(SUM(recarga_ads) FILTER (WHERE data >= CURRENT_DATE - 7), 0)     AS recarga_ads_7d,
+        COALESCE(SUM(recarga_ads), 0)                                             AS recarga_ads_30d,
+        -- Tudo que a Shopee retém por unidade, SEM a recarga de anúncios (que
+        -- vai para o saldo de anúncios), PONDERADO pelas unidades: a média de
+        -- médias pesava igual dias de 1 e de 10 vendas.
+        SUM(retido_shopee) FILTER (WHERE data >= CURRENT_DATE - 7)
+            / NULLIF(SUM(quantidade) FILTER (WHERE data >= CURRENT_DATE - 7), 0) AS taxa_shopee_7d
+    FROM vw_financeiro_item_pedido
+    WHERE data >= CURRENT_DATE - 30
     GROUP BY model_id
 ),
 funil_janelas AS (
@@ -523,6 +494,14 @@ SELECT
     COALESCE(lj.receita_liquida_7d, 0)   AS receita_liquida_7d,
     COALESCE(lj.receita_liquida_30d, 0)  AS receita_liquida_30d,
     COALESCE(lj.taxa_shopee_7d, 0)       AS taxa_shopee_unitaria,
+    COALESCE(lj.lucro_antes_ads_7d, 0)   AS lucro_antes_ads_7d,
+    COALESCE(lj.lucro_antes_ads_30d, 0)  AS lucro_antes_ads_30d,
+    COALESCE(lj.recarga_ads_7d, 0)       AS recarga_ads_7d,
+    COALESCE(lj.recarga_ads_30d, 0)      AS recarga_ads_30d,
+    -- Planilha de anúncios atualizada nos últimos 7 dias? Sem ela, o gasto de
+    -- ads importado está incompleto e a recarga do repasse é a melhor medida.
+    (SELECT COALESCE(MAX(data_registro) >= CURRENT_DATE - 7, FALSE)
+     FROM fato_ads_performance_produto) AS ads_importados_recentes,
 
     -- Funil Orgânico e Pago (nível do item; rateado por variação no Python)
     COALESCE(f.impressoes_org, 0)        AS impressoes_org,
@@ -573,19 +552,9 @@ SELECT
     COALESCE(macro.visitas_macro_7d, 0)  AS visitas_macro_7d,
     COALESCE(macro.estoque_macro_7d, 0)  AS estoque_macro_7d,
 
-    -- COALESCE em máquina/tempo: o mapeamento enxuto (só filamento + peso, da
-    -- página de Lucro) não cadastra máquina — sem o COALESCE, o NULL da
-    -- energia anulava o custo do material inteiro.
-    (
-        (
-            (CASE WHEN mat.unidade_medida = 'kg'
-                  THEN (eng.peso_gramas / 1000.0)
-                  ELSE eng.peso_gramas END
-             * mat.custo_por_unidade)
-            + (COALESCE(eng.tempo_impressao_minutos, 0) * COALESCE(maq.custo_energia_hora, 0) / 60.0)
-            + COALESCE(eng.custo_embalagem, 0)
-        ) * (1 + (COALESCE(eng.taxa_perda_percentual, 0) / 100.0))
-    )                                    AS custo_fabricacao_com_refugo,
+    -- Custo por peça da fonte única (migração 19: material + máquina +
+    -- embalagem, × perda). NULL = variação sem material mapeado.
+    cf.custo_total                       AS custo_fabricacao_com_refugo,
 
     eng.peso_gramas,
     eng.taxa_perda_percentual,
@@ -631,7 +600,7 @@ FROM dim_produtos p
 JOIN dim_variacoes v              ON p.item_id   = v.item_id
 LEFT JOIN map_engenharia_produto eng ON v.model_id = eng.model_id
 LEFT JOIN dim_materiais mat       ON eng.id_material = mat.id_material
-LEFT JOIN dim_maquinas  maq       ON eng.id_maquina  = maq.id_maquina
+LEFT JOIN vw_custo_fabricacao_variacao cf ON v.model_id = cf.model_id
 LEFT JOIN vendas_janelas vj       ON v.model_id  = vj.model_id
 LEFT JOIN lucro_janelas  lj       ON v.model_id  = lj.model_id
 LEFT JOIN funil_janelas  f        ON p.item_id   = f.item_id
@@ -798,8 +767,9 @@ def gerar_dossie_produtos_com_memoria() -> list[dict]:
     """Extrai o DW, aplica a camada determinística e anexa a memória analítica."""
     if not _schema_dossie_disponivel():
         raise MigracaoPendenteError(
-            "O banco não tem as views de pré-agregação (migração 12) ou a coluna de "
-            "imagem do produto (migração 15). Execute `python init_db/aplicar_migrations.py` "
+            "O banco não tem as views de pré-agregação (migração 12), a coluna de imagem do "
+            "produto (migração 15) ou as views de custo e financeiro por item (migração 19). "
+            "Execute `python init_db/aplicar_migrations.py` "
             "e recarregue a página."
         )
 
@@ -832,6 +802,14 @@ def _montar_dados_variacao(r, alocacoes: dict | None = None) -> dict:
     custo_fab    = float(r["custo_fabricacao_com_refugo"] or 0)
     receita_liq  = float(r["receita_liquida_7d"])
     receita_liq_30d = float(r["receita_liquida_30d"] or 0)
+    # Lucro antes de anúncios (migração 19) = repasse + recarga de anúncios − custo
+    # de fabricação. A recarga (parte do preço que a Shopee desconta para o SALDO
+    # de anúncios) volta aqui porque o custo de anúncio entra uma vez só, abaixo.
+    lucro_antes_ads = float(r["lucro_antes_ads_7d"] or 0)
+    lucro_antes_ads_30d = float(r["lucro_antes_ads_30d"] or 0)
+    recarga_ads_7d = float(r["recarga_ads_7d"] or 0)
+    recarga_ads_30d = float(r["recarga_ads_30d"] or 0)
+    ads_importados_recentes = bool(r["ads_importados_recentes"])
 
     taxa_shopee_unitaria = float(r["taxa_shopee_unitaria"] or 0)
     if taxa_shopee_unitaria <= 0:
@@ -916,8 +894,13 @@ def _montar_dados_variacao(r, alocacoes: dict | None = None) -> dict:
     visitas_macro_7d = float(r["visitas_macro_7d"] or 0)
     estoque_macro_7d = float(r["estoque_macro_7d"] or 0)
 
-    lucro_operacional    = receita_liq - (custo_fab * vendas) - gasto_ads
-    lucro_operacional_30d = receita_liq_30d - (custo_fab * vendas_30d) - gasto_ads_30d
+    # Anúncios entram UMA vez: o gasto real rateado da planilha de anúncios. Antes o
+    # gasto era subtraído de um repasse que já vinha sem a recarga — dupla contagem.
+    # Sem planilha recente, a recarga descontada do repasse é a melhor medida.
+    custo_ads_7d  = gasto_ads if ads_importados_recentes else recarga_ads_7d
+    custo_ads_30d = gasto_ads_30d if ads_importados_recentes else recarga_ads_30d
+    lucro_operacional     = lucro_antes_ads - custo_ads_7d
+    lucro_operacional_30d = lucro_antes_ads_30d - custo_ads_30d
     roas_atual           = round(receita_liq / gasto_ads, 2) if gasto_ads > 0 else 0
     retorno_ads_30d      = round(receita_liq_30d / gasto_ads_30d, 2) if gasto_ads_30d > 0 else 0
     taxa_conversao       = round(vendas / visitas * 100, 2) if visitas > 0 else 0
@@ -1060,6 +1043,11 @@ def _montar_dados_variacao(r, alocacoes: dict | None = None) -> dict:
         "taxa_abandono_carrinho_perc":  taxa_abandono,
         "lucro_liquido_real_7d":        round(lucro_operacional, 2),
         "lucro_liquido_real_30d":       round(lucro_operacional_30d, 2),
+        # Transparência do lucro (fora do fingerprint: não dispara nova análise de IA)
+        "FINANCEIRO_lucro_antes_ads_30d": round(lucro_antes_ads_30d, 2),
+        "FINANCEIRO_recarga_ads_30d":     round(recarga_ads_30d, 2),
+        "FINANCEIRO_custo_ads_30d":       round(custo_ads_30d, 2),
+        "FINANCEIRO_fonte_custo_ads":     "gasto_importado" if ads_importados_recentes else "recarga_do_repasse",
         "REPUTACAO_estrelas":               float(r["estrelas"]),
         "REPUTACAO_curtidas_favoritos":     r["curtidas_favoritos"],
         "LOGISTICA_capacidade_material_restante": capacidade_maxima,

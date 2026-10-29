@@ -79,6 +79,8 @@ SONDAGENS = {
         "AND column_name = 'metric_value' AND numeric_scale = 4)"
     ),
     "17_migration_pos_venda_e_promocoes.sql": _sonda_objeto("fato_promocoes_shopee", "fato_devolucoes"),
+    "18_migration_detalhe_repasse.sql": _sonda_coluna("fato_repasse_escrow", "detalhado_em"),
+    "19_migration_custo_e_financeiro_por_item.sql": _sonda_objeto("vw_custo_fabricacao_variacao", "vw_financeiro_item_pedido"),
 }
 
 
