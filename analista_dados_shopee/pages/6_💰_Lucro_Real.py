@@ -20,7 +20,7 @@ Decisões de desenho:
     do item (tempo, máquina e perda ficam na página 🏭 — o upsert preserva).
 """
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pandas as pd
@@ -168,6 +168,77 @@ def carregar_anuncios_do_produto(item_id: int, dias: int) -> tuple[float, bool]:
             return float(gasto or 0), bool(recente)
 
 
+MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho",
+         "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+
+
+def _rotulo_mes(mes: date) -> str:
+    rotulo = f"{MESES[mes.month - 1]}/{mes.year}"
+    hoje = date.today()
+    return f"{rotulo} (em andamento)" if (mes.year, mes.month) == (hoje.year, hoje.month) else rotulo
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def carregar_meses_com_venda() -> list[date]:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT date_trunc('month', data)::date AS mes
+                FROM vw_financeiro_item_pedido
+                ORDER BY mes DESC;
+            """)
+            return [r[0] for r in cur.fetchall()]
+
+
+@st.cache_data(ttl=120, show_spinner="Calculando o lucro do mês (local, sem IA)...")
+def carregar_lucro_do_mes(mes: date) -> tuple[pd.DataFrame, bool]:
+    """Lucro por produto num mês do calendário, com a mesma regra do dossiê: anúncios
+    entram uma vez, pelo gasto real da planilha quando ela cobre o mês e pela
+    recarga descontada do repasse quando não cobre. Retorna (df, planilha cobre o mês?)."""
+    fim = (mes.replace(day=28) + timedelta(days=4)).replace(day=1)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT EXISTS (SELECT 1 FROM fato_ads_performance_produto
+                               WHERE data_registro >= %(ini)s AND data_registro < %(fim)s);
+            """, {"ini": mes, "fim": fim})
+            ads_no_mes = bool(cur.fetchone()[0])
+            # FULL JOIN: produto que só gastou com anúncio no mês, sem vender, também tem lucro (negativo).
+            cur.execute("""
+                WITH vendas AS (
+                    SELECT item_id,
+                           SUM(quantidade)                                 AS vendas,
+                           SUM(lucro_antes_ads)                            AS lucro_antes_ads,
+                           SUM(COALESCE(recarga_ads, 0))                   AS recarga_ads,
+                           COUNT(*) FILTER (WHERE origem_repasse <> 'REAL') AS itens_estimados
+                    FROM vw_financeiro_item_pedido
+                    WHERE data >= %(ini)s AND data < %(fim)s
+                    GROUP BY item_id
+                ),
+                ads AS (
+                    SELECT item_id, SUM(investimento) AS gasto_ads
+                    FROM fato_ads_performance_produto
+                    WHERE data_registro >= %(ini)s AND data_registro < %(fim)s
+                    GROUP BY item_id
+                )
+                SELECT COALESCE(v.item_id, a.item_id)   AS item_id,
+                       p.nome_atual,
+                       COALESCE(v.vendas, 0)            AS vendas,
+                       COALESCE(v.lucro_antes_ads, 0)   AS lucro_antes_ads,
+                       COALESCE(v.recarga_ads, 0)       AS recarga_ads,
+                       COALESCE(v.itens_estimados, 0)   AS itens_estimados,
+                       COALESCE(a.gasto_ads, 0)         AS gasto_ads
+                FROM vendas v
+                FULL JOIN ads a ON a.item_id = v.item_id
+                JOIN dim_produtos p ON p.item_id = COALESCE(v.item_id, a.item_id);
+            """, {"ini": mes, "fim": fim})
+            df = _dataframe(cur)
+    if not df.empty:
+        df["custo_ads"] = df["gasto_ads"] if ads_no_mes else df["recarga_ads"]
+        df["lucro"] = df["lucro_antes_ads"] - df["custo_ads"]
+    return df, ads_no_mes
+
+
 def limpar_caches():
     carregar_materiais.clear()
     carregar_mapeamento_itens.clear()
@@ -176,6 +247,8 @@ def limpar_caches():
     carregar_pedidos_do_produto.clear()
     carregar_custo_do_produto.clear()
     carregar_anuncios_do_produto.clear()
+    carregar_meses_com_venda.clear()
+    carregar_lucro_do_mes.clear()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -447,7 +520,15 @@ with aba_lucro:
             "anúncios. Abra a conta de qualquer produto na aba 🔍 Raio-X."
         )
 
-        lucro7, lucro30 = st.tabs(["Últimos 7 dias", "Últimos 30 dias"])
+        def texto_custo(item_id):
+            custos = por_item.get(item_id, {}).get("custos")
+            if not custos:
+                return "⚠️ não mapeado"
+            if min(custos) == max(custos):
+                return _fmt_moeda(min(custos))
+            return f"{_fmt_moeda(min(custos))}–{_fmt_moeda(max(custos))}"
+
+        lucro7, lucro30, lucro_mes = st.tabs(["Últimos 7 dias", "Últimos 30 dias", "📅 Por mês"])
         for aba_janela, sufixo, rotulo_janela in ((lucro7, "7d", "7 dias"), (lucro30, "30d", "30 dias")):
             with aba_janela:
                 df_lucro = pd.DataFrame([
@@ -456,10 +537,7 @@ with aba_lucro:
                         "Produto": m["nome"][:60],
                         f"Vendas {rotulo_janela}": m[f"vendas_{sufixo}"],
                         f"Lucro {rotulo_janela}": round(m[f"lucro_{sufixo}"], 2),
-                        "Custo/peça": (
-                            _fmt_moeda(min(m["custos"])) if m["custos"] and min(m["custos"]) == max(m["custos"])
-                            else f"{_fmt_moeda(min(m['custos']))}–{_fmt_moeda(max(m['custos']))}" if m["custos"] else "⚠️ não mapeado"
-                        ),
+                        "Custo/peça": texto_custo(iid),
                         "Lucro por unidade": (
                             round(m[f"lucro_{sufixo}"] / m[f"vendas_{sufixo}"], 2) if m[f"vendas_{sufixo}"] else None
                         ),
@@ -474,6 +552,61 @@ with aba_lucro:
                         "Lucro por unidade": st.column_config.NumberColumn("Lucro por unidade", format=FORMATO_MOEDA),
                     },
                 )
+
+        with lucro_mes:
+            meses = carregar_meses_com_venda()
+            if not meses:
+                st.info("Nenhuma venda registrada ainda.")
+            else:
+                mes = st.selectbox("Mês", meses, format_func=_rotulo_mes, key="lucro_mes_escolhido")
+                df_mes, ads_no_mes = carregar_lucro_do_mes(mes)
+                if df_mes.empty:
+                    st.info(f"Nenhuma venda nem gasto de anúncio em {_rotulo_mes(mes)}.")
+                else:
+                    df_mes = df_mes.sort_values("lucro", ascending=False)
+                    vendas_mes = int(df_mes["vendas"].sum())
+                    lucro_total_mes = float(df_mes["lucro"].sum())
+                    k1, k2, k3, k4 = st.columns(4)
+                    k1.metric("💰 Lucro líquido no mês", _fmt_moeda(lucro_total_mes))
+                    k2.metric("📦 Unidades vendidas", vendas_mes)
+                    k3.metric("Lucro por unidade", _fmt_moeda(lucro_total_mes / vendas_mes) if vendas_mes else "—")
+                    k4.metric("📣 Anúncios no mês", _fmt_moeda(float(df_mes["custo_ads"].sum())))
+
+                    avisos_mes = []
+                    if not ads_no_mes:
+                        avisos_mes.append(
+                            "a planilha de anúncios não tem dados deste mês: o custo de anúncio é a recarga "
+                            "descontada do repasse (importe a planilha do mês na página 🔄 para usar o gasto real)"
+                        )
+                    estimados = int(df_mes["itens_estimados"].sum())
+                    if estimados:
+                        avisos_mes.append(
+                            f"{estimados} item(ns) de pedido ainda não pago(s) pela Shopee entram com repasse estimado"
+                        )
+                    if avisos_mes:
+                        st.caption("ℹ️ " + "; ".join(avisos_mes) + ".")
+
+                    df_tabela_mes = pd.DataFrame([
+                        {
+                            "Foto": fotos.get(int(r.item_id)),
+                            "Produto": str(r.nome_atual)[:60],
+                            "Vendas no mês": int(r.vendas),
+                            "Lucro no mês": round(float(r.lucro), 2),
+                            "Anúncios": round(float(r.custo_ads), 2),
+                            "Custo/peça": texto_custo(int(r.item_id)),
+                            "Lucro por unidade": round(float(r.lucro) / r.vendas, 2) if r.vendas else None,
+                        }
+                        for r in df_mes.itertuples()
+                    ])
+                    st.dataframe(
+                        df_tabela_mes, hide_index=True, use_container_width=True, height=600,
+                        column_config={
+                            "Foto": st.column_config.ImageColumn("Foto", width="small"),
+                            "Lucro no mês": st.column_config.NumberColumn("Lucro no mês", format=FORMATO_MOEDA),
+                            "Anúncios": st.column_config.NumberColumn("Anúncios", format=FORMATO_MOEDA),
+                            "Lucro por unidade": st.column_config.NumberColumn("Lucro por unidade", format=FORMATO_MOEDA),
+                        },
+                    )
         st.caption(
             "📌 Produto com vendas e lucro NEGATIVO = cada venda piora o resultado (taxa + fabricação acima do "
             "preço). Os mesmos números alimentam o plano de ação da 📊 Visão Central e o 🧠 Cérebro."
